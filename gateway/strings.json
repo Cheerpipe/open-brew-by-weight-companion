@@ -1,0 +1,84 @@
+{
+  "en": {
+    "lang": "en",
+    "title": "Secure access",
+    "intro": "Use Open Brew by Weight at <strong>@SECURE_URL@</strong>. Over this secure address your browser keeps a full copy of the app: it opens instantly and reconnects on its own when the controller comes back.",
+    "checking": "Checking whether this device trusts the secure address…",
+    "trusted": "This device trusts the secure address. You are all set.",
+    "untrusted": "This device does not trust the secure address yet. Follow the steps below.",
+    "found": "Found {name} at {address}",
+    "looking": "Looking for the controller on your network…",
+    "open": "Open the Web UI",
+    "qr": "Setting up a phone or tablet? Scan this code with its camera to open this page there.",
+    "setup_title": "Set up each device once",
+    "setup_intro": "Each phone, tablet or computer needs to trust this gateway's certificate one time. Pick your device and follow the steps.",
+    "only_name": "The certificate only works for <code>@HOSTNAME@</code>; it cannot be used to impersonate any other website.",
+    "ios": "iPhone and iPad",
+    "ios_steps": [
+      "Open this page in <strong>Safari</strong> and tap <a href=\"/@CA_NAME@.mobileconfig\">Download the profile</a>. Choose <strong>Allow</strong>.",
+      "Open <strong>Settings</strong>, tap <strong>Profile Downloaded</strong> near the top and then <strong>Install</strong>.",
+      "Go to <strong>Settings → General → About</strong>, scroll to the bottom, tap <strong>Certificate Trust Settings</strong> and switch on <strong>Open Brew by Weight local CA</strong>.",
+      "Open <a href=\"@SECURE_URL@/\">@SECURE_URL@</a>. To add it to your Home Screen, tap <strong>Share → Add to Home Screen</strong>."
+    ],
+    "mac_steps": [
+      "<a href=\"/@CA_NAME@.crt\">Download the certificate</a> and double-click it. Keychain Access opens; add it to the <strong>login</strong> keychain.",
+      "In Keychain Access, double-click <strong>Open Brew by Weight local CA</strong>, open <strong>Trust</strong> and set <strong>When using this certificate</strong> to <strong>Always Trust</strong>. Close the window and confirm with your password.",
+      "Restart your browser and open <a href=\"@SECURE_URL@/\">@SECURE_URL@</a>."
+    ],
+    "windows_steps": [
+      "<a href=\"/@CA_NAME@.crt\">Download the certificate</a> and open it.",
+      "Choose <strong>Install Certificate…</strong>, then <strong>Current User</strong>.",
+      "Pick <strong>Place all certificates in the following store</strong>, choose <strong>Browse…</strong> and select <strong>Trusted Root Certification Authorities</strong>. Finish and answer <strong>Yes</strong> to the security warning.",
+      "Restart your browser and open <a href=\"@SECURE_URL@/\">@SECURE_URL@</a>."
+    ],
+    "android_steps": [
+      "<a href=\"/@CA_NAME@.crt\">Download the certificate</a> in Chrome.",
+      "Open <strong>Settings</strong> and search for <strong>CA certificate</strong>. Usually it is under <strong>Security → More security settings → Encryption &amp; credentials → Install a certificate → CA certificate</strong>.",
+      "Tap <strong>Install anyway</strong> and pick the downloaded file. Android may ask you to set a screen lock first.",
+      "Open <a href=\"@SECURE_URL@/\">@SECURE_URL@</a> in Chrome. Android 12 or newer is needed to open <code>.local</code> addresses."
+    ],
+    "firefox": "Firefox keeps its own list of certificates on some systems. If it still shows a warning, import the certificate under <strong>Settings → Privacy &amp; Security → View Certificates → Authorities</strong> and trust it for websites.",
+    "fingerprint": "To check the download, compare its SHA-256 fingerprint:"
+  },
+  "es": {
+    "lang": "es",
+    "title": "Acceso seguro",
+    "intro": "Usa Open Brew by Weight en <strong>@SECURE_URL@</strong>. Con esta dirección segura, tu navegador guarda una copia completa de la app: abre al instante y se reconecta sola cuando el controlador vuelve.",
+    "checking": "Comprobando si este dispositivo confía en la dirección segura…",
+    "trusted": "Este dispositivo confía en la dirección segura. Todo listo.",
+    "untrusted": "Este dispositivo aún no confía en la dirección segura. Sigue los pasos de abajo.",
+    "found": "Controlador {name} encontrado en {address}",
+    "looking": "Buscando el controlador en tu red…",
+    "open": "Abrir la Web UI",
+    "qr": "¿Vas a configurar un teléfono o una tablet? Escanea este código con su cámara para abrir esta página allí.",
+    "setup_title": "Configura cada dispositivo una vez",
+    "setup_intro": "Cada teléfono, tablet o computador debe confiar una sola vez en el certificado de este gateway. Elige tu dispositivo y sigue los pasos.",
+    "only_name": "El certificado solo sirve para <code>@HOSTNAME@</code>; no se puede usar para suplantar ningún otro sitio web.",
+    "ios": "iPhone y iPad",
+    "ios_steps": [
+      "Abre esta página en <strong>Safari</strong> y toca <a href=\"/@CA_NAME@.mobileconfig\">Descargar el perfil</a>. Elige <strong>Permitir</strong>.",
+      "Abre <strong>Ajustes</strong>, toca <strong>Perfil descargado</strong> cerca de arriba y luego <strong>Instalar</strong>.",
+      "Ve a <strong>Ajustes → General → Información</strong>, baja hasta el final, toca <strong>Ajustes de confianza de certificados</strong> y activa <strong>Open Brew by Weight local CA</strong>.",
+      "Abre <a href=\"@SECURE_URL@/\">@SECURE_URL@</a>. Para tenerla en tu pantalla de inicio, toca <strong>Compartir → Agregar a inicio</strong>."
+    ],
+    "mac_steps": [
+      "<a href=\"/@CA_NAME@.crt\">Descarga el certificado</a> y ábrelo con doble clic. Se abre Acceso a Llaveros; agrégalo al llavero <strong>inicio de sesión</strong>.",
+      "En Acceso a Llaveros, haz doble clic en <strong>Open Brew by Weight local CA</strong>, abre <strong>Confiar</strong> y en <strong>Al utilizar este certificado</strong> elige <strong>Confiar siempre</strong>. Cierra la ventana y confirma con tu contraseña.",
+      "Reinicia el navegador y abre <a href=\"@SECURE_URL@/\">@SECURE_URL@</a>."
+    ],
+    "windows_steps": [
+      "<a href=\"/@CA_NAME@.crt\">Descarga el certificado</a> y ábrelo.",
+      "Elige <strong>Instalar certificado…</strong> y luego <strong>Usuario actual</strong>.",
+      "Elige <strong>Colocar todos los certificados en el siguiente almacén</strong>, luego <strong>Examinar…</strong> y selecciona <strong>Entidades de certificación raíz de confianza</strong>. Termina y responde <strong>Sí</strong> a la advertencia de seguridad.",
+      "Reinicia el navegador y abre <a href=\"@SECURE_URL@/\">@SECURE_URL@</a>."
+    ],
+    "android_steps": [
+      "<a href=\"/@CA_NAME@.crt\">Descarga el certificado</a> en Chrome.",
+      "Abre <strong>Ajustes</strong> y busca <strong>certificado de CA</strong>. Suele estar en <strong>Seguridad → Más ajustes de seguridad → Encriptación y credenciales → Instalar un certificado → Certificado de CA</strong>.",
+      "Toca <strong>Instalar de todos modos</strong> y elige el archivo descargado. Android puede pedirte que configures un bloqueo de pantalla antes.",
+      "Abre <a href=\"@SECURE_URL@/\">@SECURE_URL@</a> en Chrome. Se necesita Android 12 o más reciente para abrir direcciones <code>.local</code>."
+    ],
+    "firefox": "En algunos sistemas Firefox usa su propia lista de certificados. Si sigue mostrando una advertencia, importa el certificado en <strong>Ajustes → Privacidad y seguridad → Ver certificados → Autoridades</strong> y márcalo como confiable para sitios web.",
+    "fingerprint": "Para verificar la descarga, compara su huella SHA-256:"
+  }
+}

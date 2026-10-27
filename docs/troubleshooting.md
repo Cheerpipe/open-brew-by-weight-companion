@@ -1,13 +1,23 @@
 # Troubleshooting
 
-Start with the gateway's own log, from its folder:
+Start by running the setup again, from the gateway's folder. It checks the
+running gateway step by step, says what is wrong, and asks for what it needs:
+
+```bash
+./setup
+```
+
+Answer **yes** when it offers to keep your settings. For more detail, read
+the gateway's own log:
 
 ```bash
 docker compose logs -f
 ```
 
 It reports the name it publishes, the controller it found and its address,
-certificate renewals, and anything it ignored.
+certificate renewals, and every device it skipped and why.
+`docker compose ps` shows the gateway as `healthy` once it serves the setup
+page and the secure address and has found a controller.
 
 ## `docker compose up` fails with a network error
 

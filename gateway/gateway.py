@@ -9,6 +9,7 @@ polled: discovery relies on mDNS announcements and the browser's own schedule.
 
 import hashlib
 import html
+import json
 import os
 import plistlib
 import queue
@@ -16,7 +17,9 @@ import signal
 import socket
 import ssl
 import subprocess
+import sys
 import threading
+import urllib.request
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -30,7 +33,8 @@ LEAF_DAYS = 397  # Apple rejects TLS server certificates valid for more than 398
 RENEW_BEFORE_S = 30 * 86400
 CERT_CHECK_S = 12 * 3600
 INFO_TIMEOUT_MS = 10000  # A controller in Wi-Fi power save can answer late.
-RETRY_S = (30, 60, 120, 300, 600)  # Fresh mDNS queries only while no controller is known.
+RETRY_S = (30, 60, 120, 300, 600)  # Fresh mDNS queries only while no controller is confirmed.
+CONTROLLER_FILE = "controller.json"
 OPENSSL_CNF = "[req]\ndistinguished_name=dn\n[dn]\n"
 
 
@@ -166,48 +170,141 @@ def site_url(scheme, cfg, port, default):
     return f"{scheme}://{cfg['hostname']}" + ("" if port == default else f":{port}")
 
 
+def upstream(target):
+    return target[1][0] + ("" if target[1][1] == 80 else f":{target[1][1]}") if target else "127.0.0.1:9"
+
+
+def qr_svg(text):
+    try:
+        return subprocess.run(["qrencode", "-t", "SVG", "--inline", "-m", "1", "-o", "-", text],
+                              capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        log(f"setup page shows no QR code: {error}")
+        return ""
+
+
 def write_site(cfg, data, run, target):
-    """Render nginx.conf and the setup page for the current controller address."""
+    """Render nginx.conf and the setup page, in every language, for the current controller."""
     www = run / "www"
     www.mkdir(parents=True, exist_ok=True)
     www.chmod(0o755)
     ca_pem = (data / f"{CA_NAME}.crt").read_text()
     ca_der = ssl.PEM_cert_to_DER_cert(ca_pem)
-    secure = site_url("https", cfg, cfg["https_port"], 443)
-    upstream = target[1][0] + ("" if target[1][1] == 80 else f":{target[1][1]}") if target else "127.0.0.1:9"
     fingerprint = hashlib.sha256(ca_der).hexdigest().upper()
-    files = {
-        f"{CA_NAME}.crt": ca_pem.encode(),
-        f"{CA_NAME}.mobileconfig": mobileconfig(ca_der, cfg["hostname"]),
-        "index.html": fill((HERE / "setup.html").read_text(), {
-            "SECURE_URL": html.escape(secure),
-            "HOSTNAME": html.escape(cfg["hostname"]),
-            "CA_NAME": CA_NAME,
-            "FINGERPRINT": ":".join(fingerprint[i:i + 2] for i in range(0, len(fingerprint), 2)),
-            "CONTROLLER": html.escape(f"Found {target[0]} at {upstream}" if target
-                                      else "Looking for the controller on your network…"),
-        }).encode(),
+    values = {
+        "SECURE_URL": html.escape(site_url("https", cfg, cfg["https_port"], 443)),
+        "HOSTNAME": html.escape(cfg["hostname"]),
+        "CA_NAME": CA_NAME,
+        "FINGERPRINT": ":".join(fingerprint[i:i + 2] for i in range(0, len(fingerprint), 2)),
+        "QR": qr_svg(site_url("http", cfg, cfg["http_port"], 80)),
     }
+    files = {f"{CA_NAME}.crt": ca_pem.encode(), f"{CA_NAME}.mobileconfig": mobileconfig(ca_der, cfg["hostname"])}
+    for lang, strings in json.loads((HERE / "strings.json").read_text()).items():
+        controller = strings["found"].format(name=target[0], address=upstream(target)) if target else strings["looking"]
+        page = fill((HERE / "setup.html").read_text(), {
+            "T_" + key.upper(): "".join(f"<li>{item}</li>" for item in text) if isinstance(text, list) else text
+            for key, text in strings.items()})
+        files[f"index.{lang}.html"] = fill(page, {**values, "CONTROLLER": html.escape(controller)}).encode()
     for name, content in files.items():
         (www / name).write_bytes(content)
         (www / name).chmod(0o644)
     (run / "nginx.conf").write_text(fill((HERE / "nginx.conf.in").read_text(), {
         "RUN": run, "DATA": data, "HTTP_PORT": cfg["http_port"], "HTTPS_PORT": cfg["https_port"],
-        "UPSTREAM": upstream, "OFFLINE": "" if target else "return 503;",
+        "UPSTREAM": upstream(target), "OFFLINE": "" if target else "return 503;",
     }))
+
+
+def write_status(cfg, data, run, target, source, seen):
+    """Publish the gateway's state at /__gateway/status for ./setup, health checks and monitoring."""
+    expires = openssl("x509", "-in", str(data / "server.crt"), "-noout", "-enddate").strip().split("=", 1)[1]
+    status = {
+        "hostname": cfg["hostname"], "ip": cfg["ip"], "mdns_publish": cfg["mdns_publish"],
+        "setup_url": site_url("http", cfg, cfg["http_port"], 80),
+        "secure_url": site_url("https", cfg, cfg["https_port"], 443),
+        "controller": {"name": target[0], "ip": target[1][0], "port": target[1][1], "source": source}
+        if target else None,
+        "seen": seen, "certificate_expires": expires,
+    }
+    temporary = run / "status.json.tmp"
+    temporary.write_text(json.dumps(status, indent=2))
+    temporary.chmod(0o644)
+    temporary.replace(run / "status.json")
+
+
+def controller_filter(cfg):
+    return f"{cfg['controller']}|{cfg['controller_name']}"
+
+
+def remembered_controller(cfg, data):
+    """Controller last found over mDNS with the same settings, used at start until mDNS confirms it."""
+    try:
+        saved = json.loads((data / CONTROLLER_FILE).read_text())
+        return (saved["name"], (saved["ip"], saved["port"])) if saved["filter"] == controller_filter(cfg) else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def remember_controller(cfg, data, target):
+    (data / CONTROLLER_FILE).write_text(json.dumps(
+        {"name": target[0], "ip": target[1][0], "port": target[1][1], "filter": controller_filter(cfg)}))
+
+
+def https_get(cfg, data, path):
+    """GET path through the gateway's own HTTPS server, verifying it against the gateway CA."""
+    context = ssl.create_default_context(cafile=str(data / f"{CA_NAME}.crt"))
+    with socket.create_connection(("127.0.0.1", cfg["https_port"]), timeout=15) as raw:
+        with context.wrap_socket(raw, server_hostname=cfg["hostname"]) as tls:
+            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {cfg['hostname']}\r\nConnection: close\r\n\r\n".encode())
+            return int(tls.recv(64).split()[1])
+
+
+def check(cfg, data, through_controller):
+    """Probe the running gateway from inside its container: one line per finding, exit 1 on a problem.
+
+    Without --controller nothing reaches the controller, so Docker health checks add no Wi-Fi traffic.
+    """
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['http_port']}/__gateway/status", timeout=5) as reply:
+            status = json.load(reply)
+        print("ok setup-page")
+        print(f"ok https {https_get(cfg, data, '/__gateway/ping')}")
+    except (OSError, ValueError, IndexError) as error:
+        print(f"fail gateway {error}")
+        return 1
+    for name, seen in status["seen"].items():
+        print(f"seen {'controller' if seen['controller'] else 'other'} {name}: {seen['note']}")
+    controller = status["controller"]
+    if not controller:
+        print("fail controller not found yet")
+        return 1
+    print(f"ok controller {controller['name']} {controller['ip']}:{controller['port']} {controller['source']}")
+    if through_controller:
+        try:
+            code = https_get(cfg, data, "/")
+        except (OSError, ValueError, IndexError) as error:
+            code = error
+        print(f"{'ok' if code in range(200, 400) else 'fail'} web-ui {code}")
+        return 0 if code in range(200, 400) else 1
+    return 0
 
 
 def main():
     from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceStateChange, Zeroconf
 
     cfg = load_config(os.environ)
-    target = static_controller(cfg)
+    if sys.argv[1:2] == ["check"]:
+        raise SystemExit(check(cfg, DATA, "--controller" in sys.argv))
+    target, source = static_controller(cfg), "manual"
+    if not target and (target := remembered_controller(cfg, DATA)):
+        source = "remembered"
     ensure_certificates(cfg, DATA)
     write_site(cfg, DATA, RUN, target)
+    seen = {}
+    write_status(cfg, DATA, RUN, target, source, seen)
     nginx = subprocess.Popen(["nginx", "-c", str(RUN / "nginx.conf"), "-g", "daemon off;"])
     events = queue.Queue()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    threading.Thread(target=lambda: (nginx.wait(), events.put("nginx")), daemon=True).start()
+    threading.Thread(target=lambda: (nginx.wait(), events.put(("nginx",))), daemon=True).start()
 
     zc = Zeroconf(interfaces=[cfg["ip"]], ip_version=IPVersion.V4Only)
     if cfg["mdns_publish"]:
@@ -217,13 +314,6 @@ def main():
             server=cfg["hostname"] + ".", properties={"path": "/"}), allow_name_change=True)
         log(f"publishing {cfg['hostname']} at {cfg['ip']}")
 
-    reported = {}  # Last reason logged per service, so repeated announcements stay quiet.
-
-    def report(key, message):
-        if reported.get(key) != message:
-            reported[key] = message
-            log(message)
-
     def on_change(zeroconf, service_type, name, state_change):
         if state_change is ServiceStateChange.Removed:
             return  # Keep the last address; a restarting controller announces itself again.
@@ -232,43 +322,62 @@ def main():
         found, reason = match_controller(
             cfg, instance, info.server, info.properties, info.parsed_addresses(IPVersion.V4Only),
             info.port) if info and info.server else (None, "no answer yet")
-        if found:
-            events.put(found)
-        else:
-            report(name, f"skipping {instance}: {reason}")
+        is_controller = bool(info and info.properties.get(b"obbw") == b"1")
+        events.put(("found", found) if found else ("skip", instance, is_controller, reason))
+
+    def note(instance, is_controller, reason):
+        """Record what discovery made of a device; return True when that changed."""
+        if seen.get(instance) == {"controller": is_controller, "note": reason}:
+            return False
+        seen[instance] = {"controller": is_controller, "note": reason}
+        return True
 
     browser = None
-    if not target:
+    if source != "manual" or not target:
         browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
         log("looking for " + (cfg["controller"][0] if cfg["controller"] else "the controller") + " over mDNS")
-    else:
-        log(f"using the controller at {target[1][0]}:{target[1][1]}")
+    if target:
+        log(f"using the {source} controller at {target[1][0]}:{target[1][1]}")
     retries = iter(RETRY_S)
     status = 0
     try:
         while True:
-            searching = browser and not target
+            searching = browser and source != "mdns"
             try:
                 event = events.get(timeout=next(retries, RETRY_S[-1]) if searching else CERT_CHECK_S)
             except queue.Empty:
-                event = None
+                event = ("tick",)
                 if searching:
-                    log("no controller found yet; asking the network again")
+                    log("no controller confirmed yet; asking the network again")
                     browser.cancel()
                     browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
-            if event == "nginx":
+            site_changed = status_changed = False
+            if event[0] == "nginx":
                 log(f"nginx exited with status {nginx.returncode}")
                 status = 1
                 break
-            if event and target and event[0] != target[0] and not cfg["controller_name"]:
-                report(event[0], f"ignoring another controller, {event[0]}; set OBBW_CONTROLLER_NAME to choose")
-                continue
-            if (event and event != target) or (event is None and ensure_certificates(cfg, DATA)):
-                if event:
-                    target = event
-                    log(f"controller {target[0]} at {target[1][0]}:{target[1][1]}")
+            if event[0] == "skip" and note(*event[1:]):
+                log(f"skipping {event[1]}: {event[3]}")
+                status_changed = True
+            elif event[0] == "found" and source == "mdns" and event[1][0] != target[0] \
+                    and not cfg["controller_name"]:
+                reason = "another controller; set OBBW_CONTROLLER_NAME to choose"
+                if note(event[1][0], True, reason):
+                    log(f"ignoring {event[1][0]}: {reason}")
+                    status_changed = True
+            elif event[0] == "found" and (event[1], "mdns") != (target, source):
+                target, source = event[1], "mdns"
+                note(target[0], True, "in use")
+                remember_controller(cfg, DATA, target)
+                log(f"controller {target[0]} at {target[1][0]}:{target[1][1]}")
+                site_changed = True
+            elif event[0] == "tick" and ensure_certificates(cfg, DATA):
+                site_changed = True
+            if site_changed:
                 write_site(cfg, DATA, RUN, target)
                 nginx.send_signal(signal.SIGHUP)
+            if site_changed or status_changed:
+                write_status(cfg, DATA, RUN, target, source, seen)
     except KeyboardInterrupt:
         pass
     finally:

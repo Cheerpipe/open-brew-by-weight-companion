@@ -19,13 +19,25 @@ http {
     '' close;
   }
 
+  # The setup page follows the browser's first language.
+  map $http_accept_language $setup_page {
+    ~*^es index.es.html;
+    default index.en.html;
+  }
+
   # Setup page and certificate downloads, reachable before the CA is trusted.
   server {
     listen @HTTP_PORT@ default_server;
     root @RUN@/www;
-    index index.html;
+    index $setup_page;
     add_header Cache-Control "no-store" always;
     log_not_found off;  # Browsers probe for icons this page does not have.
+
+    # Gateway state for ./setup, Docker health checks and monitoring tools.
+    location = /__gateway/status {
+      default_type application/json;
+      alias @RUN@/status.json;
+    }
 
     location ~ \.mobileconfig$ {
       types { }
@@ -45,6 +57,12 @@ http {
     location = /__gateway/ping {
       add_header Cache-Control "no-store" always;
       return 204;
+    }
+
+    location = /__gateway/status {
+      add_header Cache-Control "no-store" always;
+      default_type application/json;
+      alias @RUN@/status.json;
     }
 
     # The controller only answers requests addressed to itself.

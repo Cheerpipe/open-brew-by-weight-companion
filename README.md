@@ -17,8 +17,11 @@ The gateway does the fiddly parts for you:
   open it without touching your router.
 - **Creates and renews its certificate**, signed by a private certificate
   authority that only works for the gateway's name.
-- **Serves a setup page** with step-by-step instructions and the right
-  download for iPhone and iPad, Mac, Windows and Android.
+- **Serves a setup page**, in English or Spanish to match the device, with
+  step-by-step instructions, the right download for iPhone and iPad, Mac,
+  Windows and Android, and a QR code to open it on a phone.
+- **Sets itself up**: one command picks how the gateway joins your network,
+  starts it and checks that the Web UI answers through it.
 
 ## What you need
 
@@ -26,73 +29,48 @@ The gateway does the fiddly parts for you:
   network as the controller, such as a NAS, a Raspberry Pi or a home server.
   Docker Desktop on a Mac or Windows PC cannot announce `.local` names to the
   rest of the network.
-- A **free IP address** for the gateway, outside the range your router hands
-  out automatically. The gateway gets its own address, so it never clashes
-  with Home Assistant, another reverse proxy, or anything else already using
-  ports 80 and 443 on the same server.
+- If ports 80 and 443 are already in use on that server, for example by
+  Home Assistant or another reverse proxy, a **free IP address** for the
+  gateway, outside the range your router hands out automatically. The setup
+  suggests one.
 
 ## Install and run
 
-There is no prebuilt image to download: Docker Compose builds it from the
-`Dockerfile` in this repository the first time you start it. Run these steps
-on the server.
+Run this on the server:
 
-1. Get the code:
+```bash
+git clone https://github.com/Cheerpipe/open-brew-by-weight-https-gateway.git && cd open-brew-by-weight-https-gateway && ./setup
+```
 
-   ```bash
-   git clone https://github.com/Cheerpipe/open-brew-by-weight-https-gateway.git
-   ```
+`./setup` looks at your network and decides on its own wherever it can:
 
-   ```bash
-   cd open-brew-by-weight-https-gateway
-   ```
+- If ports 80 and 443 are free, the gateway shares the server's address.
+  Otherwise it gets an address of its own, and the setup suggests a free one
+  for you to confirm.
+- If another container already has a network on your LAN, such as AdGuard
+  Home or Pi-hole, the gateway joins it.
+- It builds and starts the container, waits until the gateway finds the
+  controller, and checks that the Web UI answers through the secure
+  address. If something is missing, such as the controller's address, it
+  asks.
 
-2. Create your settings from the example:
+At the end it shows the setup address and a QR code. On each phone, tablet
+or computer, open **`http://openbrewbyweight-secure.local`** (plain `http`)
+and follow the steps for that device; see [device setup](docs/device-setup.md).
+Then open **`https://openbrewbyweight-secure.local`** and sign in as usual.
 
-   ```bash
-   cp .env.example .env
-   ```
-
-   Open `.env` in any text editor, for example `nano .env`, and fill in the
-   four network values: `GATEWAY_IP`, `LAN_INTERFACE`, `LAN_SUBNET` and
-   `LAN_ROUTER`. `ip -br addr` shows the interface and its range, and
-   `ip route` shows the router after `default via`.
-
-3. Build the image from the `Dockerfile` and start the container:
-
-   ```bash
-   docker compose up -d --build
-   ```
-
-   The first build downloads the nginx base image and a few packages, which
-   takes about a minute. The container starts again by itself after a
-   restart of the server.
-
-4. Check that it found the controller:
-
-   ```bash
-   docker compose logs -f
-   ```
-
-   Look for `publishing openbrewbyweight-secure.local at 192.168.1.240` and
-   `controller Cafe Bar at 192.168.1.50:80`, with your own name and
-   addresses. Press Ctrl-C to stop watching; the gateway keeps running.
-
-5. On each phone, tablet or computer, open
-   **`http://openbrewbyweight-secure.local`** (plain `http`) and follow the
-   steps for that device; see [device setup](docs/device-setup.md). Then open
-   **`https://openbrewbyweight-secure.local`** and sign in as usual.
+Run `./setup` again any time: it checks the running gateway, or changes its
+settings if you choose to. `./setup --yes` accepts every suggestion without
+asking. You can also fill in `.env` by hand from `.env.example` and run
+`docker compose up -d --build`; the image is built from the `Dockerfile` in
+this repository, which takes about a minute the first time.
 
 ### Update
 
-Get the latest version and rebuild the image:
+Get the latest version, then rebuild and check it:
 
 ```bash
-git pull
-```
-
-```bash
-docker compose up -d --build
+git pull && ./setup --yes
 ```
 
 Your settings and the `data` folder are kept, so devices stay set up.
@@ -108,17 +86,19 @@ This stops and removes the container but keeps `.env` and the `data` folder;
 
 ## Configuration
 
-All settings live in `.env`. Leave a value empty to use its default, and run
-`docker compose up -d` again after changing it.
+All settings live in `.env`, which `./setup` writes for you. To change one by
+hand, edit `.env`, leave a value empty to use its default, and run
+`docker compose up -d` again.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `GATEWAY_IP` | required | The gateway's own address on your network. |
-| `LAN_INTERFACE` | required | The server's network interface, for example `eth0`. |
-| `LAN_SUBNET` | required | Your network range, for example `192.168.1.0/24`. |
-| `LAN_ROUTER` | required | Your router's address. |
-| `LAN_DRIVER` | `macvlan` | Use `ipvlan` when the server itself is on Wi-Fi. |
-| `LAN_NETWORK` | empty | Name of a macvlan or ipvlan network that already exists on the server, to join it instead of creating one. Also set `COMPOSE_FILE`; see [examples](examples/README.md#a-lan-network-that-already-exists). |
+| `GATEWAY_IP` | set by `./setup` | The gateway's address: its own, or the server's when it shares it. |
+| `LAN_INTERFACE` | set by `./setup` | The server's network interface, for example `eth0`. |
+| `LAN_SUBNET` | set by `./setup` | Your network range, for example `192.168.1.0/24`. |
+| `LAN_ROUTER` | set by `./setup` | Your router's address. |
+| `LAN_DRIVER` | `macvlan` | `ipvlan` when the server itself is on Wi-Fi. |
+| `COMPOSE_FILE` | `compose.yaml` | How the gateway joins the network: add `compose.host.yaml` to share the server's address, or `compose.existing-network.yaml` to join `LAN_NETWORK`. |
+| `LAN_NETWORK` | empty | A macvlan or ipvlan network that already exists on the server, to join instead of creating one; see [examples](examples/README.md#a-lan-network-that-already-exists). |
 | `GATEWAY_HOSTNAME` | `openbrewbyweight-secure` | The name devices open, followed by `.local`. Changing it means setting up every device again. |
 | `MDNS_PUBLISH` | `true` | Turn off if your own DNS already points the name at the gateway. |
 | `HTTP_PORT` / `HTTPS_PORT` | `80` / `443` | Ports for the setup page and the secure Web UI. |
@@ -126,9 +106,9 @@ All settings live in `.env`. Leave a value empty to use its default, and run
 | `OBBW_CONTROLLER_NAME` | empty | With more than one controller, the device name to use, as shown in the Web UI. |
 | `GATEWAY_DATA` | `./data` | Folder that keeps the gateway's certificate authority. |
 
-See [examples](examples/README.md) for common setups: a server on Wi-Fi, a
-fixed controller address, several controllers, your own DNS, and running on
-the server's own address.
+See [examples](examples/README.md) for setups done by hand: a server on
+Wi-Fi, a fixed controller address, several controllers, your own DNS, and
+sharing the server's address.
 
 ## Good to know
 

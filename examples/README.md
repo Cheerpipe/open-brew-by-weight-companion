@@ -1,7 +1,8 @@
 # Examples
 
-Each example changes only a few lines of `.env`; everything else stays as in
-[`.env.example`](../.env.example). Run `docker compose up -d` after editing.
+`./setup` handles most of these by itself. Each example changes only a few
+lines of `.env`; everything else stays as in [`.env.example`](../.env.example).
+Run `docker compose up -d` after editing.
 
 ## Wired server (default)
 
@@ -100,22 +101,16 @@ MDNS_PUBLISH=false
 
 ## Run on the server's own address
 
-Use [`host-network.compose.yaml`](host-network.compose.yaml) when the gateway
-cannot have its own address. It shares the server's address, so it needs
-ports that are still free, and devices open the name with the port, for
-example `https://openbrewbyweight-secure.local:8443`.
-
-```bash
-cp examples/host-network.compose.yaml compose.yaml
-```
-
-Then set free ports in `.env` and start it as usual:
+When ports 80 and 443 are free on the server, the gateway can share its
+address instead of getting one of its own; `./setup` chooses this by itself.
+By hand:
 
 ```dotenv
-HTTP_PORT=8080
-HTTPS_PORT=8443
+COMPOSE_FILE=compose.yaml:compose.host.yaml
 GATEWAY_IP=
 ```
 
-With `GATEWAY_IP` empty, the gateway uses the server's main address. The
-`LAN_*` settings are not used.
+With `GATEWAY_IP` empty, the gateway uses the server's main address, and the
+`LAN_*` settings are not used. If the ports are busy, choose others with
+`HTTP_PORT` and `HTTPS_PORT`; devices then open the name with the port, for
+example `https://openbrewbyweight-secure.local:8443`.

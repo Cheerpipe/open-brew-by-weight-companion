@@ -2,6 +2,7 @@
 """Contract tests for the HTTPS gateway supervisor (no network, no Docker)."""
 
 import importlib.util
+import json
 import plistlib
 import re
 import ssl
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("gateway", ROOT / "gateway/gateway.py")
 gateway = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gateway)
+gateway.qr_svg = lambda text: f"<svg data-text='{text}'></svg>"  # qrencode lives in the image only.
 
 BASE = {"GATEWAY_IP": "192.168.1.240"}
 
@@ -69,16 +71,32 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert "proxy_pass http://192.168.1.50:8080;" in conf
     assert "proxy_set_header Origin http://192.168.1.50:8080;" in conf
     assert "return 503;" not in conf
-    page = (run / "www/index.html").read_text()
-    assert "https://openbrewbyweight-secure.local" in page and "Found Cafe Bar" in page
-    for rendered in (conf, page):
+    pages = {lang: (run / f"www/index.{lang}.html").read_text() for lang in ("en", "es")}
+    assert "Found Cafe Bar at 192.168.1.50:8080" in pages["en"] and '<html lang="en">' in pages["en"]
+    assert "Controlador Cafe Bar encontrado" in pages["es"] and "Ajustes de confianza" in pages["es"]
+    assert "data-text='http://openbrewbyweight-secure.local'" in pages["es"]
+    assert "index.es.html" in conf and "location = /__gateway/status" in conf
+    for rendered in (conf, *pages.values()):
         assert not re.search(r"@[A-Z_]+@", rendered), "unfilled placeholder"
     profile = plistlib.loads((run / f"www/{gateway.CA_NAME}.mobileconfig").read_bytes())
     assert profile["PayloadContent"][0]["PayloadContent"] == ssl.PEM_cert_to_DER_cert(ca_pem)
 
     gateway.write_site({**cfg, "https_port": 8443}, data, run, None)
     assert "return 503;" in (run / "nginx.conf").read_text()
-    assert "https://openbrewbyweight-secure.local:8443/" in (run / "www/index.html").read_text()
+    assert "https://openbrewbyweight-secure.local:8443/" in (run / "www/index.en.html").read_text()
+
+    target = ("Cafe Bar", ("192.168.1.50", 80))
+    gateway.write_status(cfg, data, run, target, "mdns", {"Printer": {"controller": False, "note": "x"}})
+    status = json.loads((run / "status.json").read_text())
+    assert status["controller"] == {"name": "Cafe Bar", "ip": "192.168.1.50", "port": 80, "source": "mdns"}
+    assert status["seen"]["Printer"]["note"] == "x" and status["certificate_expires"]
+    assert status["setup_url"] == "http://openbrewbyweight-secure.local"
+
+    assert gateway.remembered_controller(cfg, data) is None
+    gateway.remember_controller(cfg, data, target)
+    assert gateway.remembered_controller(cfg, data) == target
+    assert gateway.remembered_controller({**cfg, "controller_name": "other"}, data) is None, \
+        "a different controller choice must not reuse the remembered one"
 
     renamed = {**cfg, "hostname": "brew.local"}
     assert gateway.ensure_certificates(renamed, data) is True

@@ -85,10 +85,45 @@ controller's address. WebSocket upgrades are forwarded and responses are not
 buffered, so live readings flow without delay. Firmware updates from the Web
 UI work through the gateway as well.
 
-Until the controller is found, the secure address answers `503`. The setup
+When the gateway restarts, it serves the controller it last found over mDNS
+right away, from `data/controller.json`, and keeps searching until mDNS
+confirms that address or reports a new one. It forgets that controller when
+`OBBW_CONTROLLER_URL` or `OBBW_CONTROLLER_NAME` change.
+
+Until a controller is known, the secure address answers `503`. The setup
 page stays on plain HTTP, because a device cannot use HTTPS before it trusts
 the CA. The page checks whether the device trusts the CA by loading a small
 probe from the secure address.
+
+## Status and health checks
+
+`/__gateway/status`, on both the setup page and the secure address, returns
+the gateway's state as JSON: its name and address, the controller in use and
+where it came from (`mdns`, `remembered` or `manual`), every `_http._tcp`
+device discovery saw and what it made of it, and when the server certificate
+expires. Monitoring tools such as Uptime Kuma or Home Assistant can read it.
+
+`gateway.py check`, run inside the container, probes the setup page, the
+secure address and the status. It is the image's Docker health check, so
+`docker compose ps` shows `healthy` once a controller is known. The health
+check never contacts the controller, to keep Wi-Fi traffic away from it.
+`gateway.py check --controller` also loads the Web UI through the gateway;
+`./setup` runs it once at the end.
+
+## The setup script
+
+`./setup` runs on the server, outside the container. It reads the default
+route to learn the interface, range and router, and picks the network mode:
+the server's own address when ports 80 and 443 are free
+(`compose.host.yaml`), an existing macvlan or ipvlan network on the same
+interface and range (`compose.existing-network.yaml`), or a new one. For a
+new address it suggests the first one from `.240` down that answers neither
+ping nor ARP and is not taken by a container, and asks you to confirm it is
+outside the router's DHCP range. It keeps the name, controller and data
+settings of an earlier `.env`, saved as `.env.bak`, so devices stay set up.
+It then starts the container and runs `gateway.py check` until a controller
+is found, asking for the controller's address or name when discovery
+cannot settle it.
 
 ## Files
 
@@ -97,5 +132,8 @@ probe from the secure address.
 | `gateway/gateway.py` | Supervisor: configuration, discovery, mDNS, certificates, rendering. |
 | `gateway/nginx.conf.in` | nginx configuration template. |
 | `gateway/setup.html` | Setup page template. |
-| `data/` (volume) | CA and server certificate with their keys. Keys are readable only by root. |
-| `/run/gateway/` (container) | Rendered nginx configuration and setup page. |
+| `gateway/strings.json` | Setup page texts in English and Spanish. |
+| `setup` | Setup and check script, run on the server. |
+| `compose.host.yaml`, `compose.existing-network.yaml` | Network modes, chosen with `COMPOSE_FILE`. |
+| `data/` (volume) | CA and server certificate with their keys (readable only by root), and the last controller found. |
+| `/run/gateway/` (container) | Rendered nginx configuration, setup pages and `status.json`. |
