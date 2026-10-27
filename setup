@@ -5,8 +5,9 @@
 #
 # Usage: ./setup [--yes]
 #   --yes  accept every suggestion without asking (also used without a terminal)
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")"
+trap 'die "./setup stopped unexpectedly at line $LINENO. Please report this line."' ERR
 
 YES=0
 [[ ${1:-} == --yes || ${1:-} == -y ]] && YES=1
@@ -34,7 +35,7 @@ confirm() { # confirm QUESTION: yes unless the user says no
 	read -r -p "  $1 [Y/n]: " answer </dev/tty
 	[[ ! $answer =~ ^[Nn] ]]
 }
-env_get() { sed -n "s/^$1=//p" "${2:-.env}" 2>/dev/null | tail -n 1; }
+env_get() { [[ ! -f ${2:-.env} ]] || sed -n "s/^$1=//p" "${2:-.env}" | tail -n 1; }
 env_set() { # env_set KEY VALUE: set, uncomment or append the line in .env
 	local tmp
 	tmp=$(mktemp)
