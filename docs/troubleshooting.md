@@ -9,6 +9,17 @@ docker compose logs -f
 It reports the name it publishes, the controller it found and its address,
 certificate renewals, and anything it ignored.
 
+## `docker compose up` fails with a network error
+
+- **`no configured subnet contains IP address`:** `GATEWAY_IP` is outside
+  `LAN_SUBNET`. Set both, and `LAN_ROUTER`, to your network's values, run
+  `docker compose down` to remove the network created with the old values,
+  and start again.
+- **`Pool overlaps with other one on this address space`:** another Docker
+  network already covers your LAN range, usually a macvlan network another
+  container uses. Join it instead; see
+  [examples](../examples/README.md#a-lan-network-that-already-exists).
+
 ## The setup page says it is looking for the controller
 
 - Check that the controller is on and connected to the same network.

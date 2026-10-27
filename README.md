@@ -118,6 +118,7 @@ All settings live in `.env`. Leave a value empty to use its default, and run
 | `LAN_SUBNET` | required | Your network range, for example `192.168.1.0/24`. |
 | `LAN_ROUTER` | required | Your router's address. |
 | `LAN_DRIVER` | `macvlan` | Use `ipvlan` when the server itself is on Wi-Fi. |
+| `LAN_NETWORK` | empty | Name of a macvlan or ipvlan network that already exists on the server, to join it instead of creating one. Also set `COMPOSE_FILE`; see [examples](examples/README.md#a-lan-network-that-already-exists). |
 | `GATEWAY_HOSTNAME` | `openbrewbyweight-secure` | The name devices open, followed by `.local`. Changing it means setting up every device again. |
 | `MDNS_PUBLISH` | `true` | Turn off if your own DNS already points the name at the gateway. |
 | `HTTP_PORT` / `HTTPS_PORT` | `80` / `443` | Ports for the setup page and the secure Web UI. |

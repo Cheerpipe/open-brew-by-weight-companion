@@ -27,6 +27,28 @@ LAN_INTERFACE=wlan0
 LAN_DRIVER=ipvlan
 ```
 
+## A LAN network that already exists
+
+Docker allows only one macvlan or ipvlan network per address range. If
+another container, such as AdGuard Home or Pi-hole, already has one,
+`docker compose up` fails with `Pool overlaps with other one on this address
+space`. Find that network:
+
+```bash
+docker network ls --filter driver=macvlan --filter driver=ipvlan
+```
+
+Then join it instead of creating a new one:
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.existing-network.yaml
+LAN_NETWORK=adguard-macvlan
+```
+
+Keep the other `LAN_*` values filled in; they describe the same network.
+`GATEWAY_IP` must still be free and outside the router's automatic range.
+This needs Docker Compose 2.24 or newer.
+
 ## A Raspberry Pi with Docker
 
 The image runs on 64-bit Raspberry Pi OS as is. With the Pi on its cable,
