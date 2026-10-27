@@ -1,0 +1,21 @@
+# Variant that shares the server's own address instead of getting one of its
+# own. Copy it over compose.yaml in the repository root, set HTTP_PORT and
+# HTTPS_PORT in .env to ports nothing else on the server uses, then run:
+#   docker compose up -d
+services:
+  gateway:
+    build: .
+    image: openbrewbyweight-https-gateway:local
+    container_name: openbrewbyweight-https-gateway
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      GATEWAY_HOSTNAME: ${GATEWAY_HOSTNAME:-openbrewbyweight-secure}
+      GATEWAY_IP: ${GATEWAY_IP:-}
+      HTTP_PORT: ${HTTP_PORT:-8080}
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
+      OBBW_CONTROLLER_URL: ${OBBW_CONTROLLER_URL:-}
+      OBBW_CONTROLLER_NAME: ${OBBW_CONTROLLER_NAME:-}
+      MDNS_PUBLISH: ${MDNS_PUBLISH:-true}
+    volumes:
+      - ${GATEWAY_DATA:-./data}:/data

@@ -1,0 +1,63 @@
+# Rendered by gateway.py, which fills the placeholders at runtime.
+user nginx;  # Owns the image's temp folders, which hold OTA upload chunks.
+worker_processes 1;
+pid @RUN@/nginx.pid;
+error_log stderr warn;
+
+events {
+  worker_connections 256;
+}
+
+http {
+  include /etc/nginx/mime.types;
+  access_log off;
+  server_tokens off;
+
+  # Close upstream connections after each request: the controller has few sockets.
+  map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+  }
+
+  # Setup page and certificate downloads, reachable before the CA is trusted.
+  server {
+    listen @HTTP_PORT@ default_server;
+    root @RUN@/www;
+    index index.html;
+    add_header Cache-Control "no-store" always;
+
+    location ~ \.mobileconfig$ {
+      types { }
+      default_type application/x-apple-aspen-config;
+    }
+  }
+
+  server {
+    listen @HTTPS_PORT@ ssl default_server;
+    http2 on;
+    ssl_certificate @DATA@/server.crt;
+    ssl_certificate_key @DATA@/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:tls:1m;
+
+    # The setup page probes this to learn whether the device trusts the CA.
+    location = /__gateway/ping {
+      add_header Cache-Control "no-store" always;
+      return 204;
+    }
+
+    # The controller only answers requests addressed to itself.
+    location / {
+      @OFFLINE@
+      proxy_pass http://@UPSTREAM@;
+      proxy_set_header Host @UPSTREAM@;
+      proxy_set_header Origin http://@UPSTREAM@;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_buffering off;
+      proxy_connect_timeout 5s;
+      proxy_read_timeout 1h;
+    }
+  }
+}

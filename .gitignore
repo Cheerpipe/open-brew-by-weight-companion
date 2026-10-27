@@ -1,0 +1,11 @@
+# Local settings and the gateway's certificate authority
+.env
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
