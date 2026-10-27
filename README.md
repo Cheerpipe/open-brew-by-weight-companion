@@ -39,7 +39,7 @@ The gateway does the fiddly parts for you:
 Run this on the server:
 
 ```bash
-git clone https://github.com/Cheerpipe/open-brew-by-weight-https-gateway.git && cd open-brew-by-weight-https-gateway && ./setup
+git clone https://github.com/Cheerpipe/open-brew-by-weight-companion.git && cd open-brew-by-weight-companion && ./setup
 ```
 
 `./setup` looks at your network and decides on its own wherever it can:
