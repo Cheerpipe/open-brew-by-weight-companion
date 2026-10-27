@@ -191,12 +191,15 @@ def write_site(cfg, data, run, target):
     ca_pem = (data / f"{CA_NAME}.crt").read_text()
     ca_der = ssl.PEM_cert_to_DER_cert(ca_pem)
     fingerprint = hashlib.sha256(ca_der).hexdigest().upper()
+    setup = site_url("http", cfg, cfg["http_port"], 80)
     values = {
         "SECURE_URL": html.escape(site_url("https", cfg, cfg["https_port"], 443)),
         "HOSTNAME": html.escape(cfg["hostname"]),
         "CA_NAME": CA_NAME,
         "FINGERPRINT": ":".join(fingerprint[i:i + 2] for i in range(0, len(fingerprint), 2)),
-        "QR": qr_svg(site_url("http", cfg, cfg["http_port"], 80)),
+        "QR": qr_svg(setup),
+        "QR_IOS": qr_svg(f"{setup}/{CA_NAME}.mobileconfig"),
+        "QR_ANDROID": qr_svg(f"{setup}/{CA_NAME}.crt"),
     }
     files = {f"{CA_NAME}.crt": ca_pem.encode(), f"{CA_NAME}.mobileconfig": mobileconfig(ca_der, cfg["hostname"])}
     for lang, strings in json.loads((HERE / "strings.json").read_text()).items():

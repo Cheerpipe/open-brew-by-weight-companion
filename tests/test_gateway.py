@@ -75,6 +75,8 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert "Found Cafe Bar at 192.168.1.50:8080" in pages["en"] and '<html lang="en">' in pages["en"]
     assert "Controlador Cafe Bar encontrado" in pages["es"] and "Ajustes de confianza" in pages["es"]
     assert "data-text='http://openbrewbyweight-secure.local'" in pages["es"]
+    assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in pages["en"]
+    assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.crt'" in pages["en"]
     assert "index.es.html" in conf and "location = /__gateway/status" in conf
     for rendered in (conf, *pages.values()):
         assert not re.search(r"@[A-Z_]+@", rendered), "unfilled placeholder"

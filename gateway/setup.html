@@ -22,7 +22,7 @@
   .status.warn { color: var(--warn); }
   a { color: var(--accent); }
   a.button { display: inline-block; background: var(--accent); color: var(--bg); border-radius: 8px; padding: 10px 16px; margin: 8px 8px 0 0; text-decoration: none; font-weight: 600; }
-  .qr { display: flex; gap: 16px; align-items: center; }
+  .qr { display: flex; gap: 16px; align-items: center; margin: 8px 0; }
   .qr svg { flex: none; width: 128px; height: 128px; background: #fff; padding: 6px; border-radius: 8px; }
   @media (max-width: 600px) { .qr { display: none; } }
   details { border-top: 1px solid var(--line); padding: 12px 0; }
@@ -56,6 +56,7 @@
 
     <details id="ios">
       <summary>@T_IOS@</summary>
+      <div class="qr">@QR_IOS@<p class="muted">@T_QR_DOWNLOAD@</p></div>
       <ol>@T_IOS_STEPS@</ol>
     </details>
 
@@ -71,6 +72,7 @@
 
     <details id="android">
       <summary>Android</summary>
+      <div class="qr">@QR_ANDROID@<p class="muted">@T_QR_DOWNLOAD@</p></div>
       <ol>@T_ANDROID_STEPS@</ol>
     </details>
 

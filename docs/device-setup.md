@@ -6,7 +6,8 @@ The easiest way is the setup page: open **`http://openbrewbyweight-secure.local`
 that the page shows on a computer. It shows whether the device already
 trusts the gateway, opens the steps for that device, and offers the right
 download. The page is in Spanish when the device's language is Spanish, and
-in English otherwise.
+in English otherwise. Opened on a computer, the iPhone and Android steps also
+show a QR code that downloads the file straight onto the phone.
 
 The steps below are the same as on that page, for reference. If you changed
 `GATEWAY_HOSTNAME`, use your name instead of `openbrewbyweight-secure`.
