@@ -85,6 +85,30 @@ controller's address. WebSocket upgrades are forwarded and responses are not
 buffered, so live readings flow without delay. Firmware updates from the Web
 UI work through the gateway as well.
 
+### Web UI cache
+
+The gateway keeps a copy of the Web UI's files, so the controller sends them
+once instead of once per device. That matters most right after a firmware
+update, when every phone loads the new Web UI at the same time.
+
+- **Scripts, styles and icons** are kept for as long as the controller allows:
+  a year for the versioned URLs the Web UI uses, never for any other. A
+  firmware update changes those URLs, so the new files are fetched at once.
+  When several devices ask for a file the gateway does not have yet, only one
+  request reaches the controller.
+- **Pages and the service worker** are checked with the controller on each
+  load, at most once every couple of seconds. An unchanged page costs the
+  controller a short "not modified" answer instead of the whole page.
+- **While the controller is off**, the gateway serves the last copy of each
+  page it loaded, so a new device can still open the Web UI. Everything else
+  waits for the controller.
+
+The API, live readings and firmware updates are never cached. Every cached
+response carries an `X-Gateway-Cache` header (`HIT`, `MISS`, `REVALIDATED`,
+`STALE`…) that shows where it came from. The cache lives in
+`/run/gateway/cache` inside the container, holds at most 16 MB, drops files
+unused for 30 days, and starts empty when the container is recreated.
+
 When the gateway restarts, it serves the controller it last found over mDNS
 right away, from `data/controller.json`, and keeps searching until mDNS
 confirms that address or reports a new one. It forgets that controller when
@@ -136,4 +160,4 @@ cannot settle it.
 | `setup` | Setup and check script, run on the server. |
 | `compose.host.yaml`, `compose.existing-network.yaml` | Network modes, chosen with `COMPOSE_FILE`. |
 | `data/` (volume) | CA and server certificate with their keys (readable only by root), and the last controller found. |
-| `/run/gateway/` (container) | Rendered nginx configuration, setup pages and `status.json`. |
+| `/run/gateway/` (container) | Rendered nginx configuration, setup pages, `status.json` and the Web UI cache. |

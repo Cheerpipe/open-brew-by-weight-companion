@@ -78,6 +78,10 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in pages["en"]
     assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.crt'" in pages["en"]
     assert "index.es.html" in conf and "location = /__gateway/status" in conf
+    assert f"proxy_cache_path {run}/cache " in conf
+    api = conf.split("    location / {", 1)[1].split("\n    }", 1)[0]
+    assert "proxy_pass" in api and "proxy_cache" not in api, "API and WebSocket traffic is never cached"
+    assert conf.count("proxy_cache webui;") == 2
     for rendered in (conf, *pages.values()):
         assert not re.search(r"@[A-Z_]+@", rendered), "unfilled placeholder"
     profile = plistlib.loads((run / f"www/{gateway.CA_NAME}.mobileconfig").read_bytes())

@@ -129,7 +129,9 @@ sharing the server's address.
   part. Android needs version 12 or newer for any `.local` name.
 - **The gateway adds no traffic to the controller.** It learns the
   controller's address from the announcements the controller already sends
-  and only forwards what your devices ask for. Only while it has not found
+  and only forwards what your devices ask for. It keeps a copy of the Web
+  UI's files, so after a firmware update each one crosses the controller's
+  Wi-Fi once rather than once per device. Only while it has not found
   the controller yet does it ask the network again, every few minutes. The controller still allows
   one live Web UI at a time, exactly as without the gateway.
 
@@ -146,6 +148,13 @@ nor Docker:
 
 ```bash
 python3 tests/test_gateway.py
+```
+
+The Web UI cache test runs the real nginx against a fake controller, so it
+runs inside the image:
+
+```bash
+docker build -t obbw-gateway . && docker run --rm -v "$PWD:/src:ro" --entrypoint python3 obbw-gateway /src/tests/test_cache.py
 ```
 
 To build only the image, without starting it:

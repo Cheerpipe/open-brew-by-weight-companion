@@ -19,6 +19,11 @@ http {
     '' close;
   }
 
+  # Web UI shell and assets, so each device's first load and the loads after an
+  # OTA reach the controller once instead of once per device. Keyed by the full
+  # URI: the controller only marks ?v=<asset tag> URLs cacheable.
+  proxy_cache_path @RUN@/cache levels=1:2 keys_zone=webui:1m max_size=16m inactive=30d use_temp_path=off;
+
   # The setup page follows the browser's first language.
   map $http_accept_language $setup_page {
     ~*^es index.es.html;
@@ -63,6 +68,41 @@ http {
       add_header Cache-Control "no-store" always;
       default_type application/json;
       alias @RUN@/status.json;
+    }
+
+    # Versioned assets: cached for as long as the controller allows, which is
+    # a year for ?v=<asset tag> and never for any other URL. The controller
+    # always sends gzip, so one copy serves every Accept-Encoding.
+    location ~ ^/(app\.(js|css)|js/[a-z-]+\.js|manifest\.webmanifest|icons/icon-192\.png|favicon\.ico|apple-touch-icon[^/]*)$ {
+      @OFFLINE@
+      proxy_pass http://@UPSTREAM@;
+      proxy_set_header Host @UPSTREAM@;
+      proxy_set_header Origin http://@UPSTREAM@;
+      proxy_http_version 1.1;
+      proxy_connect_timeout 5s;
+      proxy_cache webui;
+      proxy_cache_lock on;
+      proxy_ignore_headers Vary;
+      add_header X-Gateway-Cache $upstream_cache_status always;
+    }
+
+    # Shell pages and the service worker: checked with the controller on each
+    # load, at most every second or two (a 304 when unchanged, so an OTA shows
+    # at once), and served from the last copy while the controller is off.
+    location ~ ^/(diagnostic|log|stats|history|admin|settings|setup|sw\.js)?$ {
+      @OFFLINE@
+      proxy_pass http://@UPSTREAM@;
+      proxy_set_header Host @UPSTREAM@;
+      proxy_set_header Origin http://@UPSTREAM@;
+      proxy_http_version 1.1;
+      proxy_connect_timeout 5s;
+      proxy_cache webui;
+      proxy_cache_lock on;
+      proxy_ignore_headers Cache-Control Expires Vary;
+      proxy_cache_valid 200 1s;
+      proxy_cache_revalidate on;
+      proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
+      add_header X-Gateway-Cache $upstream_cache_status always;
     }
 
     # The controller only answers requests addressed to itself.
