@@ -36,16 +36,19 @@ except SystemExit:
 
 TXT = {b"obbw": b"1"}
 found = gateway.match_controller(cfg, "Cafe Bar", "cafe-bar.local.", TXT, ["fe80::1", "192.168.1.50"], 80)
-assert found == ("Cafe Bar", ("192.168.1.50", 80))
-assert gateway.match_controller(cfg, "Printer", "printer.local.", {}, ["192.168.1.9"], 80) is None
-assert gateway.match_controller(cfg, "Cafe Bar", "cafe-bar.local.", TXT, ["fe80::1"], 80) is None
+assert found == (("Cafe Bar", ("192.168.1.50", 80)), None)
+assert gateway.match_controller(cfg, "Printer", "printer.local.", {}, ["192.168.1.9"], 80) == (
+    None, "not an Open Brew by Weight controller")
+assert gateway.match_controller(cfg, "Cafe Bar", "cafe-bar.local.", TXT, ["fe80::1"], 80) == (
+    None, "no IPv4 address")
 for wanted in ("cafe bar", "cafe-bar"):
     chosen = {**cfg, "controller_name": wanted}
-    assert gateway.match_controller(chosen, "Cafe Bar", "cafe-bar.local.", TXT, ["192.168.1.50"], 80)
-    assert gateway.match_controller(chosen, "Other", "other.local.", TXT, ["192.168.1.51"], 80) is None
-assert gateway.match_controller(named, "Cafe Bar", "cafe-bar.local.", {}, ["192.168.1.50"], 80)
-assert gateway.match_controller(named, "Other", "other.local.", TXT, ["192.168.1.51"], 80) is None
-
+    assert gateway.match_controller(chosen, "Cafe Bar", "cafe-bar.local.", TXT, ["192.168.1.50"], 80)[0]
+    assert gateway.match_controller(chosen, "Other", "other.local.", TXT, ["192.168.1.51"], 80) == (
+        None, "not the controller named in OBBW_CONTROLLER_NAME")
+assert gateway.match_controller(named, "Cafe Bar", "cafe-bar.local.", {}, ["192.168.1.50"], 80)[0]
+assert gateway.match_controller(named, "Other", "other.local.", TXT, ["192.168.1.51"], 80) == (
+    None, "not cafe-bar.local")
 
 def verify(ca, leaf, host):
     return subprocess.run(["openssl", "verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)],

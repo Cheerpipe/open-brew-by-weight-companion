@@ -25,6 +25,7 @@ http {
     root @RUN@/www;
     index index.html;
     add_header Cache-Control "no-store" always;
+    log_not_found off;  # Browsers probe for icons this page does not have.
 
     location ~ \.mobileconfig$ {
       types { }

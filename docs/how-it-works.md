@@ -21,6 +21,12 @@ the controller whose device name matches; with a `.local` name in
 `OBBW_CONTROLLER_URL`, the one whose host name matches. An IP address in
 `OBBW_CONTROLLER_URL` turns discovery off completely.
 
+A controller in Wi-Fi power save can answer late, so the supervisor waits up
+to 10 seconds for its details. Until it finds a controller, it asks the
+network again after 30 seconds, then 1, 2, 5 and every 10 minutes; once one
+is found, it stops asking. The log names every `_http._tcp` device it sees
+and why it skipped it, once per device and reason.
+
 When the controller announces a new address, the supervisor rewrites nginx's
 configuration and reloads it without dropping connections. When the
 controller goes away, the last known address is kept, because a restarting
@@ -31,9 +37,10 @@ controller announces itself again.
 The controller shares one 2.4 GHz radio between Wi-Fi and the Bluetooth
 scale, so the gateway avoids generating traffic toward it:
 
-- No health checks or polling. Discovery relies on the controller's own
-  announcements and on the standard mDNS query schedule, which backs off to
-  roughly one query per hour.
+- No health checks or polling. Once the controller is known, discovery
+  relies on its own announcements and on the standard mDNS query schedule,
+  which backs off to roughly one query per hour. The faster retries above
+  only run while no controller has been found.
 - Each forwarded request closes its connection to the controller when done,
   which frees the controller's few sockets right away. Live updates use one
   WebSocket, as without the gateway.

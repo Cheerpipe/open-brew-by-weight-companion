@@ -22,9 +22,14 @@ certificate renewals, and anything it ignored.
 
 ## The setup page says it is looking for the controller
 
-- Check that the controller is on and connected to the same network.
+- Check that the controller is on and connected to the same network. The
+  gateway keeps looking and asks the network again every few minutes.
+- Read the log: each `skipping <device>: <reason>` line names a device the
+  gateway saw and why it did not use it. `no answer yet` means the device did
+  not reply in time; `not the controller named in OBBW_CONTROLLER_NAME` means
+  the name does not match.
 - If you have several controllers, set `OBBW_CONTROLLER_NAME` to the device
-  name of the one to use. The log names each controller it ignores.
+  name of the one to use.
 - If it is still not found, set `OBBW_CONTROLLER_URL` to the controller's IP
   address, shown in **Admin → Network** of the Web UI. Give the controller a
   fixed address in your router so it does not change.

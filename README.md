@@ -149,7 +149,8 @@ the server's own address.
   part. Android needs version 12 or newer for any `.local` name.
 - **The gateway adds no traffic to the controller.** It learns the
   controller's address from the announcements the controller already sends
-  and only forwards what your devices ask for. The controller still allows
+  and only forwards what your devices ask for. Only while it has not found
+  the controller yet does it ask the network again, every few minutes. The controller still allows
   one live Web UI at a time, exactly as without the gateway.
 
 More: [device setup](docs/device-setup.md),

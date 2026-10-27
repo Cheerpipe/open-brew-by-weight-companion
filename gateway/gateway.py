@@ -29,6 +29,8 @@ CA_NAME = "openbrewbyweight-ca"
 LEAF_DAYS = 397  # Apple rejects TLS server certificates valid for more than 398 days.
 RENEW_BEFORE_S = 30 * 86400
 CERT_CHECK_S = 12 * 3600
+INFO_TIMEOUT_MS = 10000  # A controller in Wi-Fi power save can answer late.
+RETRY_S = (30, 60, 120, 300, 600)  # Fresh mDNS queries only while no controller is known.
 OPENSSL_CNF = "[req]\ndistinguished_name=dn\n[dn]\n"
 
 
@@ -73,20 +75,21 @@ def static_controller(cfg):
 
 
 def match_controller(cfg, instance, server, properties, addresses, port):
-    """Map one `_http._tcp` service to (label, (ip, port)) when it is the wanted controller."""
+    """Map one `_http._tcp` service to ((label, (ip, port)), None), or (None, why it was skipped)."""
     host = server.rstrip(".").lower()
     ipv4 = [a for a in addresses if ":" not in a]
-    if not ipv4:
-        return None
-    if cfg["controller"]:
-        return (instance, (ipv4[0], port)) if host == cfg["controller"][0] else None
-    if properties.get(b"obbw") != b"1":
-        return None
     wanted = cfg["controller_name"]
     names = {instance.lower(), instance.lower().replace(" ", "-"), host.removesuffix(".local")}
-    if wanted and wanted not in names and wanted.replace(" ", "-") not in names:
-        return None
-    return instance, (ipv4[0], port)
+    if cfg["controller"]:
+        if host != cfg["controller"][0]:
+            return None, f"not {cfg['controller'][0]}"
+    elif properties.get(b"obbw") != b"1":
+        return None, "not an Open Brew by Weight controller"
+    elif wanted and wanted not in names and wanted.replace(" ", "-") not in names:
+        return None, "not the controller named in OBBW_CONTROLLER_NAME"
+    if not ipv4:
+        return None, "no IPv4 address"
+    return (instance, (ipv4[0], port)), None
 
 
 def openssl(*args):
@@ -214,34 +217,51 @@ def main():
             server=cfg["hostname"] + ".", properties={"path": "/"}), allow_name_change=True)
         log(f"publishing {cfg['hostname']} at {cfg['ip']}")
 
+    reported = {}  # Last reason logged per service, so repeated announcements stay quiet.
+
+    def report(key, message):
+        if reported.get(key) != message:
+            reported[key] = message
+            log(message)
+
     def on_change(zeroconf, service_type, name, state_change):
         if state_change is ServiceStateChange.Removed:
             return  # Keep the last address; a restarting controller announces itself again.
-        info = zeroconf.get_service_info(service_type, name, timeout=3000)
-        if info and info.server:
-            found = match_controller(cfg, name.removesuffix("." + service_type), info.server,
-                                     info.properties, info.parsed_addresses(IPVersion.V4Only), info.port)
-            if found:
-                events.put(found)
+        instance = name.removesuffix("." + service_type)
+        info = zeroconf.get_service_info(service_type, name, timeout=INFO_TIMEOUT_MS)
+        found, reason = match_controller(
+            cfg, instance, info.server, info.properties, info.parsed_addresses(IPVersion.V4Only),
+            info.port) if info and info.server else (None, "no answer yet")
+        if found:
+            events.put(found)
+        else:
+            report(name, f"skipping {instance}: {reason}")
 
+    browser = None
     if not target:
-        ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
+        browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
         log("looking for " + (cfg["controller"][0] if cfg["controller"] else "the controller") + " over mDNS")
     else:
         log(f"using the controller at {target[1][0]}:{target[1][1]}")
+    retries = iter(RETRY_S)
     status = 0
     try:
         while True:
+            searching = browser and not target
             try:
-                event = events.get(timeout=CERT_CHECK_S)
+                event = events.get(timeout=next(retries, RETRY_S[-1]) if searching else CERT_CHECK_S)
             except queue.Empty:
                 event = None
+                if searching:
+                    log("no controller found yet; asking the network again")
+                    browser.cancel()
+                    browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
             if event == "nginx":
                 log(f"nginx exited with status {nginx.returncode}")
                 status = 1
                 break
             if event and target and event[0] != target[0] and not cfg["controller_name"]:
-                log(f"ignoring another controller, {event[0]}; set OBBW_CONTROLLER_NAME to choose")
+                report(event[0], f"ignoring another controller, {event[0]}; set OBBW_CONTROLLER_NAME to choose")
                 continue
             if (event and event != target) or (event is None and ensure_certificates(cfg, DATA)):
                 if event:
