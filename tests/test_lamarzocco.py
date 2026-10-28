@@ -59,6 +59,7 @@ class Cloud:
         self.socket = None
         self.subscribed = asyncio.Event()
         self.command_status = 200
+        self.refuse_dashboard = 0
 
     def verify(self, request):
         headers = request.headers
@@ -114,6 +115,8 @@ class Cloud:
     async def dashboard(self, request):
         assert request.match_info["serial"] == ACCOUNT["serial"]
         self.calls.append("dashboard")
+        if self.refuse_dashboard:
+            return web.Response(status=self.refuse_dashboard)
         return web.json_response(D["read"]) if self.authorized(request) else web.Response(status=401)
 
     async def command(self, request):
@@ -256,6 +259,17 @@ async def main():
             refreshes, accounts = cloud.calls.count("refresh"), events.log.count(("account", True))
             assert (await lm.read())[1] is not None and cloud.calls.count("refresh") == refreshes + 1
             assert events.log.count(("account", True)) == accounts + 1 and events.log.count(("renewed",)) == renewals
+
+            # A refused dashboard or command (401/403) marks the data plane; a 200 clears it.
+            cloud.refuse_dashboard = 403
+            upstreams = events.log.count(("upstream",))
+            assert (await lm.read())[:2] == (403, None) and lm.refused
+            assert events.log.count(("upstream",)) == upstreams + 1, "the refusal is reported at once"
+            cloud.refuse_dashboard = 0
+            assert (await lm.read())[1] is not None and not lm.refused
+            cloud.command_status = 403
+            assert await lm.command(13, "on") == 403 and lm.refused
+            cloud.command_status = 200
 
             # The installation survives a restart: no second registration, same id.
             events = Events()

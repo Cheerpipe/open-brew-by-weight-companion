@@ -137,6 +137,7 @@ class LaMarzocco:
         self.issued_at = 0.0
         self.rejected = False
         self.sub, self.ep, self.alive_at = False, 0, 0.0
+        self.refused = False
         self.last_command = 0
         self.tasks = set()
         self.renewal = None
@@ -176,6 +177,7 @@ class LaMarzocco:
         for task in self.tasks:
             task.cancel()
         self.tasks.clear()
+        self.refused = False
         self._set_subscribed(False)
 
     def _usable(self):
@@ -186,6 +188,7 @@ class LaMarzocco:
         self.configure(None, *self.wanted[1:])
         self.installation = None
         self.access = self.refresh = None
+        self.refused = False
 
     def _spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -204,6 +207,12 @@ class LaMarzocco:
             self.alive_at = time.monotonic()
         if subscribed or self.sub:
             self.sub = subscribed
+            self.events.upstream()
+
+    def _refused(self, refused):
+        """Reads or commands answered 401/403: the subscription lives, but the data plane does not."""
+        if refused != self.refused:
+            self.refused = refused
             self.events.upstream()
 
     async def _run(self):
@@ -334,6 +343,9 @@ class LaMarzocco:
             return 0, None, ac
         if status in (401, 403):
             self.access = None  # A stale token: the next request signs in again.
+            self._refused(True)
+        elif status == 200:
+            self._refused(False)
         try:
             return status, dashboard.parse(text) if status == 200 else None, ac
         except ValueError:
@@ -357,6 +369,9 @@ class LaMarzocco:
             return 0
         if status in (401, 403):
             self.access = None
+            self._refused(True)
+        elif status == 200:
+            self._refused(False)
         return status
 
     # --- Observation ---------------------------------------------------------

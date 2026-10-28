@@ -8,7 +8,6 @@ updates, through a Unix socket.
 
 import asyncio
 import html
-import itertools
 import json
 import threading
 import traceback
@@ -374,9 +373,11 @@ class Companion:
             self.spawn(self._read_and_forward())
 
     def _report(self, force=False):
-        state = (self.lm.sub, self.lm.ep)
-        if (force or state != self.reported) and self.post(
-                {"t": "lm", "sub": self.lm.sub, "ep": self.lm.ep, "tok": self.lm.tok}):
+        state = (self.lm.sub, self.lm.ep, self.lm.refused)
+        frame = {"t": "lm", "sub": self.lm.sub, "ep": self.lm.ep, "tok": self.lm.tok}
+        if self.lm.refused:
+            frame["err"] = "auth"  # The subscription lives, but reads and commands answer 401/403.
+        if (force or state != self.reported) and self.post(frame):
             self.reported = state
 
     # --- Machine state -----------------------------------------------------------
@@ -401,15 +402,16 @@ class Companion:
 
     async def _full(self):
         """The read after a new subscription, sent as `full` once per route start and epoch."""
-        for delay in itertools.chain(FULL_RETRY_S, itertools.repeat(FULL_RETRY_S[-1])):
+        for index in range(len(FULL_RETRY_S)):
             if self.route != "companion" or self.outbox is None or not self.lm.sub or self.full_ep == self.lm.ep:
                 return
             ep = self.lm.ep
             _, data, ac = await self.lm.read()
             if data is not None and ep == self.lm.ep != self.full_ep and self._forward("full", data, ac, ep):
                 self.full_ep = ep
-            else:
-                await asyncio.sleep(delay)
+                return
+            if index + 1 < len(FULL_RETRY_S):
+                await asyncio.sleep(FULL_RETRY_S[index])  # Bounded: a route restart or epoch re-arms it.
 
     async def _read_and_forward(self):
         status, data, ac = await self.lm.read()

@@ -48,6 +48,7 @@ class Upstream:
     def __init__(self, store, events):
         self.events = events
         self.sub, self.ep, self.up, self.tok = False, 0, False, 0
+        self.refused = False
         self.account, self.signed, self.rejected = None, False, False
         self.reads, self.commands, self.configured = 0, [], []
         self.last_command, self.command_status, self.confirm = 0, 200, None
@@ -352,6 +353,15 @@ async def main():
             upstream.up = True
             upstream.events.upstream()
             assert (await session.next("ping", skip=()))["up"] is True
+
+            # --- A refused data plane reports `err` on `lm` while `up` stays true --
+            upstream.refused = True
+            upstream.events.upstream()
+            refusal = await session.next("lm")
+            assert refusal["err"] == "auth" and refusal["sub"] and refusal["tok"] == 3000
+            upstream.refused = False
+            upstream.events.upstream()
+            assert "err" not in await session.next("lm")
 
             # --- A newer controller's frame type is ignored and counted ------------
             await session.send({"t": "webhook", "id": 1})
