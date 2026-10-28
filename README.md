@@ -9,6 +9,9 @@ controller does everything on its own, and the companion takes work off it.
   full copy of the Web UI. It opens instantly, shows up even while the
   espresso machine is off, and reconnects on its own as soon as the
   controller is back. The controller's own address keeps working as before.
+- **Every screen live at once.** Once paired, a phone, a tablet and a computer
+  can all use the Web UI through the companion at the same time, each on its
+  own page, while the controller serves a single one: the companion's.
 - **The La Marzocco cloud, handled for the controller** (Linea Micra). Once
   you pair the companion and turn this on, the companion keeps the
   connection to La Marzocco's servers. The controller stops encrypting and
@@ -34,8 +37,8 @@ The companion does the fiddly parts for you:
 
 ## Pair it with the controller
 
-Pairing is what lets the controller hand work to the companion. It takes a
-minute and you do it once:
+Pairing is what lets the controller hand work to the companion and share its
+Web UI between your screens. It takes a minute and you do it once:
 
 1. Start the companion (see below). It finds the controller and asks to pair
    on its own.
@@ -58,6 +61,35 @@ companion cannot be sure the controller really means it, so it only stops
 using your La Marzocco account and keeps it. Its page then offers **Pair
 again** or **Erase this pairing**; until you choose one, your La Marzocco
 account stays on the companion.
+
+## Several screens at once
+
+Without the companion, the controller shows its live Web UI on one device at a
+time: opening it on another device takes it over, and the first one offers
+**Reload**. Through a paired companion, every device that opens
+**`https://openbrewbyweight-secure.local`** stays live:
+
+- Home, the shot card, Settings, History, Stats, Diagnostic and its log work
+  on every screen, each with its own page, filters and scroll position. A
+  shot shows on all of them as it happens.
+- The controller still talks to one Web UI only, the companion's, so a second
+  or third screen adds almost nothing to its Wi-Fi traffic. The companion
+  keeps what each new screen needs and answers it itself.
+- Commands from different screens reach the controller one at a time, in the
+  order you gave them, each after the previous one has taken effect.
+- Each screen keeps its own Admin unlock: unlocking Admin on one screen locks
+  it on the screen that had it, so only one screen at a time can change
+  protected settings.
+- Opening the Web UI at the controller's own address still takes it over:
+  every companion screen then offers **Reload**, which brings that screen
+  back and hands the Web UI back to the companion.
+
+**Web UI through the companion**, in **Admin → Companion**, is on by default.
+Turn it off to keep every device on the controller's own address: the
+companion's secure address then shows a page with the controller's address
+instead of the Web UI. A controller with older firmware, or a companion that
+is not paired yet, keeps working as before: the companion passes the Web UI
+straight through, one screen at a time.
 
 ## La Marzocco
 
@@ -83,8 +115,9 @@ account to the companion, encrypted with a key only the two of them know.
 - With **Show power state** off the controller keeps using its own La
   Marzocco connection, and the companion does not sign in at all.
 
-The companion's page shows whether it is paired, connected to the
-controller, and whether the controller is using its La Marzocco connection.
+The companion's page shows whether it is paired, how many screens use the
+Web UI through it, whether it is connected to the controller, and whether the
+controller is using its La Marzocco connection.
 
 ## What you need
 
@@ -210,6 +243,9 @@ Everything lives in the `data` folder on your server:
 | `secrets/credentials.json` | Your La Marzocco email, password and machine serial, only while La Marzocco is on. |
 | `secrets/lamarzocco.json` | The key of the companion's own La Marzocco installation, kept until the companion is unpaired. |
 
+The keys the companion uses to sign each screen's requests to the controller
+live only in memory and change every time it starts.
+
 - The `secrets` folder and the keys can be read only by the server's
   administrator (root).
 - The pairing secret never crosses the network: the controller and the
@@ -233,9 +269,13 @@ Everything lives in the `data` folder on your server:
   it cannot be fooled into trusting any other website with it.
 - **The server cannot open the companion itself** because the companion has its
   own address. Every other device on the network can.
-- **Every phone looks like the same device to the controller**, as with any
-  reverse proxy, so five wrong passwords pause sign-in for everyone using the
-  companion for 30 seconds.
+- **Each device signs in on its own.** A paired companion tells the controller
+  which device each request comes from, signed so that no other device on
+  your network can claim to be the companion, so five wrong passwords on one
+  phone pause sign-in for that phone only. Before pairing, or with older
+  firmware, every device looks like the same one to the controller, as with
+  any reverse proxy, and five wrong passwords pause sign-in for everyone
+  using the companion for 30 seconds.
 - **The name has a single part before `.local` on purpose.** Names such as
   `secure.openbrewbyweight.local` work on Apple devices, but some Windows,
   Linux and Android devices cannot open `.local` names with more than one
@@ -250,14 +290,14 @@ Everything lives in the `data` folder on your server:
   your home network once whether it is a controller, and searches again
   only while no controller answers, at most every 30 minutes. A controller
   found that way gets one short request every 30 minutes to check that it
-  is still there. Once
-  paired, it keeps one quiet connection open to the controller: a short
-  message when it connects, every two minutes, or every 15 seconds while it
-  carries La Marzocco (replacing the controller's own La Marzocco check one
-  for one), and when its La Marzocco connection comes up or goes down,
-  plus the machine's updates as La Marzocco sends them, each a few hundred
-  bytes. The controller still allows one live Web UI at a time, exactly as
-  without the companion.
+  is still there. Once paired, all your screens share one live connection to
+  the controller, which closes a few seconds after the last screen does.
+  While La Marzocco is on, the companion also keeps one quiet connection open
+  for it: a short message when it connects, every two minutes, or every 15
+  seconds while it carries La Marzocco (replacing the controller's own La
+  Marzocco check one for one), and when its La Marzocco connection comes up
+  or goes down, plus the machine's updates as La Marzocco sends them, each a
+  few hundred bytes. Without La Marzocco that connection stays closed.
 
 More: [device setup](docs/device-setup.md),
 [troubleshooting](docs/troubleshooting.md) and
@@ -268,17 +308,18 @@ More: [device setup](docs/device-setup.md),
 The image is `nginx:1.28-alpine` plus Python, `zeroconf`, `aiohttp`,
 `cryptography` and OpenSSL, all from Alpine's packages; nothing is installed
 with `pip`. `gateway/gateway.py` is the supervisor (discovery, certificates,
-nginx) and starts the companion service in `companion/` (pairing, the
-controller link and the La Marzocco client); see
-[how it works](docs/how-it-works.md). The link protocol is defined in the
-firmware's `docs/COMPANION_LINK.md`; `tests/fixtures` holds a copy of its
+nginx) and starts the companion service in `companion/` (pairing, the Web UI
+relay for every screen, the controller link and the La Marzocco client); see
+[how it works](docs/how-it-works.md). The link and relay protocols are defined in
+the firmware's `docs/COMPANION_LINK.md`; `tests/fixtures` holds a copy of its
 shared test vectors.
 
 Every test runs offline inside the image, against a real nginx, a fake
-controller and a fake La Marzocco cloud:
+controller (`tests/fake_controller.py` for the relay and the screens) and a
+fake La Marzocco cloud:
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link scan; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
+docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
 ```
 
 `./setup`'s test runs the script against a fake Docker (about 20 seconds,

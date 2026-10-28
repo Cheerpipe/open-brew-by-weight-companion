@@ -6,10 +6,11 @@ supervisor (`gateway/gateway.py`) that keeps nginx's configuration current
 and runs the companion service (`companion/`) on a thread of its own.
 
 ```text
-phone ──https──▶ nginx ──http──────────────▶ controller
-  │                ▲  └─/__companion/─▶ companion service ──link (ws)──▶ controller
-  └──http (setup)──┘                        │
-                                            └──https/wss──▶ La Marzocco cloud
+phones ─https─▶ nginx ──pages, assets──────────────────────────▶ controller
+  │               │ └─/api/, live updates, /__companion/─▶ companion service
+  └─http (setup)──┘                    ├─signed REST, one ui-stream──▶ controller
+                                       ├─link (ws), only while needed─▶ controller
+                                       └─https/wss──▶ La Marzocco cloud
 supervisor: mDNS, certificates, nginx config; tells the service the controller's address
 ```
 
@@ -84,10 +85,11 @@ scale, so the gateway avoids generating traffic toward it:
   searching the network gets a single request every 30 minutes, and the
   network search itself sends the controller one request.
 - Each forwarded request closes its connection to the controller when done,
-  which frees the controller's few sockets right away. Live updates use one
-  WebSocket, as without the gateway.
-- Once paired, the companion keeps one link open to the controller and
-  sends only what the protocol needs: a ping when the link opens, every 2
+  which frees the controller's few sockets right away. At most two requests
+  reach it at once: one command and one read. Live updates use one WebSocket
+  for every screen, which closes 5 seconds after the last screen does.
+- Once paired, while La Marzocco is on, the companion keeps one link open to
+  the controller and sends only what the protocol needs: a ping when the link opens, every 2
   minutes (15 seconds while it carries La Marzocco, replacing the
   controller's own La Marzocco WebSocket ping) and when its La Marzocco
   connection comes up or goes down, and machine updates of a few hundred
@@ -127,12 +129,18 @@ replaces the earlier copy.
 
 ## Forwarding
 
-nginx terminates HTTPS (TLS 1.2 and 1.3, HTTP/2) and forwards to the
-controller over plain HTTP on your network. The controller only answers
-requests addressed to itself, so nginx sends `Host` and `Origin` set to the
-controller's address. WebSocket upgrades are forwarded and responses are not
-buffered, so live readings flow without delay. Firmware updates from the Web
-UI work through the gateway as well.
+nginx terminates HTTPS (TLS 1.2 and 1.3, HTTP/2). It forwards the Web UI's
+pages and files to the controller over plain HTTP on your network, with
+`Host` and `Origin` set to the controller's address because the controller
+only answers requests addressed to itself. The API (`/api/`) and the live
+updates (`/api/v1/ui/ui-stream`) go to the companion service instead, with
+the browser's address in `X-Real-IP`, unbuffered, so live readings flow
+without delay; it relays them for every screen (see
+[Screens and the relay](#screens-and-the-relay)). Firmware updates from the
+Web UI work through the companion as well: their 64 KiB chunks go through
+it, signed like any other request. The companion's own controller routes
+(`/api/v1/companion/…`) answer `404` through the secure address, except
+`/api/v1/companion/admin`, which Admin → Companion sends.
 
 ### Web UI cache
 
@@ -151,6 +159,12 @@ update, when every phone loads the new Web UI at the same time.
 - **While the controller is off**, the gateway serves the last copy of each
   page it loaded, so a new device can still open the Web UI. Everything else
   waits for the controller.
+- **Before each page**, nginx asks the companion service
+  (`auth_request /__companion/ui-gate`). While the controller has the Web UI
+  through the companion turned off, the service answers `403` and nginx shows
+  the companion's notice with the controller's own address
+  (`/__companion/ui-off`) instead; the service worker (`/sw.js`) always
+  loads.
 
 The API, live readings and firmware updates are never cached. Every cached
 response carries an `X-Gateway-Cache` header (`HIT`, `MISS`, `REVALIDATED`,
@@ -280,12 +294,104 @@ while the controller has set the route to the companion:
 
 The service never logs passwords, tokens, keys or pairing codes.
 
+### Screens and the relay
+
+The controller holds one Web UI claim and one live-update session. The
+service holds both on behalf of every screen that opens the secure address,
+so the controller's work does not grow with the number of screens. The
+controller stays in charge of sign-in, Admin unlock, lockouts and every
+safety gate; the direct address works as before.
+
+**Relay session.** It needs no clock and stores nothing. At start, on each
+controller announcement and when the controller answers `RELAY_STALE`, the
+service reads `GET /api/v1/companion/relay` (the controller's 16-byte
+challenge `rb`), then `POST`s its id, a fresh nonce `nc` and
+`HMAC(S, "R" ‖ rb ‖ nc)`. The controller proves the secret back with
+`HMAC(S, "Q" ‖ rb ‖ nc)` and says whether the Web UI goes through the
+companion (`ui`) and whether a feature needs the link (`link`). Both sides
+derive `Kr = HKDF-SHA256(S, salt = rb ‖ nc, info = "obbw-relay-v1")`. A
+forgotten companion receives `erase`, signed like the link's, and then
+deletes its pairing; an unsigned "not paired" only stops La Marzocco.
+
+**Signed requests.** Each request to the controller carries
+`X-OBBW-Relay: 1 <q> <addr> <screen> <mac>`: a counter from 1 per relay
+session, the browser's address from nginx, the browser's own
+`X-WebUI-Client`, and the first 16 bytes of
+`HMAC-SHA256(Kr, "obbw-relay-v1\nMETHOD\nURI\nq\naddr\nscreen\nsession\n")`
+in hex, where `URI` is the path and query exactly as sent and `session` the
+browser's `X-WebUI-Session`. The controller accepts each counter once. Only
+`Content-Type`, `X-WebUI-Session`, `X-WebUI-Activity`, `X-Device-Password`,
+the firmware update headers (`X-OTA-*`, `Content-Range`) and the body go to
+the controller; a request the controller refused as `RELAY_STALE` is sent
+once more after a new handshake. The source address alone is never trusted:
+a Docker host may share its address with Home Assistant.
+
+**One client id.** The service has one random 24-digit client id per start.
+Every claim and sign-in goes with that id, so the controller sees one Web UI
+owner for every screen; a screen whose claim the controller accepted sends
+its later calls with that id too. Another browser's calls keep their own
+id, so the controller still refuses what that browser may not do.
+
+**Live updates.** Screens connect to the service; their ops are validated
+against the controller's own rules (an invalid one closes that screen with
+`4003`) and never forwarded as they are. The service opens one signed
+ui-stream, binds it with the union of the screens' subscriptions and builds
+every op itself:
+
+- Home, Settings and Diagnostic are kept as merged models. A new screen gets
+  one snapshot built from them (Diagnostic split into frames of at most
+  20 KiB); Settings sends nothing when the screen's `tag` is current, and
+  Home leaves out the presets the screen already holds.
+- The shot card is kept from its last snapshot (at most 512 frames or
+  256 KiB) and replayed to a new screen.
+- The log keeps a ring of the last 1,024 events (512 KiB) and serves each
+  screen from its own cursor; a cursor the ring does not hold refills that
+  screen from the oldest event.
+- History and Stats keep one standing window for the group of screens with
+  the same parameters, replayed to screens that join it (up to 16 pages or
+  512 KiB). Other groups get one fetch with every parameter, once when they
+  appear and again when the store changes; scrolls and exports are fetches
+  too, one at a time, and identical ones are shared. When the standing
+  group's last screen leaves, the most recently active other group takes
+  the window.
+- The offline copy's record index is cached per store; screens asking at
+  the same time share one request.
+- `activity` is aggregated: the controller hears the longest power window of
+  the visible screens, and `hidden` only when every screen is hidden.
+  Screens get `alive` from the service while the controller was heard in
+  the last 25 seconds.
+
+**Commands.** Changes go to the controller one at a time, in order, beside at
+most one read. After a `202` the next change waits until Home's
+`lastCommand` shows that request settled, or 10 seconds. A request from a
+browser that left while it waited is dropped.
+
+**Takeover and loss.** When a browser opens the Web UI at the controller's
+own address, the controller closes the shared session with `4001`; every
+screen is closed with `4001` (reason `direct`) and offers **Reload**. Losing
+the controller closes the screens plainly, so they show the out-of-reach
+notice and reconnect. A screen that falls 1 MiB behind is closed with
+`4002` and reconnects quietly.
+
+**Passthrough and the switch.** Before pairing, or with a controller that
+has no relay route (older firmware), the service is a plain proxy: each
+browser gets its own session with the controller, one at a time, as without
+the companion, and the link stays on as before. While the controller has
+the Web UI through the companion turned off, `/api/` answers
+`409 COMPANION_UI_OFF` and pages show the notice. The link itself opens
+only while the controller's relay answer says a feature needs it, such as
+La Marzocco.
+
 ### Status page and JSON
 
 `/__companion/` (and `/__companion/pair`) is the status and pairing page.
 `/__companion/status` returns the same state as JSON for the Web UI's
 Diagnostic page: `name`, `version`, `id`, `paired`, `pairedWith`, the
-`controller`, `pairing` (`state`, and the `code` while pending), `link`
+`controller`, `pairing` (`state`, and the `code` while pending), `relay`
+(`passthrough`, `ready` or `disabled`), `screens` (screens connected),
+`owner` (whether the companion holds the controller's Web UI claim),
+`views` (screens per view: `home`, `settings`, `diagnostic`, `log`,
+`history`, `stats`), `link`
 (`down`, `connecting`, `open` or `retry` with `linkReason`, for example
 `VERSION` when the controller speaks another link version or `ERROR` after
 an unexpected error), the La Marzocco `route`, `unknownFrames` (frames of
@@ -338,10 +444,13 @@ name). It asks for the controller's address only when nothing answers.
 | `gateway/setup.html` | Setup page template. |
 | `gateway/strings.json` | Setup page texts in English and Spanish. |
 | `companion/service.py` | Companion service: the link, the La Marzocco route, the status page and JSON. |
+| `companion/relay.py` | Relay session, signed requests, header whitelist, passthrough. |
+| `companion/screens.py`, `companion/mux.py`, `companion/upstream.py` | Screens' API and live updates, the multiplexer, and the one session with the controller. |
 | `companion/pairing.py`, `companion/link.py`, `companion/crypto.py` | Pairing client, link handshake and frame codec, link cryptography. |
 | `companion/lamarzocco.py`, `companion/dashboard.py` | La Marzocco client, and the dashboard filter. |
 | `companion/store.py` | The files in `data/secrets/`. |
 | `companion/page.html` | Status and pairing page, styled like the setup page. |
+| `companion/ui-off.html` | Notice with the controller's address while the Web UI goes directly to it. |
 | `setup` | Setup and check script, run on the server. |
 | `compose.host.yaml`, `compose.existing-network.yaml` | Network modes, chosen with `COMPOSE_FILE`. |
 | `data/` (volume) | CA and server certificate with their keys (readable only by root), and the last controller found. |
