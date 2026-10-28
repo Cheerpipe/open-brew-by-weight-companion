@@ -101,16 +101,30 @@ class Controller:
 
     def __init__(self):
         self.pair_requests, self.pair_state, self.mode = [], "pending", "ok"
+        self.commitment, self.key_sent, self.revealed, self.reveal_status = None, False, False, 202
         self.sessions = asyncio.Queue()
 
     async def pair_post(self, request):
         assert request.content_type == "application/json"
-        self.pair_requests.append(await request.json())
-        return web.json_response({"state": "pending", "expiresInS": 600}, status=202)
+        body = await request.json()
+        self.pair_requests.append(body)
+        if "commitment" in body:  # Commit: a new request, whose key is made afterwards.
+            assert "publicKey" not in body
+            self.commitment, self.key_sent, self.revealed = body["commitment"], False, False
+            return web.json_response({"state": "pending", "expiresInS": 600}, status=202)
+        assert self.key_sent, "the companion reveals its key only after it received the controller's"
+        assert crypto.b64(crypto.commitment(crypto.unb64(body["publicKey"], 65))) == self.commitment
+        if self.reveal_status != 202:
+            return web.json_response({"error": "INVALID_REQUEST"}, status=self.reveal_status)
+        self.revealed = True
+        return web.json_response({"state": "pending", "controllerKey": V["controllerKey"], "expiresInS": 590},
+                                 status=202)
 
     async def pair_get(self, request):
         assert request.query["id"] == self.pair_requests[-1]["id"]
-        return web.json_response({"state": self.pair_state, "controllerKey": V["controllerKey"]})
+        self.key_sent = True
+        state = "pending" if self.pair_state == "approved" and not self.revealed else self.pair_state
+        return web.json_response({"state": state, "controllerKey": V["controllerKey"]})
 
     async def link(self, request):
         if self.mode == "not_paired":
@@ -214,20 +228,21 @@ async def main():
             async with http.post(page_url + "/pair", json={}) as reply:
                 assert reply.status == 409 and (await reply.json())["error"] == "NO_CONTROLLER"
 
-            # --- Pairing (entry point a): one request, polled while pending -------
+            # --- Pairing (entry point a): commit, then reveal, polled while pending --
             companion.spawn(companion.run_link())
             companion.set_controller(target)
             await eventually(lambda: companion.pairing.state == "pending" and companion.pairing.code)
-            request = fake.pair_requests[0]
-            assert request == {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "name": "Kitchen server",
-                               "version": "1.0.0", "protocol": 1, "publicKey": V["companionKey"]}
+            identity = {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "name": "Kitchen server", "version": "1.0.0",
+                        "protocol": 1}
+            assert fake.pair_requests == [{**identity, "commitment": V["commitment"]},
+                                          {**identity, "publicKey": V["companionKey"]}]
             async with http.get(page_url + "/status") as reply:
                 status = await reply.json()
             assert status["pairing"]["code"] == V["sas"] and status["pairing"]["expiresInS"] > 590
             assert status["paired"] is False and status["link"] == "down" and status["name"] == "Kitchen server"
             companion.set_controller(target)  # Another announcement while pending sends nothing new.
             await asyncio.sleep(0.3)
-            assert len(fake.pair_requests) == 1
+            assert len(fake.pair_requests) == 2
             fake.pair_state = "approved"
             session = await asyncio.wait_for(fake.sessions.get(), 5)
             assert companion.store.pairing()["secret"] == SECRET
@@ -355,14 +370,14 @@ async def main():
             assert companion.status()["paired"] is False and companion.pairing.state == "unpaired"
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
             await asyncio.sleep(0.3)
-            assert len(fake.pair_requests) == 1, "no new request on its own after the controller forgot it"
+            assert len(fake.pair_requests) == 2, "no new request on its own after the controller forgot it"
 
             # --- Pair button (entry point b) -------------------------------------
             fake.pair_state = "denied"
             async with http.post(page_url + "/pair", json={}) as reply:
                 assert reply.status == 202
             await eventually(lambda: companion.pairing.state == "denied")
-            assert len(fake.pair_requests) == 2 and companion.store.pairing() is None
+            assert len(fake.pair_requests) == 3 and companion.store.pairing() is None
             await pages.close()
     await server.close()
     print("Companion link: pairing, handshake, cfg, creds, route, hold, commands and erase OK")

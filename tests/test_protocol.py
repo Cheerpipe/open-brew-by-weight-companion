@@ -40,6 +40,7 @@ assert crypto.public_point(companion_private) == companion_key
 assert crypto.public_point(controller_private) == controller_key
 assert crypto.scalar(companion_private).hex() == V["companionPrivate"]
 assert crypto.sas(companion_key, controller_key) == V["sas"]
+assert crypto.b64(crypto.commitment(companion_key)) == V["commitment"]
 assert companion_private.exchange(ec.ECDH(), crypto.load_point(controller_key)).hex() == V["ecdhX"]
 secret = crypto.pairing_secret(companion_private, companion_key, controller_key)
 assert secret.hex() == V["pairingSecret"]

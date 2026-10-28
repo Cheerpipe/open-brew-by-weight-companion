@@ -63,6 +63,11 @@ def mac(key, *parts):
     return hmac.new(key, b"".join(parts), hashlib.sha256).digest()
 
 
+def commitment(companion_key):
+    """What the first pair request carries instead of the key, so the key is fixed before the controller's is known."""
+    return sha256(b"obbw-companion-commit-v1", companion_key)
+
+
 def sas(companion_key, controller_key):
     """Six-digit verification code the user types in Admin → Companion."""
     value = int.from_bytes(sha256(b"obbw-companion-sas-v1", companion_key, controller_key)[:4], "big")

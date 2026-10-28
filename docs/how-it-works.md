@@ -143,13 +143,18 @@ On first start the service creates its id and a P-256 pairing key in
 `COMPANION_HOSTNAME` keeps the pairing.
 
 1. When it knows a controller it is not paired with, it sends one
-   `POST /api/v1/companion/pair` with its id, name, version and public key.
-   It sends it again only when you press **Pair** on its page, after a
-   restart, or when the controller did not answer.
+   `POST /api/v1/companion/pair` with its id, name, version and a
+   commitment to its public key (`SHA-256("obbw-companion-commit-v1" ‖
+   key)`), not the key itself. It sends a new request only when you press
+   **Pair** on its page, after a restart, or when the controller did not
+   answer.
 2. While the request is pending, it asks for its state about once a second.
-   The controller answers with a key made for this request; both sides
-   compute the six-digit code from the two public keys, and the page shows
-   it.
+   Once the controller answers with the key it made for this request, the
+   service sends the same request again with its public key (the reveal).
+   Only when the controller accepts the reveal does it compute the
+   six-digit code from the two public keys and show it on the page. Both
+   keys are fixed before either side sees the other's, so a device in the
+   middle cannot search for keys that would show matching codes.
 3. On approval both sides derive the pairing secret with ECDH and HKDF.
    Nothing secret crosses the network. The service keeps it in
    `secrets/pairing.json`.
