@@ -1,14 +1,16 @@
 # How it works
 
-Open Brew by Weight Companion runs as one container. Its HTTPS gateway is two
-programs: **nginx**, which serves the pages and forwards traffic, and a small
-Python supervisor (`gateway/gateway.py`) that keeps nginx's configuration
-current.
+Open Brew by Weight Companion runs as one container with two programs:
+**nginx**, which serves the pages and forwards traffic, and a Python
+supervisor (`gateway/gateway.py`) that keeps nginx's configuration current
+and runs the companion service (`companion/`) on a thread of its own.
 
 ```text
-phone ──https──▶ gateway (nginx) ──http──▶ controller
-  │                    ▲
-  └──http (setup)──────┘    supervisor: mDNS, certificates, nginx config
+phone ──https──▶ nginx ──http──────────────▶ controller
+  │                ▲  └─/__companion/─▶ companion service ──link (ws)──▶ controller
+  └──http (setup)──┘                        │
+                                            └──https/wss──▶ La Marzocco cloud
+supervisor: mDNS, certificates, nginx config; tells the service the controller's address
 ```
 
 ## Finding the controller
@@ -45,6 +47,11 @@ scale, so the gateway avoids generating traffic toward it:
 - Each forwarded request closes its connection to the controller when done,
   which frees the controller's few sockets right away. Live updates use one
   WebSocket, as without the gateway.
+- Once paired, the companion keeps one link open to the controller and
+  sends only what the protocol needs: a ping every 2 minutes (15 seconds
+  while it carries La Marzocco, replacing the controller's own La Marzocco
+  WebSocket ping), and machine updates of a few hundred bytes as La Marzocco
+  sends them. Pairing requests and polling happen only while you pair.
 
 ## Publishing the name
 
@@ -120,6 +127,100 @@ page stays on plain HTTP, because a device cannot use HTTPS before it trusts
 the CA. The page checks whether the device trusts the CA by loading a small
 probe from the secure address.
 
+## The companion service
+
+The service is written with `aiohttp` and `cryptography` and follows the
+link protocol in the firmware's `docs/COMPANION_LINK.md`. nginx serves its
+pages under `/__companion/` on both the setup page and the secure address,
+through a Unix socket, so the service opens no port of its own (not even in
+`compose.host.yaml`'s host network). The supervisor tells it the
+controller's address when it starts and on every mDNS announcement.
+
+### Pairing
+
+On first start the service creates its id and a P-256 pairing key in
+`data/secrets/`. They are independent of the certificate authority, so a new
+`COMPANION_HOSTNAME` keeps the pairing.
+
+1. When it knows a controller it is not paired with, it sends one
+   `POST /api/v1/companion/pair` with its id, name, version and public key.
+   It sends it again only when you press **Pair** on its page, after a
+   restart, or when the controller did not answer.
+2. While the request is pending, it asks for its state about once a second.
+   The controller answers with a key made for this request; both sides
+   compute the six-digit code from the two public keys, and the page shows
+   it.
+3. On approval both sides derive the pairing secret with ECDH and HKDF.
+   Nothing secret crosses the network. The service keeps it in
+   `secrets/pairing.json`.
+
+### The link
+
+The service opens `ws://<controller>/api/v1/companion/link`; the controller
+never connects to it. Both sides prove the pairing secret with fresh nonces
+and derive a session key; every later frame carries a sequence number and
+an HMAC, and a bad MAC, a wrong sequence or an unknown frame closes the
+link.
+
+- **Liveness:** a `ping` every 2 minutes, every 15 seconds while the
+  controller uses the companion for La Marzocco (and one right when it
+  starts to).
+- **Reconnection:** after 5, 15 and 60 seconds, then every 5 minutes, and at
+  once when the controller announces itself over mDNS. `RETRY_LATER` (a shot
+  with a scale or a scale connection in progress) waits the same way.
+- **Forgotten:** when **Forget** was chosen in Admin, the controller answers
+  the next link with `erase`, signed with the pairing secret. Only then does
+  the service delete its pairing, the La Marzocco account and the
+  installation key. A controller that simply does not know the companion
+  (after a factory reset) cannot make it delete anything; the page offers
+  to pair again.
+
+### La Marzocco
+
+The service has its own La Marzocco client, the same minimal client the
+controller has: it registers its own installation key (`/auth/init`), signs
+in, signs every request with the installation key, renews the token after
+50 minutes, reads the dashboard and sends the two commands the controller
+uses (boiler temperature and mode). With the WebSocket connection type it
+subscribes over STOMP to the machine's dashboard and pings every 15 seconds,
+reconnecting after 30 seconds without an answer; with the API type it reads
+the dashboard every 30 seconds. **Show power state** off means commands
+only, no observation.
+
+It runs while it holds the account and the controller's La Marzocco switch
+is on, whether the controller uses it or not. It sends machine state only
+while the controller has set the route to the companion:
+
+- **Only what the controller reads.** Each La Marzocco event is reduced to
+  La Marzocco's own dashboard shape with only `connected`, the machine mode,
+  the coffee and steam boiler status, target and ready time, and, in pushes
+  only, the backflush status. An event that carries none of them is
+  dropped; one that does is sent even when nothing changed.
+- **`full`** when the route starts and after every new La Marzocco
+  subscription; **`push`** for each WebSocket push, at once, also during a
+  shot; **`read`** for its own reads (after a token renewal, a `refresh`
+  command, API polling, or to check a command no push confirmed within 5
+  seconds). While the controller reports a shot with a scale, reads wait and
+  the last one is sent when the shot ends.
+- Each state frame carries the id of the last command sent to La Marzocco
+  before the observation was taken, so an older observation never undoes a
+  newer power command.
+- Commands answer `accepted` or `failed` with La Marzocco's HTTP status (0
+  when it could not be reached).
+
+The service never logs passwords, tokens, keys or pairing codes.
+
+### Status page and JSON
+
+`/__companion/` (and `/__companion/pair`) is the status and pairing page.
+`/__companion/status` returns the same state as JSON for the Web UI's
+Diagnostic page: `name`, `version`, `id`, `paired`, `pairedWith`, the
+`controller`, `pairing` (`state`, and the `code` while pending), `link`
+(`down`, `connecting`, `open` or `retry` with `linkReason`), the La
+Marzocco `route` and `laMarzocco` (`enabled`, `account`, `connection`,
+`subscribed`, `up`). `POST /__companion/pair` with a JSON body sends a new
+pairing request; a page on another site cannot send it without asking.
+
 ## Status and health checks
 
 `/__companion/gateway`, on both the setup page and the secure address, returns
@@ -130,7 +231,7 @@ device discovery saw and what it made of it, and when the server certificate
 expires. Monitoring tools such as Uptime Kuma or Home Assistant can read it.
 
 `gateway.py check`, run inside the container, probes the setup page, the
-secure address and the status. It is the image's Docker health check, so
+secure address, the gateway status and the companion service. It is the image's Docker health check, so
 `docker compose ps` shows `healthy` once a controller is known. The health
 check never contacts the controller, to keep Wi-Fi traffic away from it.
 `gateway.py check --controller` also loads the Web UI through the gateway;
@@ -159,7 +260,13 @@ cannot settle it.
 | `gateway/nginx.conf.in` | nginx configuration template. |
 | `gateway/setup.html` | Setup page template. |
 | `gateway/strings.json` | Setup page texts in English and Spanish. |
+| `companion/service.py` | Companion service: the link, the La Marzocco route, the status page and JSON. |
+| `companion/pairing.py`, `companion/link.py`, `companion/crypto.py` | Pairing client, link handshake and frame codec, link cryptography. |
+| `companion/lamarzocco.py`, `companion/dashboard.py` | La Marzocco client, and the dashboard filter. |
+| `companion/store.py` | The files in `data/secrets/`. |
+| `companion/page.html` | Status and pairing page, styled like the setup page. |
 | `setup` | Setup and check script, run on the server. |
 | `compose.host.yaml`, `compose.existing-network.yaml` | Network modes, chosen with `COMPOSE_FILE`. |
 | `data/` (volume) | CA and server certificate with their keys (readable only by root), and the last controller found. |
-| `/run/gateway/` (container) | Rendered nginx configuration, setup pages, `status.json` and the Web UI cache. |
+| `data/secrets/` (volume) | Companion id and pairing key, pairing secret, La Marzocco account and installation key (folder 0700, files 0600). |
+| `/run/gateway/` (container) | Rendered nginx configuration, setup pages, `status.json`, the Web UI cache and the service's socket. |

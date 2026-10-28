@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open Brew by Weight Companion</title>
+<style>@STYLE@
+  .code { font: 700 2.4rem/1.2 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .2em; margin: 8px 0; }
+  button { background: var(--accent); color: var(--bg); border: 0; border-radius: 8px; padding: 10px 16px; margin-top: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+  button[hidden] { display: none; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 8px 0 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <p class="muted" id="brand">Open Brew by Weight Companion</p>
+  <h1 id="title">Companion</h1>
+
+  <section class="card">
+    <h2 id="pairing-title"></h2>
+    <p id="pairing" class="status"></p>
+    <p id="code" class="code" hidden></p>
+    <p id="pairing-help" class="muted"></p>
+    <button id="pair" type="button" hidden></button>
+  </section>
+
+  <section class="card">
+    <h2 id="status-title"></h2>
+    <dl>
+      <dt id="controller-label"></dt><dd id="controller"></dd>
+      <dt id="link-label"></dt><dd id="link"></dd>
+      <dt id="lm-label"></dt><dd id="lm"></dd>
+    </dl>
+  </section>
+  <p class="muted" id="version"></p>
+</main>
+<script>
+(function () {
+  var T = {
+    en: {
+      title: "Companion", pairingTitle: "Pairing", statusTitle: "Status", controller: "Controller",
+      link: "Link", lm: "La Marzocco", pair: "Pair with the controller", pairAgain: "Pair again",
+      searching: "Looking for the controller on your network…",
+      unpaired: "Not paired yet. Pairing lets the controller hand its La Marzocco cloud connection to this companion, so the espresso machine's controller has less to do.",
+      requesting: "Asking the controller…",
+      pending: "Waiting for your approval. In the Web UI, open Admin → Companion and type this code:",
+      pendingNoCode: "Waiting for the controller to prepare the request…",
+      expires: "The request expires in {m} min.",
+      paired: "Paired with {name}.",
+      denied: "The controller declined the request.",
+      expired: "The request expired before it was approved.",
+      ignored: "The controller ignores this companion. Choose Stop ignoring in Admin → Companion, then pair again.",
+      already_paired: "The controller is already paired with a companion. Forget it in Admin → Companion first.",
+      busy: "Another companion is asking to pair right now. Try again in a few minutes.",
+      rate_limited: "The controller received another request a moment ago. Try again in a few seconds.",
+      unreachable: "The controller did not answer. Is it on?",
+      not_recognized: "The controller no longer recognizes this companion, for example after a factory reset. Pair it again.",
+      error: "Pairing did not work. The companion's log says why.",
+      down: "Not connected", connecting: "Connecting…", open: "Connected", retry: "Reconnecting ({reason})",
+      lmOff: "Off. Turn it on in Admin → Companion.", lmWaiting: "Waiting for the account from the controller",
+      lmConnecting: "Connecting to La Marzocco…", lmConnected: "Connected",
+      routeCompanion: "the controller uses this connection", routeDirect: "the controller uses its own",
+      version: "Version {v}", none: "Not found yet"
+    },
+    es: {
+      title: "Companion", pairingTitle: "Vinculación", statusTitle: "Estado", controller: "Controlador",
+      link: "Enlace", lm: "La Marzocco", pair: "Vincular con el controlador", pairAgain: "Vincular de nuevo",
+      searching: "Buscando el controlador en tu red…",
+      unpaired: "Aún no está vinculado. Al vincularlo, el controlador le entrega su conexión con la nube de La Marzocco a este companion y así tiene menos trabajo.",
+      requesting: "Consultando al controlador…",
+      pending: "Esperando tu aprobación. En la Web UI, abre Admin → Companion y escribe este código:",
+      pendingNoCode: "Esperando que el controlador prepare la solicitud…",
+      expires: "La solicitud vence en {m} min.",
+      paired: "Vinculado con {name}.",
+      denied: "El controlador rechazó la solicitud.",
+      expired: "La solicitud venció antes de ser aprobada.",
+      ignored: "El controlador ignora este companion. Elige Dejar de ignorar en Admin → Companion y vuelve a vincularlo.",
+      already_paired: "El controlador ya está vinculado con un companion. Primero olvídalo en Admin → Companion.",
+      busy: "Otro companion está pidiendo vincularse ahora. Inténtalo en unos minutos.",
+      rate_limited: "El controlador recibió otra solicitud hace un momento. Inténtalo en unos segundos.",
+      unreachable: "El controlador no respondió. ¿Está encendido?",
+      not_recognized: "El controlador ya no reconoce este companion, por ejemplo tras un restablecimiento de fábrica. Vuelve a vincularlo.",
+      error: "La vinculación no funcionó. El registro del companion dice por qué.",
+      down: "Sin conexión", connecting: "Conectando…", open: "Conectado", retry: "Reconectando ({reason})",
+      lmOff: "Apagado. Actívalo en Admin → Companion.", lmWaiting: "Esperando la cuenta desde el controlador",
+      lmConnecting: "Conectando con La Marzocco…", lmConnected: "Conectado",
+      routeCompanion: "el controlador usa esta conexión", routeDirect: "el controlador usa la suya",
+      version: "Versión {v}", none: "Aún no encontrado"
+    }
+  };
+  var lang = /^es/i.test(navigator.language || "") ? "es" : "en", t = T[lang];
+  document.documentElement.lang = lang;
+  function $(id) { return document.getElementById(id); }
+  function fill(text, values) {
+    return text.replace(/\{(\w+)\}/g, function (_, key) { return values[key]; });
+  }
+  $("title").textContent = t.title;
+  $("pairing-title").textContent = t.pairingTitle;
+  $("status-title").textContent = t.statusTitle;
+  $("controller-label").textContent = t.controller;
+  $("link-label").textContent = t.link;
+  $("lm-label").textContent = t.lm;
+
+  var timer;
+  function render(s) {
+    var p = s.pairing, state = p.state, pending = state === "pending" || state === "requesting";
+    $("brand").textContent = "Open Brew by Weight Companion · " + s.name;
+    $("version").textContent = fill(t.version, { v: s.version });
+    $("controller").textContent = s.controller ? s.controller.name + " (" + s.controller.address + ")" : t.none;
+    var message = !s.controller && !s.paired ? t.searching
+      : state === "paired" ? fill(t.paired, { name: s.pairedWith || (s.controller && s.controller.name) })
+      : state === "pending" && !p.code ? t.pendingNoCode : t[state] || t.error;
+    $("pairing").textContent = message;
+    $("pairing").className = "status" + (state === "paired" ? " ok" : pending || state === "unpaired" ? "" : " warn");
+    $("code").hidden = !(state === "pending" && p.code);
+    $("code").textContent = p.code || "";
+    $("pairing-help").textContent = state === "pending" ? fill(t.expires, { m: Math.max(1, Math.ceil(p.expiresInS / 60)) }) : "";
+    $("pair").hidden = !s.controller || pending || state === "paired";
+    $("pair").textContent = state === "unpaired" ? t.pair : t.pairAgain;
+    $("link").textContent = fill(t[s.link] || s.link, { reason: s.linkReason || "" });
+    var lm = s.laMarzocco;
+    $("lm").textContent = !s.paired ? "—" : !lm.enabled ? t.lmOff : !lm.account ? t.lmWaiting
+      : (lm.up ? t.lmConnected : t.lmConnecting) + " · " + (s.route === "companion" ? t.routeCompanion : t.routeDirect);
+    clearTimeout(timer);
+    timer = setTimeout(refresh, pending ? 1000 : 5000);
+  }
+  function refresh() {
+    fetch("/__companion/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(render, function () {
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 5000);
+    });
+  }
+  $("pair").addEventListener("click", function () {
+    $("pair").hidden = true;
+    fetch("/__companion/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(refresh, refresh);
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

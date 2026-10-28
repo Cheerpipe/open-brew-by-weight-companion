@@ -80,6 +80,63 @@ With the default setup they cannot be: the companion has its own address. If
 you run it on the server's own address instead, choose free ports; see
 [examples](../examples/README.md#run-on-the-servers-own-address).
 
+## The Web UI does not show the companion's request
+
+Open the companion's page, `http://openbrewbyweight-secure.local/__companion/`
+(or `http://<COMPANION_IP>/__companion/`). It says what happened:
+
+- **Looking for the controller:** the companion has not found it yet; see
+  above.
+- **The controller did not answer:** the controller is off or unreachable.
+  Press **Pair with the controller** once it is back.
+- **The request expired** or **was declined:** press **Pair again** and
+  approve it within 10 minutes.
+- **The controller ignores this companion:** choose **Stop ignoring** in
+  Admin → Companion, then pair again.
+- **Already paired with a companion:** the controller pairs with one
+  companion at a time. Forget the other one in Admin → Companion first.
+
+Pairing needs a controller with a firmware that has **Admin → Companion**.
+
+## Admin does not accept the code
+
+Type the code shown on the companion's page while the request is open. Three
+wrong codes decline the request; press **Pair again** on the companion's page
+for a new one. If the code on the page and the request in Admin name
+different companions, do not approve it.
+
+## The companion says the controller no longer recognizes it
+
+The controller lost its pairing, for example after a factory reset, but the
+companion still has it. Press **Pair again** on the companion's page and
+approve the request in Admin → Companion; the new pairing replaces the old
+one.
+
+## La Marzocco stays on the controller's own connection
+
+The controller switches to the companion only at a quiet moment, never
+during a shot, and only while everything below holds. Check the companion's
+page:
+
+- **Link** says **Connected**. If it says **Reconnecting**, the reason in
+  brackets says why; `RETRY_LATER` means a shot with a scale or a scale
+  connection was in progress, and it tries again by itself.
+- **La Marzocco** says **Connected**. **Off** means the switch in Admin →
+  Companion is off. **Waiting for the account** means the controller has not
+  sent it yet: connect the La Marzocco account in the Web UI first.
+- The log (`docker compose logs`) says
+  `La Marzocco refused the account` when the email or password is wrong.
+  Correct them in the Web UI; the companion tries again with the new account
+  only, so a wrong password is never retried until your account is locked.
+
+## Start the pairing over
+
+Choose **Forget** in Admin → Companion first. The next time the companion
+connects, the controller tells it to erase its pairing and the La Marzocco
+account, and it can be paired again with **Pair with the controller**. Deleting
+`data/secrets` by hand also works, but then forget the old companion in
+Admin as well.
+
 ## After updating from the HTTPS gateway
 
 The companion was called the HTTPS gateway before. `./setup` renames the

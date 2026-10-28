@@ -1,13 +1,21 @@
 # Open Brew by Weight Companion
 
 A small Docker container that runs beside your [Open Brew by Weight](https://github.com/Cheerpipe/Open-Brew-by-Weight)
-controller. It gives the Web UI a secure address on your home network:
-**`https://openbrewbyweight-secure.local`**.
+controller, on a computer at home that is always on. It is optional: the
+controller does everything on its own, and the companion takes work off it.
 
-Over HTTPS your phone keeps a full copy of the Web UI. It opens instantly,
-shows up even while the espresso machine is off, and reconnects on its own as
-soon as the controller is back. The controller's own address keeps working as
-before.
+- **A secure address for the Web UI:**
+  **`https://openbrewbyweight-secure.local`**. Over HTTPS your phone keeps a
+  full copy of the Web UI. It opens instantly, shows up even while the
+  espresso machine is off, and reconnects on its own as soon as the
+  controller is back. The controller's own address keeps working as before.
+- **The La Marzocco cloud, handled for the controller** (Linea Micra). Once
+  you pair the companion and turn this on, the companion keeps the
+  connection to La Marzocco's servers. The controller stops encrypting and
+  parsing cloud traffic, which leaves its radio to your scale, and keeps
+  showing the same machine state and sending the same commands. If the
+  companion goes away, the controller quietly goes back to its own
+  connection.
 
 The companion does the fiddly parts for you:
 
@@ -22,6 +30,50 @@ The companion does the fiddly parts for you:
   Windows and Android, and a QR code to open it on a phone.
 - **Sets itself up**: one command picks how the companion joins your network,
   starts it and checks that the Web UI answers through it.
+
+## Pair it with the controller
+
+Pairing is what lets the controller hand work to the companion. It takes a
+minute and you do it once:
+
+1. Start the companion (see below). It finds the controller and asks to pair
+   on its own.
+2. The Web UI's Home shows that **Open Brew by Weight Companion** wants to
+   connect, with the companion's name. Open **Admin → Companion**.
+3. On any device, open the companion's page,
+   **`http://openbrewbyweight-secure.local/__companion/`**. It shows a
+   six-digit code. Type it in **Admin → Companion** and choose **Approve**.
+
+The code proves that the companion asking is the one you are looking at, so
+no other device on your network can pair in its place. If the request
+expired or you did not see it, press **Pair with the controller** on the
+companion's page and approve the new request. **Ignore** in Admin stops a
+companion's requests until you choose **Stop ignoring**; **Forget** unpairs
+it, and the companion then erases everything it received from the
+controller.
+
+## La Marzocco
+
+On a Linea Micra, turn on **La Marzocco** in **Admin → Companion** after
+pairing. There is nothing to type: the controller sends its La Marzocco
+account to the companion, encrypted with a key only the two of them know.
+
+- The companion signs in as its own installation of the La Marzocco app, so
+  your account gains one installation, as when you install the app on a new
+  phone. It follows your **Settings** for the connection type (WebSocket or
+  API) and **Show power state**.
+- At a quiet moment, never during a shot, the controller switches to the
+  companion. You see the same machine state, temperature and power commands
+  keep working, the scale and paddle still wake the machine, and backflush
+  supervision is unchanged.
+- When the companion stops, restarts or loses the network, the controller
+  goes back to its own connection by itself, waiting until a shot with a
+  scale has ended.
+- Turning the switch off, or disconnecting the account in the Web UI, makes
+  the companion erase the account and its installation key.
+
+The companion's page shows whether it is paired, connected to the
+controller, and whether the controller is using its La Marzocco connection.
 
 ## What you need
 
@@ -107,18 +159,44 @@ hand, edit `.env`, leave a value empty to use its default, and run
 | `COMPANION_HTTP_PORT` / `COMPANION_HTTPS_PORT` | `80` / `443` | Ports for the setup page and the secure Web UI. |
 | `OBBW_CONTROLLER_URL` | empty | Empty finds the controller by itself. `http://<ip>` or `http://<name>.local` uses that one controller only. |
 | `OBBW_CONTROLLER_NAME` | empty | With more than one controller, the device name to use, as shown in the Web UI. |
-| `COMPANION_DATA` | `./data` | Folder that keeps the companion's certificate authority. |
+| `COMPANION_DATA` | `./data` | Folder that keeps the companion's certificate authority, pairing and keys. |
 
 See [examples](examples/README.md) for setups done by hand: a server on
 Wi-Fi, a fixed controller address, several controllers, your own DNS, and
 sharing the server's address.
 
+## What it stores, and your privacy
+
+Everything lives in the `data` folder on your server:
+
+| File | What it is |
+| --- | --- |
+| `openbrewbyweight-ca.*`, `server.*` | The certificate authority your devices trust and the companion's certificate. |
+| `controller.json` | The controller found last, so the companion starts with it. |
+| `secrets/identity.json` | The companion's id and its pairing key. |
+| `secrets/pairing.json` | The secret it shares with the controller after pairing. |
+| `secrets/credentials.json` | Your La Marzocco email, password and machine serial, only while La Marzocco is on. |
+| `secrets/lamarzocco.json` | The key of the companion's own La Marzocco installation. |
+
+- The `secrets` folder and the keys can be read only by the server's
+  administrator (root).
+- The pairing secret never crosses the network: the controller and the
+  companion each work it out from the keys they exchanged. Your La Marzocco
+  password crosses your network only encrypted with it.
+- The only connection to the internet is the one to La Marzocco's own
+  servers, and only while the La Marzocco switch is on.
+- The log never shows passwords, tokens, keys or pairing codes.
+- The companion's pages show its state and, while a request is open, the
+  pairing code. Like the setup page, anyone on your network can open them;
+  they never show account details.
+
 ## Good to know
 
-- **Keep the `data` folder.** It holds the certificate your devices trust.
-  If you delete it or change `COMPANION_HOSTNAME`, the companion creates a new one
-  and every device has to be set up again. Routine renewals happen by
-  themselves and need nothing from your devices.
+- **Keep the `data` folder.** It holds the certificate your devices trust
+  and the companion's pairing. If you delete it, every device has to be set
+  up again and the companion paired again. Changing `COMPANION_HOSTNAME`
+  also means setting up every device again, but keeps the pairing. Routine
+  renewals happen by themselves and need nothing from your devices.
 - **The certificate only works for the companion's name.** A device that trusts
   it cannot be fooled into trusting any other website with it.
 - **The server cannot open the companion itself** because the companion has its
@@ -130,13 +208,18 @@ sharing the server's address.
   `secure.openbrewbyweight.local` work on Apple devices, but some Windows,
   Linux and Android devices cannot open `.local` names with more than one
   part. Android needs version 12 or newer for any `.local` name.
-- **The companion adds no traffic to the controller.** It learns the
+- **The companion saves the controller traffic.** It learns the
   controller's address from the announcements the controller already sends
   and only forwards what your devices ask for. It keeps a copy of the Web
   UI's files, so after a firmware update each one crosses the controller's
-  Wi-Fi once rather than once per device. Only while it has not found
-  the controller yet does it ask the network again, every few minutes. The controller still allows
-  one live Web UI at a time, exactly as without the companion.
+  Wi-Fi once rather than once per device. Only while it has not found the
+  controller yet does it ask the network again, every few minutes. Once
+  paired, it keeps one quiet connection open to the controller: a short
+  message every two minutes, or every 15 seconds while it carries La
+  Marzocco (replacing the controller's own La Marzocco check one for one),
+  plus the machine's updates as La Marzocco sends them, each a few hundred
+  bytes. The controller still allows one live Web UI at a time, exactly as
+  without the companion.
 
 More: [device setup](docs/device-setup.md),
 [troubleshooting](docs/troubleshooting.md) and
@@ -144,21 +227,39 @@ More: [device setup](docs/device-setup.md),
 
 ## Development
 
-The image is `nginx:1.28-alpine` plus Python, `zeroconf` and OpenSSL from
-Alpine's packages. `gateway/gateway.py` is the supervisor. The tests
-need Python 3.10+ and OpenSSL 3 on the `PATH`, and use neither the network
-nor Docker:
+The image is `nginx:1.28-alpine` plus Python, `zeroconf`, `aiohttp`,
+`cryptography` and OpenSSL, all from Alpine's packages; nothing is installed
+with `pip`. `gateway/gateway.py` is the supervisor (discovery, certificates,
+nginx) and starts the companion service in `companion/` (pairing, the
+controller link and the La Marzocco client); see
+[how it works](docs/how-it-works.md). The link protocol is defined in the
+firmware's `docs/COMPANION_LINK.md`; `tests/fixtures` holds a copy of its
+shared test vectors.
+
+Every test runs offline inside the image, against a real nginx, a fake
+controller and a fake La Marzocco cloud:
 
 ```bash
-python3 tests/test_gateway.py
+docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link; do docker run --rm -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
 ```
 
-The Web UI cache test runs the real nginx against a fake controller, so it
-runs inside the image:
+`./setup`'s `.env` migration test needs bash, so it runs on the server or
+your computer, as does the gateway test (Python 3.10+ and OpenSSL 3):
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && docker run --rm -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_cache.py
+python3 tests/test_setup.py && python3 tests/test_gateway.py
 ```
+
+To try the companion on Docker Desktop (Mac or Windows), where it cannot
+have its own LAN address, publish its ports and point it at the controller:
+
+```bash
+docker run -d --name companion -p 8080:80 -p 8443:443 -v "$PWD/data:/data" \
+  -e OBBW_CONTROLLER_URL=http://<controller ip> -e COMPANION_MDNS_PUBLISH=false \
+  -e COMPANION_NAME="Test companion" openbrewbyweight-companion:local
+```
+
+Then open `http://localhost:8080/__companion/`.
 
 To build only the image, without starting it:
 

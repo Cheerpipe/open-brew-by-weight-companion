@@ -293,6 +293,8 @@ def check(cfg, data, through_controller):
             status = json.load(reply)
         print("ok setup-page")
         print(f"ok https {https_get(cfg, data, '/__companion/ping')}")
+        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['http_port']}/__companion/status", timeout=5) as reply:
+            print(f"ok companion link {json.load(reply)['link']}")
     except (OSError, ValueError, IndexError) as error:
         print(f"fail gateway {error}")
         return 1
@@ -316,6 +318,9 @@ def check(cfg, data, through_controller):
 def main():
     from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceStateChange, Zeroconf
 
+    sys.path.insert(0, str(HERE.parent))
+    from companion.service import start as start_companion
+
     cfg = load_config(os.environ)
     if sys.argv[1:2] == ["check"]:
         raise SystemExit(check(cfg, DATA, "--controller" in sys.argv))
@@ -330,6 +335,8 @@ def main():
     events = queue.Queue()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     threading.Thread(target=lambda: (nginx.wait(), events.put(("nginx",))), daemon=True).start()
+    companion = start_companion(cfg, DATA, RUN, lambda: events.put(("companion",)))
+    companion.controller(target)
 
     zc = Zeroconf(interfaces=[cfg["ip"]], ip_version=IPVersion.V4Only)
     if cfg["mdns_publish"]:
@@ -381,6 +388,10 @@ def main():
                 log(f"nginx exited with status {nginx.returncode}")
                 status = 1
                 break
+            if event[0] == "companion":
+                log("the companion service stopped")
+                status = 1
+                break
             if event[0] == "skip" and note(*event[1:]):
                 log(f"skipping {event[1]}: {event[3]}")
                 status_changed = True
@@ -398,6 +409,8 @@ def main():
                 site_changed = True
             elif event[0] == "tick" and ensure_certificates(cfg, DATA):
                 site_changed = True
+            if event[0] == "found" and event[1] == target:
+                companion.controller(target)  # Every announcement: reconnect now if the link is down.
             if site_changed:
                 write_site(cfg, DATA, RUN, target)
                 nginx.send_signal(signal.SIGHUP)
@@ -406,6 +419,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        companion.stop()
         zc.close()  # Sends mDNS goodbyes for the published name.
         if nginx.poll() is None:
             nginx.terminate()

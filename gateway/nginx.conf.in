@@ -12,6 +12,7 @@ http {
   include /etc/nginx/mime.types;
   access_log off;
   server_tokens off;
+  absolute_redirect off;  # Redirects keep the host and port the browser used.
 
   # Close upstream connections after each request: the controller has few sockets.
   map $http_upgrade $connection_upgrade {
@@ -49,6 +50,16 @@ http {
       return 301 /__companion/gateway;
     }
 
+    # Open Brew by Weight Companion's own pages and status.
+    location ^~ /__companion/ {
+      proxy_pass http://unix:@RUN@/companion.sock;
+      proxy_http_version 1.1;
+    }
+
+    location = /__companion {
+      return 301 /__companion/;
+    }
+
     location ~ \.mobileconfig$ {
       types { }
       default_type application/x-apple-aspen-config;
@@ -77,6 +88,16 @@ http {
 
     location = /__gateway/status {
       return 301 /__companion/gateway;
+    }
+
+    # Open Brew by Weight Companion's own pages and status.
+    location ^~ /__companion/ {
+      proxy_pass http://unix:@RUN@/companion.sock;
+      proxy_http_version 1.1;
+    }
+
+    location = /__companion {
+      return 301 /__companion/;
     }
 
     # Versioned assets: cached for as long as the controller allows, which is

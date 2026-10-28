@@ -1,0 +1,58 @@
+{
+  "description": "La Marzocco customer-app payloads for a Linea Micra, shaped like the firmware's micra host-test payloads (src/tests/micra_*_host_test.cpp) with the other keys the cloud sends around them. Identifiers are fictitious.",
+  "read": {
+    "serialNumber": "MR012345",
+    "type": "CoffeeMachine",
+    "name": "MR012345",
+    "location": "HOME",
+    "modelCode": "LINEAMICRA",
+    "modelName": "LINEA MICRA",
+    "connected": true,
+    "connectionDate": 1760000000000,
+    "offlineMode": false,
+    "requireFirmwareUpdate": false,
+    "availableFirmwareUpdate": false,
+    "coffeeStation": null,
+    "imageUrl": "https://example.invalid/lineamicra.png",
+    "bleAuthToken": null,
+    "widgets": [
+      {"code": "CMMachineStatus", "index": 1, "output": {"status": "PoweredOn", "availableModes": ["BrewingMode", "StandBy"], "mode": "BrewingMode", "nextStatus": null, "brewingStartTime": null}},
+      {"code": "CMCoffeeBoiler", "index": 1, "output": {"status": "HeatingUp", "enabled": true, "enabledSupported": false, "targetTemperature": 93.0, "targetTemperatureMin": 80, "targetTemperatureMax": 100, "targetTemperatureStep": 0.1, "readyStartTime": 1760000460000}},
+      {"code": "CMSteamBoilerLevel", "index": 1, "output": {"status": "HeatingUp", "enabled": true, "enabledSupported": true, "targetLevel": "Level3", "targetLevelSupported": true, "readyStartTime": 1760000820500}},
+      {"code": "CMPreExtraction", "index": 1, "output": {"availableModes": ["PreBrewing", "Disabled"], "mode": "Disabled", "times": {"In": {"seconds": {"PreBrewing": 2.0}}, "Out": {"seconds": {"PreBrewing": 3.0}}}}},
+      {"code": "CMBackFlush", "index": 1, "output": {"lastCleaningStartTime": 1759900000000, "status": "Off"}},
+      {"code": "CMGroupDoses", "index": 1, "output": {"mirrorWithGroup1Supported": false, "doses": {}}}
+    ],
+    "invalidWidgets": [{"code": "CMMachineGroupStatus", "index": 1, "output": {}}],
+    "runningCommands": []
+  },
+  "pushes": {
+    "standby": {
+      "connected": true,
+      "removedWidgets": [],
+      "connectionDate": 1760000500000,
+      "widgets": [
+        {"code": "CMMachineStatus", "index": 1, "output": {"status": "StandBy", "availableModes": ["BrewingMode", "StandBy"], "mode": "StandBy", "nextStatus": null, "brewingStartTime": null}},
+        {"code": "CMCoffeeBoiler", "index": 1, "output": {"status": "StandBy", "enabled": true, "targetTemperature": 93.0, "readyStartTime": null}}
+      ],
+      "runningCommands": [{"id": "c0ffee00-0000-4000-8000-000000000001", "commandType": "CoffeeMachineChangeMode", "status": "Success"}]
+    },
+    "temperature": {
+      "widgets": [{"code": "CMCoffeeBoiler", "index": 1, "output": {"status": "HeatingUp", "enabled": true, "targetTemperature": 93.5, "readyStartTime": 1760000700000}}]
+    },
+    "backflush": {
+      "connected": true,
+      "widgets": [{"code": "CMBackFlush", "index": 1, "output": {"lastCleaningStartTime": 1760000900000, "status": "Requested"}}]
+    },
+    "commandsOnly": {
+      "runningCommands": [{"id": "c0ffee00-0000-4000-8000-000000000002", "commandType": "CoffeeMachineSettingCoffeeBoilerTargetTemperature", "status": "Pending"}],
+      "widgets": [{"code": "CMPreExtraction", "index": 1, "output": {"mode": "PreBrewing"}}]
+    },
+    "removed": {
+      "removedWidgets": ["CMBackFlush", {"code": "CMSteamBoilerLevel", "index": 1}, "CMPreExtraction"]
+    },
+    "offline": {
+      "connected": false
+    }
+  }
+}
