@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Web UI cache behavior against a real nginx and a fake controller.
+"""Web UI cache and routing against a real nginx, a fake controller and a stand-in companion socket.
 
 Needs nginx on the PATH, so run it inside the gateway image:
 
@@ -7,12 +7,15 @@ Needs nginx on the PATH, so run it inside the gateway image:
     docker run --rm -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_cache.py
 """
 
+import base64
 import gzip
+import hashlib
 import http.client
 import http.server
 import importlib.util
 import shutil
 import socket
+import socketserver
 import ssl
 import subprocess
 import tempfile
@@ -34,7 +37,7 @@ gateway.qr_svg = lambda text: ""
 TAG = "abcd1234"
 ASSETS = {"/app.js", "/js/runtime.js"}
 SHELLS = {"/", "/stats"}
-state = {"release": "1.0.0", "requests": []}
+state = {"release": "1.0.0", "requests": [], "companion": [], "ui": True}
 lock = threading.Lock()
 
 
@@ -82,6 +85,42 @@ class Controller(http.server.BaseHTTPRequestHandler):
             self.reply(404, b"", {})
 
 
+class Companion(http.server.BaseHTTPRequestHandler):
+    """The companion service's socket: the Web UI gate and notice, the API and the live updates."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        with lock:
+            state["companion"].append((self.command, self.path, dict(self.headers)))
+        if self.path == "/__companion/ui-gate":
+            self.send_response(204 if state["ui"] else 403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif self.headers.get("Upgrade", "").lower() == "websocket":
+            accept = base64.b64encode(hashlib.sha1(
+                (self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept.decode())
+            self.end_headers()
+            self.close_connection = True
+        else:
+            body = b"notice" if self.path == "/__companion/ui-off" else b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html" if body == b"notice" else "application/json")
+            self.send_header("Cache-Control", "public, max-age=60")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    do_POST = do_GET
+
+
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -105,6 +144,9 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
                                "HTTPS_PORT": str(https_port)})
     gateway.ensure_certificates(cfg, data)
     gateway.write_site(cfg, data, run, ("Fake", ("127.0.0.1", controller_port)))
+    companion = socketserver.ThreadingUnixStreamServer(str(run / "companion.sock"), Companion)
+    (run / "companion.sock").chmod(0o666)
+    threading.Thread(target=companion.serve_forever, daemon=True).start()
     nginx = subprocess.Popen(["nginx", "-c", str(run / "nginx.conf"), "-g", "daemon off;"])
     try:
         for _ in range(100):
@@ -150,11 +192,25 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
             assert [get(path)[1]["x-gateway-cache"] for _ in range(2)] == ["MISS", "MISS"]
             assert len(upstream(path)) == 2
 
-        # The API is never cached, even when its headers would allow it.
+        # The API goes to the companion with the browser's address, never cached; its own routes never do.
         for _ in range(2):
-            status, headers, _ = get("/api/v1/status")
+            status, headers, _ = get("/api/v1/status", **{"X-Real-IP": "6.6.6.6"})
             assert status == 200 and "x-gateway-cache" not in headers
-        assert len(upstream("/api/v1/status")) == 2
+        api = [request for request in state["companion"] if request[1] == "/api/v1/status"]
+        assert len(api) == 2 and api[0][2]["X-Real-IP"] == "127.0.0.1" and not upstream("/api/v1/status")
+        assert get("/api/v1/companion/pair")[0] == 404 and get("/api/v1/companion/relay")[0] == 404
+        assert get("/api/v1/companion/admin")[0] == 200, "Admin → Companion's actions are relayed"
+        assert not [request for request in state["companion"] if request[1].startswith("/api/v1/companion/p")]
+
+        # Live updates: the upgrade reaches the companion.
+        connection = http.client.HTTPSConnection("127.0.0.1", https_port, context=context, timeout=15)
+        connection.request("GET", "/api/v1/ui/ui-stream", headers={
+            "Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13",
+            "Sec-WebSocket-Key": base64.b64encode(b"0123456789abcdef").decode()})
+        assert connection.getresponse().status == 101
+        connection.close()
+        stream = [request for request in state["companion"] if request[1] == "/api/v1/ui/ui-stream"]
+        assert stream and stream[0][2]["Upgrade"] == "websocket" and stream[0][2]["X-Real-IP"] == "127.0.0.1"
 
         # The shell is revalidated on every load: a 304 from the controller when unchanged...
         status, headers, body = get("/")
@@ -170,6 +226,15 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
         status, headers, body = get("/")
         assert status == 200 and b"1.1.0" in gzip.decompress(body) and headers["etag"] == f'"1.1.0.{TAG}"'
 
+        # The Web UI through the companion turned off: pages show the companion's notice instead.
+        state["ui"] = False
+        shells = len(upstream("/stats"))
+        status, _, body = get("/stats")
+        assert (status, body) == (200, b"notice") and len(upstream("/stats")) == shells
+        gates = [request for request in state["companion"] if request[1] == "/__companion/ui-gate"]
+        assert gates[-1][2]["X-Original-URI"] == "/stats"
+        state["ui"] = True
+
         # Controller off: the last shell, worker and assets still load; nothing else does.
         controller.shutdown()
         controller.server_close()
@@ -179,11 +244,11 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
         assert get("/sw.js")[1]["x-gateway-cache"] == "STALE"
         assert get(f"/app.js?v={TAG}")[1]["x-gateway-cache"] == "HIT"
         assert get("/stats")[0] == 502, "a page never loaded through the gateway has no copy"
-        assert get("/api/v1/status")[0] == 502
 
         assert {host for _, host, _ in state["requests"]} == {f"127.0.0.1:{controller_port}"}
     finally:
         nginx.terminate()
         nginx.wait()
+        companion.shutdown()
 
 print("HTTPS gateway: Web UI cache against nginx OK")

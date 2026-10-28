@@ -89,3 +89,14 @@ def credentials_key(secret):
 
 def decrypt_credentials(secret, generation, iv, ciphertext):
     return AESGCM(credentials_key(secret)).decrypt(iv, ciphertext, f"obbw-creds|{generation}".encode())
+
+
+def relay_key(secret, challenge, nonce):
+    """Kr: the key of one relay session (the controller's challenge, the companion's nonce)."""
+    return hkdf(secret, challenge + nonce, b"obbw-relay-v1")
+
+
+def relay_tag(key, method, uri, counter, address, screen, session):
+    """The relayed request's MAC: 32 lowercase hex digits over the canonical string."""
+    canonical = f"obbw-relay-v1\n{method}\n{uri}\n{counter}\n{address}\n{screen}\n{session}\n"
+    return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()[:32]
