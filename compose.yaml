@@ -5,7 +5,7 @@ services:
   companion:
     build: .
     image: openbrewbyweight-companion:local
-    container_name: companion
+    container_name: openbrewbyweight-companion
     restart: unless-stopped
     environment:
       COMPANION_NAME: ${COMPANION_NAME:-}

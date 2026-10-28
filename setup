@@ -167,7 +167,10 @@ fi
 
 start() {
 	local out
-	docker rm -f openbrewbyweight-https-gateway >/dev/null 2>&1 || true # the container before the rename
+	# The containers before the renames; `companion` only when this folder's Compose project made it.
+	docker rm -f openbrewbyweight-https-gateway >/dev/null 2>&1 || true
+	docker ps -aq --filter name='^companion$' --filter "label=com.docker.compose.project.working_dir=$PWD" |
+		xargs -r docker rm -f >/dev/null 2>&1 || true
 	if ! out=$(docker compose up -d --build --remove-orphans 2>&1); then
 		printf '%s\n' "$out" | tail -n 5
 		[[ $out == *"Pool overlaps"* ]] && warn "Another Docker network covers your LAN; run ./setup again and choose new settings."

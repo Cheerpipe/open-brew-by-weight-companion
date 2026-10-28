@@ -141,8 +141,9 @@ Admin as well.
 
 The companion was called the HTTPS gateway before. `./setup` renames the
 settings in `.env` (the earlier file is kept as `.env.bak`) and removes the
-old `openbrewbyweight-https-gateway` container, so run it once after
-updating. Settings with the earlier names keep working if you start the
+old `openbrewbyweight-https-gateway` container (and the container named
+`companion` from before it was renamed `openbrewbyweight-companion`), so run
+it once after updating. Settings with the earlier names keep working if you start the
 companion with `docker compose up -d` instead. If `docker compose up` then
 reports `Pool overlaps`, the old container's network is still there: run
 `./setup` and choose new settings, and it joins that network.

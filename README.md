@@ -254,7 +254,7 @@ To try the companion on Docker Desktop (Mac or Windows), where it cannot
 have its own LAN address, publish its ports and point it at the controller:
 
 ```bash
-docker run -d --name companion -p 8080:80 -p 8443:443 -v "$PWD/data:/data" \
+docker run -d --name openbrewbyweight-companion -p 8080:80 -p 8443:443 -v "$PWD/data:/data" \
   -e OBBW_CONTROLLER_URL=http://<controller ip> -e COMPANION_MDNS_PUBLISH=false \
   -e COMPANION_NAME="Test companion" openbrewbyweight-companion:local
 ```
