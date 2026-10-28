@@ -20,6 +20,19 @@ your network for the controller.
 `docker compose ps` shows the companion as `healthy` once it serves the setup
 page and the secure address and has found a controller.
 
+The log is also kept on disk, under the data folder you chose during setup
+(`./data` by default), with the same timestamped lines as above:
+
+```bash
+ls data/log          # companion.log plus the rotated companion.log.1 … .8
+tail -f data/log/companion.log
+```
+
+It survives container restarts and keeps at most about 4 MB of history, so a
+problem from last night is still there in the morning. Set `COMPANION_TZ` in
+`.env` to your timezone (for example `America/Santiago`) so these lines line
+up with the controller's own log.
+
 ## `docker compose up` fails with a network error
 
 - **`no configured subnet contains IP address`:** `COMPANION_IP` is outside

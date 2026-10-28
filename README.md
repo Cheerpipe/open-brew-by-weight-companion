@@ -219,6 +219,7 @@ hand, edit `.env`, leave a value empty to use its default, and run
 | `COMPOSE_FILE` | `compose.yaml` | How the companion joins the network: add `compose.host.yaml` to share the server's address, or `compose.existing-network.yaml` to join `LAN_NETWORK`. |
 | `LAN_NETWORK` | empty | A macvlan or ipvlan network that already exists on the server, to join instead of creating one; see [examples](examples/README.md#a-lan-network-that-already-exists). |
 | `COMPANION_NAME` | this server's name | The name the companion shows on its pages. |
+| `COMPANION_TZ` | `UTC` | Timezone of the companion's log lines (for example `America/Santiago`), so they line up with the controller's log. |
 | `COMPANION_HOSTNAME` | `openbrewbyweight-secure` | The name devices open, followed by `.local`. Changing it means setting up every device again. |
 | `COMPANION_MDNS_PUBLISH` | `true` | Turn off if your own DNS already points the name at the companion. |
 | `COMPANION_HTTP_PORT` / `COMPANION_HTTPS_PORT` | `80` / `443` | Ports for the setup page and the secure Web UI. |

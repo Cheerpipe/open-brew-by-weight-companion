@@ -3,10 +3,12 @@
 
 import importlib.util
 import json
+import os
 import plistlib
 import re
 import ssl
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -129,4 +131,27 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert ca.read_text() != ca_pem, "a new name needs a CA constrained to it"
     assert verify(ca, leaf, "brew.local") and not verify(ca, leaf, cfg["hostname"])
 
-print("HTTPS gateway: config, discovery match, certificates and rendering OK")
+# The persistent log: timestamped lines, rotation, and stdout-only degradation.
+sys.path.insert(0, str(ROOT))
+import companion  # noqa: E402
+
+with tempfile.TemporaryDirectory(prefix="openbrewbyweight-log-") as temporary:
+    data = Path(temporary)
+    companion.configure_logging(data, max_bytes=300, backups=2)
+    for index in range(20):
+        companion.log(f"line {index}")
+    companion.stop_logging()
+    folder = data / "log"
+    kept = sorted(path.name for path in folder.iterdir())
+    assert kept == ["companion.log", "companion.log.1", "companion.log.2"], kept
+    first = (folder / "companion.log").read_text().splitlines()[0]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} INFO obbw\.companion: line \d+", first), first
+    denied = data / "denied"
+    denied.mkdir()
+    os.chmod(denied, 0o500)
+    companion.configure_logging(denied)  # One warning, stdout only, nothing raised.
+    companion.log("still here")
+    companion.stop_logging()
+    os.chmod(denied, 0o700)
+
+print("HTTPS gateway: config, discovery match, certificates, rendering and the persistent log OK")
