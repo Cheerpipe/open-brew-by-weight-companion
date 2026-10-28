@@ -30,6 +30,43 @@ network again after 30 seconds, then 1, 2, 5 and every 10 minutes; once one
 is found, it stops asking. The log names every `_http._tcp` device it sees
 and why it skipped it, once per device and reason.
 
+Until mDNS confirms a controller, each of those retries logs how many
+devices' mDNS address records have reached the companion, so a log tells a
+network that does not pass multicast to the companion's address (none) from
+a controller that does not answer (some). `gateway.py mdns-check [name.local]`
+goes further from inside the container: it prints the interfaces, their flags
+and multicast groups, then asks for the controller's address and for
+`_http._tcp` as a legacy unicast query (random source port, unicast answer),
+a QM query and a QU query from port 5353, and prints every packet that
+arrives with its source, destination and interface.
+
+### Searching the network
+
+When mDNS finds nothing, the supervisor searches the companion's own IPv4
+network for the controller's unauthenticated identity route,
+`GET /api/v1/integration/info`. It accepts only a JSON object with
+`apiVersion` 1 and the keys `name`, `firmwareVersion` and `authRequired`.
+Each address gets exactly one request, with a 1 s timeout, 32 at a time, no
+redirects and no proxy, so a `/24` takes about 9 seconds. The network is the
+most specific on-link route that holds the companion's address; it is
+searched only when it is a private range (`10/8`, `172.16/12`,
+`192.168/16`) no larger than `/22`, which also leaves out Docker's own
+bridges, as on Docker Desktop.
+
+- The supervisor searches 2 minutes after it starts without a controller,
+  and never with `OBBW_CONTROLLER_URL` set or when it remembers a
+  controller found over mDNS. With nothing found it tries again after 5,
+  10 and then every 30 minutes.
+- One controller found is used and remembered with the source `scan`. It
+  gets one request (3 s timeout) every 30 minutes; only when that goes
+  unanswered does the supervisor search again. With several, it uses the
+  first one that matches `OBBW_CONTROLLER_NAME`, if set, and lists the
+  others as `another controller`.
+- As soon as mDNS finds the controller, mDNS takes over and the search stops.
+- `gateway.py scan`, run inside the container, searches once and prints one
+  line per step (`range`, `controller`, or `skip` with the reason). It
+  remembers the controller when exactly one answers. `./setup` uses it.
+
 When the controller announces a new address, the supervisor rewrites nginx's
 configuration and reloads it without dropping connections. When the
 controller goes away, the last known address is kept, because a restarting
@@ -43,7 +80,9 @@ scale, so the gateway avoids generating traffic toward it:
 - No health checks or polling. Once the controller is known, discovery
   relies on its own announcements and on the standard mDNS query schedule,
   which backs off to roughly one query per hour. The faster retries above
-  only run while no controller has been found.
+  only run while no controller has been found. A controller found by
+  searching the network gets a single request every 30 minutes, and the
+  network search itself sends the controller one request.
 - Each forwarded request closes its connection to the controller when done,
   which frees the controller's few sockets right away. Live updates use one
   WebSocket, as without the gateway.
@@ -119,9 +158,9 @@ response carries an `X-Gateway-Cache` header (`HIT`, `MISS`, `REVALIDATED`,
 `/run/gateway/cache` inside the container, holds at most 16 MB, drops files
 unused for 30 days, and starts empty when the container is recreated.
 
-When the gateway restarts, it serves the controller it last found over mDNS
-right away, from `data/controller.json`, and keeps searching until mDNS
-confirms that address or reports a new one. It forgets that controller when
+When the gateway restarts, it serves the controller it last found, over
+mDNS or by searching the network, right away, from `data/controller.json`,
+and keeps searching until mDNS confirms that address or reports a new one. It forgets that controller when
 `OBBW_CONTROLLER_URL` or `OBBW_CONTROLLER_NAME` change.
 
 Until a controller is known, the secure address answers `503`. The setup
@@ -261,7 +300,7 @@ on another site cannot send either without asking.
 `/__companion/gateway`, on both the setup page and the secure address, returns
 the gateway's state as JSON (`/__gateway/status`, its earlier address,
 redirects there): its name and address, the controller in use and
-where it came from (`mdns`, `remembered` or `manual`), every `_http._tcp`
+where it came from (`mdns`, `remembered`, `scan` or `manual`), every `_http._tcp`
 device discovery saw and what it made of it, and when the server certificate
 expires. Monitoring tools such as Uptime Kuma or Home Assistant can read it.
 
@@ -283,9 +322,12 @@ new address it suggests the first one from `.240` down that answers neither
 ping nor ARP and is not taken by a container, and asks you to confirm it is
 outside the router's DHCP range. It keeps the name, controller and data
 settings of an earlier `.env`, saved as `.env.bak`, so devices stay set up.
-It then starts the container and runs `gateway.py check` until a controller
-is found, asking for the controller's address or name when discovery
-cannot settle it.
+It then builds the image and starts the container, saying when each step
+starts and how it ended, waits up to 20 seconds for mDNS, and otherwise runs
+`gateway.py scan`. One controller found is remembered and the container
+restarted to use it; with several, it lists them and asks which, then sets
+`OBBW_CONTROLLER_NAME` (or `OBBW_CONTROLLER_URL` when two have the same
+name). It asks for the controller's address only when nothing answers.
 
 ## Files
 

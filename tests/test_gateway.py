@@ -118,7 +118,9 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
 
     assert gateway.remembered_controller(cfg, data) is None
     gateway.remember_controller(cfg, data, target)
-    assert gateway.remembered_controller(cfg, data) == target
+    assert gateway.remembered_controller(cfg, data) == (target, "remembered")
+    gateway.remember_controller(cfg, data, target, "scan")
+    assert gateway.remembered_controller(cfg, data) == (target, "scan"), "a searched controller is checked again"
     assert gateway.remembered_controller({**cfg, "controller_name": "other"}, data) is None, \
         "a different controller choice must not reuse the remembered one"
 

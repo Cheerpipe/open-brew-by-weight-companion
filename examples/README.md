@@ -57,9 +57,10 @@ the defaults above work with `LAN_INTERFACE=eth0`.
 
 ## A fixed controller address
 
-If discovery cannot see the controller, for example because mDNS does not
-cross between your Wi-Fi and wired networks, give the controller a fixed
-address in your router and point the companion at it:
+If neither mDNS nor the companion's search of your network finds the
+controller, for example because it is on a different network than the
+companion, give the controller a fixed address in your router and point the
+companion at it:
 
 ```dotenv
 OBBW_CONTROLLER_URL=http://192.168.1.50

@@ -15,7 +15,8 @@ docker compose logs -f
 ```
 
 It reports the name it publishes, the controller it found and its address,
-certificate renewals, and every device it skipped and why.
+certificate renewals, every device it skipped and why, and each search of
+your network for the controller.
 `docker compose ps` shows the companion as `healthy` once it serves the setup
 page and the secure address and has found a controller.
 
@@ -40,9 +41,57 @@ page and the secure address and has found a controller.
   the name does not match.
 - If you have several controllers, set `OBBW_CONTROLLER_NAME` to the device
   name of the one to use.
-- If it is still not found, set `OBBW_CONTROLLER_URL` to the controller's IP
-  address, shown in **Admin → Network** of the Web UI. Give the controller a
-  fixed address in your router so it does not change.
+
+### When mDNS does not reach the companion
+
+Some networks do not pass mDNS to the companion, even when the server itself
+and your phone open `openbrewbyweight.local` without trouble. The companion
+then finds the controller another way: after two minutes without it, it asks
+every address of your home network once whether it is an Open Brew by Weight
+controller. `./setup` does the same after 20 seconds and tells you what it
+found. The log shows it:
+
+- `mDNS has not found the controller; searching 192.168.4.0/24 (253
+  addresses)`, then `controller openbrewbyweight at 192.168.4.194:80, found
+  by searching the network`. The companion uses that controller, remembers
+  it, and searches again only if it stops answering.
+- `no controller answered in 192.168.4.0/24`: the controller was off or on
+  another network. The companion tries again a little later, at most every
+  30 minutes.
+- `not searching the network for the controller: …`: the network is too
+  large to search (more than 1,022 addresses), or it is not a home network.
+  Set the address by hand, below.
+
+The `no controller confirmed yet` lines also say whether mDNS from other
+devices reaches the companion at all. `no mDNS answer from any device has
+reached` it points at the network between the server and the companion's
+address: with `macvlan` on a virtual machine or some NAS systems, turn on
+promiscuous mode for the server's network interface. To see exactly what
+arrives, run this on the server:
+
+```bash
+docker compose exec companion python3 /opt/gateway/gateway.py mdns-check openbrewbyweight.local
+```
+
+Use the controller's own name if you renamed it. The check asks for the
+controller three ways and prints every answer that reaches the container. If
+only the `legacy unicast` question gets an answer, the companion can talk to
+the controller but answers sent to the whole network (multicast) do not reach
+its address. If none gets an answer, the companion's questions do not reach
+the controller.
+
+### Set the controller's address by hand
+
+If the companion still does not find the controller, set its address in
+`.env`, then run `docker compose up -d`:
+
+```dotenv
+OBBW_CONTROLLER_URL=http://192.168.4.194
+```
+
+The address is in the Web UI under **Admin → Network**. Give the controller a
+fixed address in your router so it does not change, because with an address
+set by hand the companion does not look for it any more.
 
 ## `openbrewbyweight-secure.local` does not open
 

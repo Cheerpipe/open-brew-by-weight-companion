@@ -20,7 +20,8 @@ controller does everything on its own, and the companion takes work off it.
 The companion does the fiddly parts for you:
 
 - **Finds the controller by itself** over mDNS, even after you rename it or
-  its address changes.
+  its address changes. If your network does not pass mDNS to the companion,
+  it searches your home network for the controller instead.
 - **Announces its own `.local` name**, so every device on the network can
   open it without touching your router.
 - **Creates and renews its certificate**, signed by a private certificate
@@ -115,6 +116,27 @@ git clone https://github.com/Cheerpipe/open-brew-by-weight-companion.git && cd o
   controller, and checks that the Web UI answers through the secure
   address. If something is missing, such as the controller's address, it
   asks.
+
+Each step says when it starts and how it ended, with the time it took:
+
+```text
+  Building the companion image (about a minute the first time)…
+  Image ready (52 s).
+  Starting the companion…
+  Running (4 s).
+  Looking for the controller over mDNS (up to 20 s)…
+  Not found over mDNS (20 s).
+  Searching 192.168.4.0/24 for a controller (253 addresses, about 9 s)…
+  Found Open Brew by Weight "openbrewbyweight" at 192.168.4.194, firmware 1.1.0 (8 s).
+```
+
+If mDNS does not find the controller within 20 seconds, which happens on
+some networks, the setup asks every address of your home network once
+whether it is an Open Brew by Weight controller. When it finds one, the
+companion uses it and keeps following it; when it finds several, it lists
+them and asks which one to use. Only if none answers, for example because
+the espresso machine is off, does it ask for the controller's address,
+which the Web UI shows under **Admin → Network**.
 
 At the end it shows the setup address and a QR code. On each phone, tablet
 or computer, open **`http://openbrewbyweight-secure.local`** (plain `http`)
@@ -223,7 +245,12 @@ Everything lives in the `data` folder on your server:
   and only forwards what your devices ask for. It keeps a copy of the Web
   UI's files, so after a firmware update each one crosses the controller's
   Wi-Fi once rather than once per device. Only while it has not found the
-  controller yet does it ask the network again, every few minutes. Once
+  controller yet does it ask the network again, every few minutes. If mDNS
+  has not found it after two minutes, the companion asks each address of
+  your home network once whether it is a controller, and searches again
+  only while no controller answers, at most every 30 minutes. A controller
+  found that way gets one short request every 30 minutes to check that it
+  is still there. Once
   paired, it keeps one quiet connection open to the controller: a short
   message when it connects, every two minutes, or every 15 seconds while it
   carries La Marzocco (replacing the controller's own La Marzocco check one
@@ -251,11 +278,13 @@ Every test runs offline inside the image, against a real nginx, a fake
 controller and a fake La Marzocco cloud:
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link; do docker run --rm -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
+docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link scan; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
 ```
 
-`./setup`'s `.env` migration test needs bash, so it runs on the server or
-your computer, as does the gateway test (Python 3.10+ and OpenSSL 3):
+`./setup`'s test runs the script against a fake Docker (about 20 seconds,
+since it waits out the real mDNS step) and needs bash, so it runs on the
+server or your computer, as does the gateway test (Python 3.10+ and
+OpenSSL 3):
 
 ```bash
 python3 tests/test_setup.py && python3 tests/test_gateway.py

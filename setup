@@ -15,6 +15,11 @@ YES=0
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 say() { printf '  %s\n' "$*"; }
+step() { # step TEXT: says that a step starts; step_done says how it ended and how long it took
+	STEP_AT=$SECONDS
+	say "$1…"
+}
+step_done() { say "$1 ($((SECONDS - STEP_AT)) s)."; }
 warn() { printf '  \033[33m%s\033[0m\n' "$*"; }
 die() {
 	printf '\n\033[31m%s\033[0m\n' "$*" >&2
@@ -165,33 +170,127 @@ if ((! KEEP)); then
 fi
 [[ -n $(env_get COMPANION_NAME) ]] || env_set COMPANION_NAME "$(hostname -s 2>/dev/null || echo Companion)"
 
-start() {
+build() {
 	local out
+	step "Building the companion image (about a minute the first time)"
+	if ! out=$(docker compose build 2>&1); then
+		printf '%s\n' "$out" | tail -n 5
+		die "Docker could not build the companion image; the lines above say why."
+	fi
+	step_done "Image ready"
+}
+start() { # start [option for docker compose up]: (re)starts the companion and waits until its pages answer
+	local out
+	step "Starting the companion"
 	# The containers before the renames; `companion` only when this folder's Compose project made it.
 	docker rm -f openbrewbyweight-https-gateway >/dev/null 2>&1 || true
 	docker ps -aq --filter name='^companion$' --filter "label=com.docker.compose.project.working_dir=$PWD" |
 		xargs -r docker rm -f >/dev/null 2>&1 || true
-	if ! out=$(docker compose up -d --build --remove-orphans 2>&1); then
+	if ! out=$(docker compose up -d --remove-orphans "$@" 2>&1); then
 		printf '%s\n' "$out" | tail -n 5
 		[[ $out == *"Pool overlaps"* ]] && warn "Another Docker network covers your LAN; run ./setup again and choose new settings."
 		[[ $out == *"address already in use"* ]] && warn "A port the companion needs is busy; run ./setup again and choose new settings."
 		die "Docker could not start the companion; the lines above say why."
 	fi
-}
-wait_for_controller() { # up to about 80 s: discovery asks the network again after 30 s
-	for _ in $(seq 1 26); do
-		RESULT=$(check) && return 0
-		running || {
-			docker compose logs --tail 30 companion
-			die "The companion stopped; its log is above."
-		}
-		sleep 3
+	until RESULT=$(check) || [[ $RESULT != *"fail gateway"* ]]; do
+		stopped
+		if ((SECONDS - STEP_AT >= 60)); then
+			printf '%s\n' "$RESULT"
+			die "The companion is running but its own pages do not answer. Run: docker compose logs"
+		fi
+		sleep 1
 	done
-	return 1
+	step_done "Running"
+}
+stopped() {
+	running && return 0
+	docker compose logs --tail 30 companion
+	die "The companion stopped; its log is above."
+}
+found_controller() { # found_controller [timed]: says which controller the check in $RESULT reports
+	local line name address how
+	line=$(sed -n 's/^ok controller //p' <<<"$RESULT")
+	how=${line##* } line=${line% *}
+	address=${line##* } name=${line% *}
+	address=${address%:80}
+	case $how in
+	mdns)
+		if [[ -n ${1:-} ]]; then
+			step_done "Found \"$name\" at $address"
+		else
+			say "Found \"$name\" at $address over mDNS."
+		fi
+		;;
+	scan) say "Using \"$name\" at $address, found by searching your network." ;;
+	manual) say "Using the controller set in .env, at $address." ;;
+	*) say "Using \"$name\" at $address, found earlier." ;;
+	esac
+}
+wait_for_controller() { # the controller the companion already knows, or one mDNS finds within 20 s
+	if RESULT=$(check); then
+		found_controller
+		return 0
+	fi
+	[[ $RESULT == *"fail gateway"* ]] && return 1
+	step "Looking for the controller over mDNS (up to 20 s)"
+	until RESULT=$(check); do
+		stopped
+		if ((SECONDS - STEP_AT >= 20)); then
+			step_done "Not found over mDNS"
+			return 1
+		fi
+		sleep 2
+	done
+	found_controller timed
+}
+search_network() { # asks the companion to search its network; 0 when the companion should restart
+	local kind line net hosts seconds ip firmware name choice n=0 same=0
+	local found=()
+	while read -r kind line; do
+		case $kind in
+		skip) say "Not searching your network for it: $line." ;;
+		range)
+			read -r net hosts seconds <<<"$line"
+			step "Searching $net for a controller ($hosts addresses, about $seconds s)"
+			;;
+		controller) found+=("$line") ;;
+		*) say "$kind $line" ;;
+		esac
+	done < <(docker compose exec -T companion python3 /opt/gateway/gateway.py scan 2>&1)
+	[[ -n ${net:-} ]] || return 1
+	if ((${#found[@]} == 0)); then
+		step_done "No controller answered"
+		return 1
+	elif ((${#found[@]} == 1)); then
+		read -r ip firmware name <<<"${found[0]}"
+		step_done "Found Open Brew by Weight \"$name\" at $ip, firmware $firmware"
+		return 0
+	fi
+	step_done "Found ${#found[@]} controllers"
+	for line in "${found[@]}"; do
+		read -r ip firmware name <<<"$line"
+		n=$((n + 1))
+		say "  $n. \"$name\" at $ip (firmware $firmware)"
+	done
+	while :; do
+		choice=$(ask "Which one should the companion use? Type its number" 1)
+		[[ $choice =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= n)) && break
+		warn "Type a number from 1 to $n."
+	done
+	read -r ip firmware name <<<"${found[choice - 1]}"
+	for line in "${found[@]}"; do
+		[[ ${line#* * } == "$name" ]] && same=$((same + 1))
+	done
+	if ((same > 1)); then
+		say "More than one controller is called \"$name\", so the companion will use $ip only."
+		env_set OBBW_CONTROLLER_URL "http://$ip"
+	else
+		env_set OBBW_CONTROLLER_NAME "$name"
+	fi
 }
 
 bold "Starting the companion"
-say "Building the image takes about a minute the first time."
+build
 start
 until wait_for_controller; do
 	others=$(printf '%s\n' "$RESULT" | sed -n 's/^seen controller \(.*\): .*/\1/p')
@@ -202,18 +301,19 @@ until wait_for_controller; do
 		say "Found these controllers, but none matches OBBW_CONTROLLER_NAME:"
 		printf '    %s\n' "$others"
 		env_set OBBW_CONTROLLER_NAME "$(ask "Which one should the companion use" "$(head -n 1 <<<"$others")")"
+		start
+	elif search_network; then
+		start --force-recreate
 	else
-		say "The companion has not found the controller over mDNS. That happens when it is off, or when"
-		say "your network does not pass mDNS between them. Its address is in the Web UI under Admin → Network."
+		say "The companion has not found the controller. That happens when it is off, or when your network"
+		say "does not pass mDNS to the companion. Its address is in the Web UI under Admin → Network."
 		((YES)) && die "Set OBBW_CONTROLLER_URL=http://<controller address> in .env and run ./setup again."
 		address=$(ask "Controller address" "")
 		[[ -n $address ]] || die "Without the controller's address the companion cannot work yet."
 		env_set OBBW_CONTROLLER_URL "http://${address#http://}"
+		start
 	fi
-	start
 done
-controller=$(sed -n 's/^ok controller //p' <<<"$RESULT")
-say "Found the controller: $controller"
 others=$(printf '%s\n' "$RESULT" | sed -n 's/^seen controller \(.*\): another controller.*/\1/p')
 if [[ -n $others ]] && ! ((YES)); then
 	say "Other controllers on your network: $(paste -sd, - <<<"$others")"
