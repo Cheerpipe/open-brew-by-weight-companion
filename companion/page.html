@@ -15,6 +15,11 @@
 </head>
 <body>
 <main>
+  <nav class="menu">
+    <a id="m-webui" href="/">Web UI</a>
+    <a id="m-access" href="/"></a>
+    <a id="m-companion" href="/__companion/" aria-current="page">Companion</a>
+  </nav>
   <p class="muted" id="brand">Open Brew by Weight Companion</p>
   <h1 id="title">Companion</h1>
 
@@ -123,6 +128,13 @@
   $("link-label").textContent = t.link;
   $("ui-label").textContent = t.ui;
   $("lm-label").textContent = t.lm;
+  // The menu's addresses: the secure Web UI and the plain-HTTP pages beside it.
+  document.getElementById("m-access").textContent = /^es/i.test(navigator.language || "") ? "Acceso seguro" : "Secure access";
+  fetch("/__companion/gateway", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (g) {
+    document.getElementById("m-webui").href = g.secure_url + "/";
+    // Plain HTTP: the access page is this server's root; over HTTPS the root is the Web UI.
+    if (location.protocol === "https:") document.getElementById("m-access").href = g.setup_url + "/";
+  }, function () {});
   $("made-by").textContent = t.madeBy;
 
   var timer;

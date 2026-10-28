@@ -30,6 +30,9 @@
   summary { cursor: pointer; font-weight: 600; font-size: 1.05rem; }
   footer { margin: 0 0 24px; text-align: center; color: var(--muted); font-size: .85rem; line-height: 1.7; }
   footer a { color: inherit; }
+  nav.menu { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px; }
+  nav.menu a { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--text); text-decoration: none; font-size: .9rem; }
+  nav.menu a[aria-current] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   ol { padding-left: 20px; margin: 8px 0; }
   li { margin: 6px 0; }
   code { font-size: .85rem; overflow-wrap: anywhere; }
@@ -37,6 +40,11 @@
 </head>
 <body>
 <main>
+  <nav class="menu">
+    <a href="@SECURE_URL@/">@T_MENU_WEBUI@</a>
+    <a href="/" aria-current="page">@T_MENU_ACCESS@</a>
+    <a href="/__companion/">@T_MENU_COMPANION@</a>
+  </nav>
   <p class="muted">Open Brew by Weight Companion · @NAME@</p>
   <h1>@T_TITLE@</h1>
   <p>@T_INTRO@</p>

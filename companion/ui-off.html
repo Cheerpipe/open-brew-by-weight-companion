@@ -8,6 +8,11 @@
 </head>
 <body>
 <main>
+  <nav class="menu">
+    <a id="m-webui" href="/">Web UI</a>
+    <a id="m-access" href="/"></a>
+    <a id="m-companion" href="/__companion/">Companion</a>
+  </nav>
   <p class="muted">Open Brew by Weight Companion</p>
   <h1 id="title"></h1>
   <section class="card">
@@ -47,6 +52,13 @@
   document.getElementById("intro").textContent = open.hidden ? t.none : t.intro;
   document.getElementById("help").textContent = t.help;
   document.getElementById("made-by").textContent = t.madeBy;
+  // The menu's addresses: the secure Web UI and the plain-HTTP pages beside it.
+  document.getElementById("m-access").textContent = /^es/i.test(navigator.language || "") ? "Acceso seguro" : "Secure access";
+  fetch("/__companion/gateway", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (g) {
+    document.getElementById("m-webui").href = g.secure_url + "/";
+    // Plain HTTP: the access page is this server's root; over HTTPS the root is the Web UI.
+    if (location.protocol === "https:") document.getElementById("m-access").href = g.setup_url + "/";
+  }, function () {});
 })();
 </script>
 </body>
