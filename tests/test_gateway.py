@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract tests for the HTTPS gateway supervisor (no network, no Docker)."""
+"""Contract tests for the companion's HTTPS gateway supervisor (no network, no Docker)."""
 
 import importlib.util
 import json
@@ -19,13 +19,28 @@ gateway = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gateway)
 gateway.qr_svg = lambda text: f"<svg data-text='{text}'></svg>"  # qrencode lives in the image only.
 
-BASE = {"GATEWAY_IP": "192.168.1.240"}
+BASE = {"COMPANION_IP": "192.168.1.240", "COMPANION_NAME": "Kitchen server"}
 
 cfg = gateway.load_config(BASE)
-assert cfg["hostname"] == "openbrewbyweight-secure.local"
+assert cfg["hostname"] == "openbrewbyweight-secure.local" and cfg["ip"] == "192.168.1.240"
 assert (cfg["http_port"], cfg["https_port"], cfg["mdns_publish"]) == (80, 443, True)
-assert gateway.load_config({**BASE, "GATEWAY_HOSTNAME": "Brew.Local."})["hostname"] == "brew.local"
-assert gateway.load_config({**BASE, "MDNS_PUBLISH": "off"})["mdns_publish"] is False
+assert gateway.load_config({**BASE, "COMPANION_HOSTNAME": "Brew.Local."})["hostname"] == "brew.local"
+assert gateway.load_config({**BASE, "COMPANION_MDNS_PUBLISH": "off"})["mdns_publish"] is False
+
+# The HTTPS gateway's setting names keep working; the companion's names win.
+legacy = gateway.load_config({"GATEWAY_IP": "192.168.1.241", "GATEWAY_HOSTNAME": "espresso", "HTTP_PORT": "8080",
+                              "HTTPS_PORT": "8443", "MDNS_PUBLISH": "false"})
+assert (legacy["ip"], legacy["hostname"], legacy["http_port"], legacy["https_port"], legacy["mdns_publish"]) == (
+    "192.168.1.241", "espresso.local", 8080, 8443, False)
+assert gateway.load_config({**BASE, "GATEWAY_IP": "192.168.1.9"})["ip"] == "192.168.1.240"
+
+# Instance name: printable, at most 32 bytes, never a container id.
+assert cfg["name"] == "Kitchen server"
+assert gateway.instance_name("Caf\u00e9 \x07bar " + "\u00e9" * 20) == "Caf\u00e9 bar " + "\u00e9" * 11
+gateway.socket.gethostname = lambda: "3f2a9c81d7e0"
+assert gateway.instance_name("") == "Companion"
+gateway.socket.gethostname = lambda: "nas.lan"
+assert gateway.instance_name(" ") == "nas"
 manual = gateway.load_config({**BASE, "OBBW_CONTROLLER_URL": "192.168.1.50:8080"})
 assert gateway.static_controller(manual) == ("192.168.1.50", ("192.168.1.50", 8080))
 named = gateway.load_config({**BASE, "OBBW_CONTROLLER_URL": "http://Cafe-Bar.local"})
@@ -77,7 +92,10 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert "data-text='http://openbrewbyweight-secure.local'" in pages["es"]
     assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in pages["en"]
     assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.crt'" in pages["en"]
-    assert "index.es.html" in conf and "location = /__gateway/status" in conf
+    assert "index.es.html" in conf and conf.count("location = /__companion/gateway") == 2
+    assert conf.count("return 301 /__companion/gateway;") == 2, "the gateway's earlier status address redirects"
+    assert "Open Brew by Weight Companion · Kitchen server" in pages["en"]
+    assert 'fetch("https://openbrewbyweight-secure.local/__companion/ping"' in pages["en"]
     assert f"proxy_cache_path {run}/cache " in conf
     api = conf.split("    location / {", 1)[1].split("\n    }", 1)[0]
     assert "proxy_pass" in api and "proxy_cache" not in api, "API and WebSocket traffic is never cached"
@@ -96,7 +114,7 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     status = json.loads((run / "status.json").read_text())
     assert status["controller"] == {"name": "Cafe Bar", "ip": "192.168.1.50", "port": 80, "source": "mdns"}
     assert status["seen"]["Printer"]["note"] == "x" and status["certificate_expires"]
-    assert status["setup_url"] == "http://openbrewbyweight-secure.local"
+    assert status["setup_url"] == "http://openbrewbyweight-secure.local" and status["name"] == "Kitchen server"
 
     assert gateway.remembered_controller(cfg, data) is None
     gateway.remember_controller(cfg, data, target)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""HTTPS gateway for the Open Brew by Weight Web UI.
+"""Supervisor of Open Brew by Weight Companion and its HTTPS gateway.
 
-Finds the controller over mDNS, publishes the gateway's own `.local` name,
+Finds the controller over mDNS, publishes the companion's own `.local` name,
 keeps a name-constrained local CA and its server certificate current, and runs
 nginx as a reverse proxy plus a plain-HTTP setup page. The controller is never
 polled: discovery relies on mDNS announcements and the browser's own schedule.
@@ -13,6 +13,7 @@ import json
 import os
 import plistlib
 import queue
+import re
 import signal
 import socket
 import ssl
@@ -25,8 +26,18 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
-DATA = Path(os.environ.get("GATEWAY_DATA_DIR", "/data"))
-RUN = Path(os.environ.get("GATEWAY_RUN_DIR", "/run/gateway"))
+# Settings are COMPANION_<name>; the HTTPS gateway's earlier names still work.
+LEGACY = {"HOSTNAME": "GATEWAY_HOSTNAME", "IP": "GATEWAY_IP", "HTTP_PORT": "HTTP_PORT",
+          "HTTPS_PORT": "HTTPS_PORT", "MDNS_PUBLISH": "MDNS_PUBLISH",
+          "DATA_DIR": "GATEWAY_DATA_DIR", "RUN_DIR": "GATEWAY_RUN_DIR"}
+
+
+def setting(env, name):
+    return (env.get("COMPANION_" + name) or env.get(LEGACY.get(name, ""), "") or "").strip()
+
+
+DATA = Path(setting(os.environ, "DATA_DIR") or "/data")
+RUN = Path(setting(os.environ, "RUN_DIR") or "/run/gateway")
 HTTP_SERVICE = "_http._tcp.local."
 CA_NAME = "openbrewbyweight-ca"
 LEAF_DAYS = 397  # Apple rejects TLS server certificates valid for more than 398 days.
@@ -36,6 +47,15 @@ INFO_TIMEOUT_MS = 10000  # A controller in Wi-Fi power save can answer late.
 RETRY_S = (30, 60, 120, 300, 600)  # Fresh mDNS queries only while no controller is confirmed.
 CONTROLLER_FILE = "controller.json"
 OPENSSL_CNF = "[req]\ndistinguished_name=dn\n[dn]\n"
+
+
+def instance_name(value):
+    """COMPANION_NAME as the controller accepts it (1 to 32 bytes, no control characters)."""
+    name = "".join(c for c in value if c.isprintable()).strip()
+    if not name:
+        host = socket.gethostname().split(".")[0]
+        name = "Companion" if re.fullmatch(r"[0-9a-f]{12}", host) else host  # A container id says nothing.
+    return name.encode()[:32].decode(errors="ignore").strip() or "Companion"
 
 
 def log(message):
@@ -53,7 +73,7 @@ def enabled(value):
 
 
 def load_config(env):
-    host = (env.get("GATEWAY_HOSTNAME") or "openbrewbyweight-secure").strip().lower().rstrip(".")
+    host = (setting(env, "HOSTNAME") or "openbrewbyweight-secure").lower().rstrip(".")
     controller = None
     if url := (env.get("OBBW_CONTROLLER_URL") or "").strip():
         parts = urlsplit(url if "://" in url else "http://" + url)
@@ -61,13 +81,14 @@ def load_config(env):
             raise SystemExit("OBBW_CONTROLLER_URL must look like http://192.168.1.50 or http://name.local")
         controller = (parts.hostname.lower(), parts.port or 80)
     return {
+        "name": instance_name(env.get("COMPANION_NAME") or ""),
         "hostname": host.removesuffix(".local") + ".local",
-        "ip": (env.get("GATEWAY_IP") or "").strip() or local_ip(),
-        "http_port": int(env.get("HTTP_PORT") or 80),
-        "https_port": int(env.get("HTTPS_PORT") or 443),
+        "ip": setting(env, "IP") or local_ip(),
+        "http_port": int(setting(env, "HTTP_PORT") or 80),
+        "https_port": int(setting(env, "HTTPS_PORT") or 443),
         "controller": controller,
         "controller_name": (env.get("OBBW_CONTROLLER_NAME") or "").strip().lower(),
-        "mdns_publish": enabled(env.get("MDNS_PUBLISH") or "true"),
+        "mdns_publish": enabled(setting(env, "MDNS_PUBLISH") or "true"),
     }
 
 
@@ -194,6 +215,7 @@ def write_site(cfg, data, run, target):
     setup = site_url("http", cfg, cfg["http_port"], 80)
     values = {
         "SECURE_URL": html.escape(site_url("https", cfg, cfg["https_port"], 443)),
+        "NAME": html.escape(cfg["name"]),
         "HOSTNAME": html.escape(cfg["hostname"]),
         "CA_NAME": CA_NAME,
         "FINGERPRINT": ":".join(fingerprint[i:i + 2] for i in range(0, len(fingerprint), 2)),
@@ -218,10 +240,10 @@ def write_site(cfg, data, run, target):
 
 
 def write_status(cfg, data, run, target, source, seen):
-    """Publish the gateway's state at /__gateway/status for ./setup, health checks and monitoring."""
+    """Publish the gateway's state at /__companion/gateway for ./setup, health checks and monitoring."""
     expires = openssl("x509", "-in", str(data / "server.crt"), "-noout", "-enddate").strip().split("=", 1)[1]
     status = {
-        "hostname": cfg["hostname"], "ip": cfg["ip"], "mdns_publish": cfg["mdns_publish"],
+        "name": cfg["name"], "hostname": cfg["hostname"], "ip": cfg["ip"], "mdns_publish": cfg["mdns_publish"],
         "setup_url": site_url("http", cfg, cfg["http_port"], 80),
         "secure_url": site_url("https", cfg, cfg["https_port"], 443),
         "controller": {"name": target[0], "ip": target[1][0], "port": target[1][1], "source": source}
@@ -267,10 +289,10 @@ def check(cfg, data, through_controller):
     Without --controller nothing reaches the controller, so Docker health checks add no Wi-Fi traffic.
     """
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['http_port']}/__gateway/status", timeout=5) as reply:
+        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['http_port']}/__companion/gateway", timeout=5) as reply:
             status = json.load(reply)
         print("ok setup-page")
-        print(f"ok https {https_get(cfg, data, '/__gateway/ping')}")
+        print(f"ok https {https_get(cfg, data, '/__companion/ping')}")
     except (OSError, ValueError, IndexError) as error:
         print(f"fail gateway {error}")
         return 1

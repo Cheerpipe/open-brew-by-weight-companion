@@ -1,8 +1,9 @@
 # How it works
 
-The container runs two programs: **nginx**, which serves the pages and
-forwards traffic, and a small Python supervisor (`gateway/gateway.py`) that
-keeps nginx's configuration current.
+Open Brew by Weight Companion runs as one container. Its HTTPS gateway is two
+programs: **nginx**, which serves the pages and forwards traffic, and a small
+Python supervisor (`gateway/gateway.py`) that keeps nginx's configuration
+current.
 
 ```text
 phone ──https──▶ gateway (nginx) ──http──▶ controller
@@ -48,7 +49,7 @@ scale, so the gateway avoids generating traffic toward it:
 ## Publishing the name
 
 The supervisor registers an `_https._tcp` service whose host is the gateway's
-name (`openbrewbyweight-secure.local` by default) at `GATEWAY_IP`. That also
+name (`openbrewbyweight-secure.local` by default) at `COMPANION_IP`. That also
 publishes the name's address record, so any device that understands mDNS can
 open it. python-zeroconf shares the mDNS port with other responders on the
 same host, such as Avahi or Home Assistant. On shutdown, the gateway sends
@@ -121,8 +122,9 @@ probe from the secure address.
 
 ## Status and health checks
 
-`/__gateway/status`, on both the setup page and the secure address, returns
-the gateway's state as JSON: its name and address, the controller in use and
+`/__companion/gateway`, on both the setup page and the secure address, returns
+the gateway's state as JSON (`/__gateway/status`, its earlier address,
+redirects there): its name and address, the controller in use and
 where it came from (`mdns`, `remembered` or `manual`), every `_http._tcp`
 device discovery saw and what it made of it, and when the server certificate
 expires. Monitoring tools such as Uptime Kuma or Home Assistant can read it.

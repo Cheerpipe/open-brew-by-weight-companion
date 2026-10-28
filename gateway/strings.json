@@ -12,7 +12,7 @@
     "qr": "Setting up a phone or tablet? Scan this code with its camera to open this page there.",
     "qr_download": "Reading this on a computer? Scan this code with the phone's camera to download the file straight onto it, then continue from step 2.",
     "setup_title": "Set up each device once",
-    "setup_intro": "Each phone, tablet or computer needs to trust this gateway's certificate one time. Pick your device and follow the steps.",
+    "setup_intro": "Each phone, tablet or computer needs to trust the companion's certificate one time. Pick your device and follow the steps.",
     "only_name": "The certificate only works for <code>@HOSTNAME@</code>; it cannot be used to impersonate any other website.",
     "ios": "iPhone and iPad",
     "ios_steps": [
@@ -54,7 +54,7 @@
     "qr": "¿Vas a configurar un teléfono o una tablet? Escanea este código con su cámara para abrir esta página allí.",
     "qr_download": "¿Estás leyendo esto en un computador? Escanea este código con la cámara del teléfono para descargar el archivo directamente en él y sigue desde el paso 2.",
     "setup_title": "Configura cada dispositivo una vez",
-    "setup_intro": "Cada teléfono, tablet o computador debe confiar una sola vez en el certificado de este gateway. Elige tu dispositivo y sigue los pasos.",
+    "setup_intro": "Cada teléfono, tablet o computador debe confiar una sola vez en el certificado del Companion. Elige tu dispositivo y sigue los pasos.",
     "only_name": "El certificado solo sirve para <code>@HOSTNAME@</code>; no se puede usar para suplantar ningún otro sitio web.",
     "ios": "iPhone y iPad",
     "ios_steps": [

@@ -3,8 +3,8 @@
 
 Needs nginx on the PATH, so run it inside the gateway image:
 
-  docker build -t obbw-gateway . && \
-    docker run --rm -v "$PWD:/src:ro" --entrypoint python3 obbw-gateway /src/tests/test_cache.py
+  docker build -t openbrewbyweight-companion:local . && \
+    docker run --rm -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_cache.py
 """
 
 import gzip

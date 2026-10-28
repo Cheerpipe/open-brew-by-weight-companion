@@ -1,5 +1,6 @@
-# Local settings and the gateway's certificate authority
+# Local settings, their backup, and the certificate authority and keys
 .env
+.env.bak
 data/
 
 # Python

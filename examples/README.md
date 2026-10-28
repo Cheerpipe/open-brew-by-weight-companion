@@ -6,10 +6,10 @@ Run `docker compose up -d` after editing.
 
 ## Wired server (default)
 
-The gateway gets `192.168.1.240` on a typical `192.168.1.x` home network:
+The companion gets `192.168.1.240` on a typical `192.168.1.x` home network:
 
 ```dotenv
-GATEWAY_IP=192.168.1.240
+COMPANION_IP=192.168.1.240
 LAN_INTERFACE=eth0
 LAN_SUBNET=192.168.1.0/24
 LAN_ROUTER=192.168.1.1
@@ -47,7 +47,7 @@ LAN_NETWORK=adguard-macvlan
 ```
 
 Keep the other `LAN_*` values filled in; they describe the same network.
-`GATEWAY_IP` must still be free and outside the router's automatic range.
+`COMPANION_IP` must still be free and outside the router's automatic range.
 This needs Docker Compose 2.24 or newer.
 
 ## A Raspberry Pi with Docker
@@ -59,31 +59,31 @@ the defaults above work with `LAN_INTERFACE=eth0`.
 
 If discovery cannot see the controller, for example because mDNS does not
 cross between your Wi-Fi and wired networks, give the controller a fixed
-address in your router and point the gateway at it:
+address in your router and point the companion at it:
 
 ```dotenv
 OBBW_CONTROLLER_URL=http://192.168.1.50
 ```
 
-With an IP address, the gateway sends no mDNS queries at all. A `.local`
+With an IP address, the companion sends no mDNS queries at all. A `.local`
 name, such as `http://cafe-bar.local`, still follows address changes.
 
 ## Several controllers
 
-Name the one this gateway serves, as shown in the Web UI:
+Name the one this companion serves, as shown in the Web UI:
 
 ```dotenv
 OBBW_CONTROLLER_NAME=Cafe Bar
 ```
 
 For a second controller, run a second copy of this folder with its own
-`GATEWAY_IP`, `GATEWAY_HOSTNAME` (for example `cafe-bar-secure`),
-`OBBW_CONTROLLER_NAME` and `GATEWAY_DATA`.
+`COMPANION_IP`, `COMPANION_HOSTNAME` (for example `cafe-bar-secure`),
+`OBBW_CONTROLLER_NAME` and `COMPANION_DATA`.
 
 ## A different name
 
 ```dotenv
-GATEWAY_HOSTNAME=espresso
+COMPANION_HOSTNAME=espresso
 ```
 
 Devices then open `https://espresso.local`. Changing the name later creates a
@@ -91,26 +91,26 @@ new certificate authority, and every device has to be set up again.
 
 ## Your own DNS instead of mDNS
 
-If your router or Pi-hole already resolves a name to the gateway, turn off
+If your router or Pi-hole already resolves a name to the companion, turn off
 the mDNS announcement and use that name. It must end in `.local` here,
-matching `GATEWAY_HOSTNAME`:
+matching `COMPANION_HOSTNAME`:
 
 ```dotenv
-MDNS_PUBLISH=false
+COMPANION_MDNS_PUBLISH=false
 ```
 
 ## Run on the server's own address
 
-When ports 80 and 443 are free on the server, the gateway can share its
+When ports 80 and 443 are free on the server, the companion can share its
 address instead of getting one of its own; `./setup` chooses this by itself.
 By hand:
 
 ```dotenv
 COMPOSE_FILE=compose.yaml:compose.host.yaml
-GATEWAY_IP=
+COMPANION_IP=
 ```
 
-With `GATEWAY_IP` empty, the gateway uses the server's main address, and the
+With `COMPANION_IP` empty, the companion uses the server's main address, and the
 `LAN_*` settings are not used. If the ports are busy, choose others with
-`HTTP_PORT` and `HTTPS_PORT`; devices then open the name with the port, for
+`COMPANION_HTTP_PORT` and `COMPANION_HTTPS_PORT`; devices then open the name with the port, for
 example `https://openbrewbyweight-secure.local:8443`.

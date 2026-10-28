@@ -39,9 +39,14 @@ http {
     log_not_found off;  # Browsers probe for icons this page does not have.
 
     # Gateway state for ./setup, Docker health checks and monitoring tools.
-    location = /__gateway/status {
+    location = /__companion/gateway {
       default_type application/json;
       alias @RUN@/status.json;
+    }
+
+    # The HTTPS gateway's earlier address for it.
+    location = /__gateway/status {
+      return 301 /__companion/gateway;
     }
 
     location ~ \.mobileconfig$ {
@@ -59,15 +64,19 @@ http {
     ssl_session_cache shared:tls:1m;
 
     # The setup page probes this to learn whether the device trusts the CA.
-    location = /__gateway/ping {
+    location = /__companion/ping {
       add_header Cache-Control "no-store" always;
       return 204;
     }
 
-    location = /__gateway/status {
+    location = /__companion/gateway {
       add_header Cache-Control "no-store" always;
       default_type application/json;
       alias @RUN@/status.json;
+    }
+
+    location = /__gateway/status {
+      return 301 /__companion/gateway;
     }
 
     # Versioned assets: cached for as long as the controller allows, which is

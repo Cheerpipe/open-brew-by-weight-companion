@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Sets up the Open Brew by Weight HTTPS gateway on this Linux server: chooses
-# how it joins the network, writes .env, starts the container and checks that
-# it works end to end. It decides on its own where it can and asks otherwise.
+# Sets up Open Brew by Weight Companion on this Linux server: chooses how it
+# joins the network, writes .env, starts the container and checks that it
+# works end to end. It decides on its own where it can and asks otherwise.
 #
 # Usage: ./setup [--yes]
 #   --yes  accept every suggestion without asking (also used without a terminal)
@@ -55,8 +55,24 @@ in_use() { # answers ping or ARP, or already belongs to a container on the netwo
 	ping -c 1 -W 1 "$1" >/dev/null 2>&1 && return 0
 	ip neigh show "$1" 2>/dev/null | grep -q lladdr
 }
-check() { docker compose exec -T gateway python3 /opt/gateway/gateway.py check "$@" 2>&1; }
-running() { [[ -n $(docker compose ps -q --status running gateway 2>/dev/null) ]]; }
+check() { docker compose exec -T companion python3 /opt/gateway/gateway.py check "$@" 2>&1; }
+running() { [[ -n $(docker compose ps -q --status running companion 2>/dev/null) ]]; }
+migrate_env() { # gives settings from the HTTPS gateway era their companion names
+	local tmp
+	[[ -f .env ]] || return 0
+	tmp=$(mktemp)
+	sed -E -e 's/^(# ?)?GATEWAY_(HOSTNAME|IP|DATA)=/\1COMPANION_\2=/' \
+		-e 's/^(# ?)?(HTTPS?_PORT|MDNS_PUBLISH)=/\1COMPANION_\2=/' .env >"$tmp"
+	if cmp -s .env "$tmp"; then
+		rm -f "$tmp"
+		return 0
+	fi
+	cp .env .env.bak
+	mv "$tmp" .env
+	say "Renamed the settings in .env to the companion's names (the earlier file is .env.bak)."
+}
+
+migrate_env
 
 bold "Checking this server"
 command -v docker >/dev/null || die "Docker is not installed. Install Docker Engine first: https://docs.docker.com/engine/install/"
@@ -67,7 +83,7 @@ command -v ip >/dev/null || die "The 'ip' command (package iproute2) is missing.
 say "Docker $(docker version -f '{{.Server.Version}}'), Compose ${version#v}"
 
 KEEP=0 TAKEN=""
-if [[ -f .env ]] && confirm "Settings from an earlier run exist. Keep them and just start and check the gateway?"; then
+if [[ -f .env ]] && confirm "Settings from an earlier run exist. Keep them and just start and check the companion?"; then
 	KEEP=1
 fi
 
@@ -87,7 +103,7 @@ if ((! KEEP)); then
 	fi
 	docker compose down >/dev/null 2>&1 || true
 	cp .env.example .env
-	for key in GATEWAY_HOSTNAME OBBW_CONTROLLER_URL OBBW_CONTROLLER_NAME MDNS_PUBLISH GATEWAY_DATA; do
+	for key in COMPANION_NAME COMPANION_HOSTNAME OBBW_CONTROLLER_URL OBBW_CONTROLLER_NAME COMPANION_MDNS_PUBLISH COMPANION_DATA; do
 		value=$(env_get "$key" .env.bak)
 		[[ -n $value ]] && env_set "$key" "$value"
 	done
@@ -97,12 +113,12 @@ if ((! KEEP)); then
 	env_set LAN_DRIVER "$DRIVER"
 
 	if command -v ss >/dev/null && ! ss -Hltn '( sport = :80 or sport = :443 )' | grep -q . &&
-		confirm "Ports 80 and 443 are free here, so the gateway can simply share this server's address ($HOST_IP). Do that?"; then
+		confirm "Ports 80 and 443 are free here, so the companion can simply share this server's address ($HOST_IP). Do that?"; then
 		env_set COMPOSE_FILE compose.yaml:compose.host.yaml
-		env_set GATEWAY_IP "$HOST_IP"
-		say "The gateway will share this server's address."
+		env_set COMPANION_IP "$HOST_IP"
+		say "The companion will share this server's address."
 	else
-		say "Ports 80 or 443 are in use here, so the gateway gets an address of its own on your network."
+		say "Ports 80 or 443 are in use here, so the companion gets an address of its own on your network."
 		own="$(basename "$PWD" | tr '[:upper:]' '[:lower:]')_lan"
 		EXISTING=""
 		while read -r name parent subnet; do
@@ -111,14 +127,14 @@ if ((! KEEP)); then
 			xargs -r docker network inspect -f '{{.Name}} {{index .Options "parent"}} {{range .IPAM.Config}}{{.Subnet}} {{end}}')
 		TAKEN="$HOST_IP $ROUTER"
 		if [[ -n $EXISTING ]]; then
-			say "Docker network '$EXISTING' already covers $SUBNET (Docker allows only one); the gateway will join it."
+			say "Docker network '$EXISTING' already covers $SUBNET (Docker allows only one); the companion will join it."
 			env_set COMPOSE_FILE compose.yaml:compose.existing-network.yaml
 			env_set LAN_NETWORK "$EXISTING"
 			TAKEN+=" $(docker network inspect -f '{{range .Containers}}{{.IPv4Address}} {{end}}' "$EXISTING" | sed 's#/[0-9]*##g')"
 		fi
 
 		last=$(($(ip2int "${SUBNET%/*}") + (1 << (32 - ${SUBNET#*/})) - 2))
-		previous=$(env_get GATEWAY_IP .env.bak)
+		previous=$(env_get COMPANION_IP .env.bak)
 		suggestion=""
 		if [[ -n $previous ]] && in_subnet "$previous" && ! in_use "$previous"; then
 			suggestion=$previous
@@ -130,63 +146,65 @@ if ((! KEEP)); then
 				}
 			done
 		fi
-		[[ -n $suggestion ]] || die "Could not find a free address in $SUBNET. Set GATEWAY_IP in .env by hand."
-		say "The gateway needs an address no other device uses, outside the range your router"
+		[[ -n $suggestion ]] || die "Could not find a free address in $SUBNET. Set COMPANION_IP in .env by hand."
+		say "The companion needs an address no other device uses, outside the range your router"
 		say "hands out automatically (DHCP; your router's settings show it). $suggestion looks free."
 		while :; do
-			GATEWAY_IP=$(ask "Gateway address" "$suggestion")
-			if [[ ! $GATEWAY_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! in_subnet "$GATEWAY_IP"; then
-				warn "$GATEWAY_IP is not an address in $SUBNET."
-			elif [[ $GATEWAY_IP != "$suggestion" ]] && in_use "$GATEWAY_IP"; then
-				warn "$GATEWAY_IP is already in use by another device."
+			COMPANION_IP=$(ask "Companion address" "$suggestion")
+			if [[ ! $COMPANION_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! in_subnet "$COMPANION_IP"; then
+				warn "$COMPANION_IP is not an address in $SUBNET."
+			elif [[ $COMPANION_IP != "$suggestion" ]] && in_use "$COMPANION_IP"; then
+				warn "$COMPANION_IP is already in use by another device."
 			else
 				break
 			fi
-			((YES)) && die "No usable gateway address; set GATEWAY_IP in .env by hand."
+			((YES)) && die "No usable companion address; set COMPANION_IP in .env by hand."
 		done
-		env_set GATEWAY_IP "$GATEWAY_IP"
+		env_set COMPANION_IP "$COMPANION_IP"
 	fi
 fi
+[[ -n $(env_get COMPANION_NAME) ]] || env_set COMPANION_NAME "$(hostname -s 2>/dev/null || echo Companion)"
 
 start() {
 	local out
-	if ! out=$(docker compose up -d --build 2>&1); then
+	docker rm -f openbrewbyweight-https-gateway >/dev/null 2>&1 || true # the container before the rename
+	if ! out=$(docker compose up -d --build --remove-orphans 2>&1); then
 		printf '%s\n' "$out" | tail -n 5
 		[[ $out == *"Pool overlaps"* ]] && warn "Another Docker network covers your LAN; run ./setup again and choose new settings."
-		[[ $out == *"address already in use"* ]] && warn "A port the gateway needs is busy; run ./setup again and choose new settings."
-		die "Docker could not start the gateway; the lines above say why."
+		[[ $out == *"address already in use"* ]] && warn "A port the companion needs is busy; run ./setup again and choose new settings."
+		die "Docker could not start the companion; the lines above say why."
 	fi
 }
 wait_for_controller() { # up to about 80 s: discovery asks the network again after 30 s
 	for _ in $(seq 1 26); do
 		RESULT=$(check) && return 0
 		running || {
-			docker compose logs --tail 30 gateway
-			die "The gateway stopped; its log is above."
+			docker compose logs --tail 30 companion
+			die "The companion stopped; its log is above."
 		}
 		sleep 3
 	done
 	return 1
 }
 
-bold "Starting the gateway"
+bold "Starting the companion"
 say "Building the image takes about a minute the first time."
 start
 until wait_for_controller; do
 	others=$(printf '%s\n' "$RESULT" | sed -n 's/^seen controller \(.*\): .*/\1/p')
 	if [[ $RESULT == *"fail gateway"* ]]; then
 		printf '%s\n' "$RESULT"
-		die "The gateway is running but its own pages do not answer. Run: docker compose logs"
+		die "The companion is running but its own pages do not answer. Run: docker compose logs"
 	elif [[ -n $others ]]; then
 		say "Found these controllers, but none matches OBBW_CONTROLLER_NAME:"
 		printf '    %s\n' "$others"
-		env_set OBBW_CONTROLLER_NAME "$(ask "Which one should the gateway use" "$(head -n 1 <<<"$others")")"
+		env_set OBBW_CONTROLLER_NAME "$(ask "Which one should the companion use" "$(head -n 1 <<<"$others")")"
 	else
-		say "The gateway has not found the controller over mDNS. That happens when it is off, or when"
+		say "The companion has not found the controller over mDNS. That happens when it is off, or when"
 		say "your network does not pass mDNS between them. Its address is in the Web UI under Admin → Network."
 		((YES)) && die "Set OBBW_CONTROLLER_URL=http://<controller address> in .env and run ./setup again."
 		address=$(ask "Controller address" "")
-		[[ -n $address ]] || die "Without the controller's address the gateway cannot work yet."
+		[[ -n $address ]] || die "Without the controller's address the companion cannot work yet."
 		env_set OBBW_CONTROLLER_URL "http://${address#http://}"
 	fi
 	start
@@ -197,26 +215,26 @@ others=$(printf '%s\n' "$RESULT" | sed -n 's/^seen controller \(.*\): another co
 if [[ -n $others ]] && ! ((YES)); then
 	say "Other controllers on your network: $(paste -sd, - <<<"$others")"
 	if ! confirm "Keep using the one found above?"; then
-		env_set OBBW_CONTROLLER_NAME "$(ask "Which one should the gateway use" "$(head -n 1 <<<"$others")")"
+		env_set OBBW_CONTROLLER_NAME "$(ask "Which one should the companion use" "$(head -n 1 <<<"$others")")"
 		start
-		wait_for_controller || die "The gateway did not find that controller. Run: docker compose logs"
+		wait_for_controller || die "The companion did not find that controller. Run: docker compose logs"
 	fi
 fi
 
-bold "Checking the Web UI through the gateway"
+bold "Checking the Web UI through the companion"
 if web=$(check --controller); then
 	say "The Web UI answers through the secure address."
 else
 	warn "$(tail -n 1 <<<"$web")"
-	warn "The gateway works, but the controller did not answer. Is the espresso machine on?"
+	warn "The companion works, but the controller did not answer. Is the espresso machine on?"
 fi
 
-setup_url=$(docker compose exec -T gateway python3 -c 'import json; print(json.load(open("/run/gateway/status.json"))["setup_url"])')
+setup_url=$(docker compose exec -T companion python3 -c 'import json; print(json.load(open("/run/gateway/status.json"))["setup_url"])')
 bold "Done"
 say "On each phone, tablet or computer, open $setup_url (plain http) and follow the"
 say "steps for that device. On a phone, scan this code:"
-docker compose exec -T gateway qrencode -t ANSIUTF8 -m 2 "$setup_url" || true
+docker compose exec -T companion qrencode -t ANSIUTF8 -m 2 "$setup_url" || true
 if [[ $(env_get COMPOSE_FILE) != *host* ]]; then
-	say "This server itself cannot open the gateway's address; every other device can."
+	say "This server itself cannot open the companion's address; every other device can."
 fi
 say "Run ./setup again any time to check it or to change its settings."

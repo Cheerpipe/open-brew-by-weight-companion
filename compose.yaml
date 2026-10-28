@@ -1,26 +1,28 @@
-# Open Brew by Weight HTTPS gateway. Run ./setup, which writes .env and starts
-# it, or copy .env.example to .env, fill it in and run: docker compose up -d
+# Open Brew by Weight Companion. Run ./setup, which writes .env and starts it,
+# or copy .env.example to .env, fill it in and run: docker compose up -d
+# Each COMPANION_* setting also accepts the HTTPS gateway's earlier name.
 services:
-  gateway:
+  companion:
     build: .
-    image: openbrewbyweight-https-gateway:local
-    container_name: openbrewbyweight-https-gateway
+    image: openbrewbyweight-companion:local
+    container_name: companion
     restart: unless-stopped
     environment:
-      GATEWAY_HOSTNAME: ${GATEWAY_HOSTNAME:-openbrewbyweight-secure}
-      GATEWAY_IP: ${GATEWAY_IP:-}
-      HTTP_PORT: ${HTTP_PORT:-80}
-      HTTPS_PORT: ${HTTPS_PORT:-443}
+      COMPANION_NAME: ${COMPANION_NAME:-}
+      COMPANION_HOSTNAME: ${COMPANION_HOSTNAME:-${GATEWAY_HOSTNAME:-openbrewbyweight-secure}}
+      COMPANION_IP: ${COMPANION_IP:-${GATEWAY_IP:-}}
+      COMPANION_HTTP_PORT: ${COMPANION_HTTP_PORT:-${HTTP_PORT:-80}}
+      COMPANION_HTTPS_PORT: ${COMPANION_HTTPS_PORT:-${HTTPS_PORT:-443}}
+      COMPANION_MDNS_PUBLISH: ${COMPANION_MDNS_PUBLISH:-${MDNS_PUBLISH:-true}}
       OBBW_CONTROLLER_URL: ${OBBW_CONTROLLER_URL:-}
       OBBW_CONTROLLER_NAME: ${OBBW_CONTROLLER_NAME:-}
-      MDNS_PUBLISH: ${MDNS_PUBLISH:-true}
     volumes:
-      - ${GATEWAY_DATA:-./data}:/data
+      - ${COMPANION_DATA:-${GATEWAY_DATA:-./data}}:/data
     networks:
       lan:
-        ipv4_address: ${GATEWAY_IP}
+        ipv4_address: ${COMPANION_IP:-${GATEWAY_IP:-}}
 
-# The gateway gets its own address on the LAN, so it keeps ports 80 and 443
+# The companion gets its own address on the LAN, so it keeps ports 80 and 443
 # and its own mDNS responder even when the server already uses them.
 networks:
   lan:
