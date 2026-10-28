@@ -5,54 +5,107 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>@T_TITLE@ · Open Brew by Weight Companion</title>
 <style>
-  :root { --bg: #f6f2ee; --card: #fff; --text: #2b211b; --muted: #75655a; --line: #e4d9d0; --accent: #8a4b24; --ok: #2f7d4f; --warn: #a3471c; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #171310; --card: #221c18; --text: #f1e8e1; --muted: #b3a296; --line: #3a302a; --accent: #d9935f; --ok: #6cc28f; --warn: #ec8a5b; }
+  /* The firmware Web UI's visual language (its tokens and component idioms,
+     src/web/app.css) brought to every companion page. */
+  :root {
+    --bg: #f5f5f5; --sf: #fff; --in: #fafafa; --fg: #242424; --mu: #636363; --ln: #dadada; --bd: #7d7d7d;
+    --ac: #a83b21; --pri: #a83b21; --on: #fff; --ok: #41ab5d; --dn: #a62632; --wn: #7b4a09;
+    --mo: #eaf5ee; --mw: #fff4de; --pa: #f4e8e2; --r: 0.75rem; --ah: 0 -4px 14px rgba(36, 36, 36, 0.1);
   }
+  @media (prefers-color-scheme: dark) {
+    html:not(.theme-light) {
+      --bg: #151515; --sf: #1d1d1d; --in: #242424; --fg: #efefef; --mu: #b2b2b2; --ln: #3c3c3c; --bd: #5a5a5a;
+      --ac: #c45c38; --pri: #c45c38; --ok: #74d68c; --dn: #ffadb5; --wn: #edc17d;
+      --mo: #193024; --mw: #33291b; --pa: #352820; --ah: 0 -4px 14px rgba(0, 0, 0, 0.35);
+    }
+  }
+  html { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 680px; margin: 0 auto; padding: 32px 16px 48px; }
-  h1 { font-size: 1.6rem; margin: 0 0 8px; }
-  h2 { font-size: 1.1rem; margin: 0; }
-  p { margin: 8px 0; }
-  .muted { color: var(--muted); font-size: .9rem; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+
+  /* Brand lockup: the firmware top bar's brand, at the left. */
+  .brandLock { display: flex; align-items: center; gap: 0.55rem; margin: 0.25rem 0 0.35rem; color: var(--ac); }
+  .brandLock svg { flex: none; width: 1.65rem; height: 2.17rem; overflow: visible; fill: currentColor; }
+  .brandLock span { display: flex; flex-direction: column; justify-content: center; gap: 0.08rem; line-height: 1.05; font-size: 1.4rem; font-weight: 800; letter-spacing: -0.02em; white-space: nowrap; }
+  .brandLock small { font-size: 1rem; font-weight: 300; letter-spacing: 0.01em; color: var(--fg); }
+  @media (min-width: 700px) {
+    .brandLock { gap: 0.65rem; }
+    .brandLock svg { width: 1.79rem; height: 2.35rem; }
+    .brandLock span { font-size: 1.5rem; gap: 0.1rem; }
+  }
+  .brandLock + p { margin: 0.15rem 0 1rem; }
+
+  h1 { font-size: 1.35rem; margin: 0 0 0.4rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 0.4rem; }
+  p { margin: 0.6rem 0; }
+  .muted { color: var(--mu); font-size: 0.9rem; }
+
+  .card { background: var(--sf); border: 1px solid var(--ln); border-radius: var(--r); box-shadow: var(--ah); padding: 1.25rem; margin: 1rem 0 0; }
+  .card > :first-child { margin-top: 0; }
+  .card > :last-child { margin-bottom: 0; }
+
+  nav.menu { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0 0 1.25rem; padding: 0.2rem; border: 1px solid var(--ln); border-radius: 2rem; background: var(--sf); box-shadow: 0 0.3rem 1.5rem rgba(0, 0, 0, 0.19); }
+  nav.menu a { padding: 0.5rem 1.1rem; border-radius: 1.5rem; background: none; color: var(--mu); text-decoration: none; font-size: 0.875rem; font-weight: 600; white-space: nowrap; }
+  nav.menu a[aria-current] { color: var(--ac); background: var(--pa); font-weight: 700; }
+  nav.menu a:not([aria-current]):hover { color: var(--fg); }
+
   .status { font-weight: 600; }
-  .status.ok { color: var(--ok); }
-  .status.warn { color: var(--warn); }
-  a { color: var(--accent); }
-  a.button { display: inline-block; background: var(--accent); color: var(--bg); border-radius: 8px; padding: 10px 16px; margin: 8px 8px 0 0; text-decoration: none; font-weight: 600; }
-  .qr { display: flex; gap: 16px; align-items: center; margin: 8px 0; }
-  .qr svg { flex: none; width: 128px; height: 128px; background: #fff; padding: 6px; border-radius: 8px; }
+  .status.ok { color: var(--ok); background: var(--mo); border-radius: var(--r); padding: 0.55rem 0.75rem; }
+  .status.warn { color: var(--wn); background: var(--mw); border-radius: var(--r); padding: 0.55rem 0.75rem; }
+
+  a { color: var(--ac); }
+  a.button { display: inline-block; min-height: 3rem; padding: 0.65rem 1.5rem; margin-top: 0.75rem; border-radius: 2rem; background: var(--pri); color: var(--on); font-weight: 700; text-decoration: none; }
+  a.button:hover { opacity: 0.92; }
+
+  .qr { display: flex; gap: 1rem; align-items: center; margin: 0.6rem 0; }
+  .qr svg { flex: none; width: 128px; height: 128px; background: #fff; padding: 6px; border-radius: var(--r); }
   @media (max-width: 600px) { .qr { display: none; } }
-  details { border-top: 1px solid var(--line); padding: 12px 0; }
-  details:first-of-type { border-top: 0; }
-  summary { cursor: pointer; font-weight: 600; font-size: 1.05rem; }
-  footer { margin: 0 0 24px; text-align: center; color: var(--muted); font-size: .85rem; line-height: 1.7; }
-  footer a { color: inherit; }
-  nav.menu { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px; }
-  nav.menu a { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--text); text-decoration: none; font-size: .9rem; }
-  nav.menu a[aria-current] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-  ol { padding-left: 20px; margin: 8px 0; }
-  li { margin: 6px 0; }
-  code { font-size: .85rem; overflow-wrap: anywhere; }
+
+  details { border: 1.5px solid var(--ln); border-radius: var(--r); background: var(--in); padding: 0.75rem 0.9rem; margin: 0.6rem 0; }
+  summary { cursor: pointer; font-weight: 700; font-size: 1rem; }
+  details[open] summary { margin-bottom: 0.35rem; }
+
+  ol { padding-left: 1.25rem; margin: 0.5rem 0; }
+  li { margin: 0.5rem 0; }
+  code { font-size: 0.85rem; overflow-wrap: anywhere; background: var(--in); border-radius: 0.4rem; padding: 0.08rem 0.3rem; }
+  #fingerprint { display: block; margin-top: 0.2rem; word-break: break-all; }
+
+  footer { margin: 1.25rem 0 1.5rem; text-align: center; color: var(--mu); font-size: 0.85rem; line-height: 1.7; }
+  footer a { color: var(--ac); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  :focus-visible { outline: 2px solid var(--ac); outline-offset: 2px; }
 </style>
 </head>
 <body>
 <main>
+  <div class="brandLock" aria-hidden="true">
+    <svg viewBox="12 4 40 56">
+      <mask id="brandCut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+        <rect width="64" height="64" fill="#fff" />
+        <path fill="none" stroke="#000" stroke-width="7.13" d="M32 0v27.55m0 20.9V64" />
+        <path fill="none" stroke="#000" stroke-width="7.6" stroke-linecap="round" d="M32 48.45 21.62 36.08" />
+        <circle cx="32" cy="27.55" r="6.27" />
+        <circle cx="31.34" cy="48.45" r="6.27" />
+      </mask>
+      <path mask="url(#brandCut)" d="M32 5s20 16 20 34a20 20 0 0 1-40 0C12 21 32 5 32 5z" />
+    </svg>
+    <span><small>Open Brew</small>by Weight</span>
+  </div>
+  <p class="muted">Open Brew by Weight Companion · @NAME@</p>
   <nav class="menu">
-    <a href="@SECURE_URL@/">@T_MENU_WEBUI@</a>
+    <a href="@SECURE_URL@/" target="_blank" rel="noopener">@T_MENU_WEBUI@</a>
     <a href="/" aria-current="page">@T_MENU_ACCESS@</a>
     <a href="/__companion/">@T_MENU_COMPANION@</a>
   </nav>
-  <p class="muted">Open Brew by Weight Companion · @NAME@</p>
   <h1>@T_TITLE@</h1>
   <p>@T_INTRO@</p>
 
   <section class="card">
     <p id="trust" class="status">@T_CHECKING@</p>
     <p class="muted">@CONTROLLER@</p>
-    <a class="button" href="@SECURE_URL@/">@T_OPEN@</a>
+    <a class="button" href="@SECURE_URL@/" target="_blank" rel="noopener">@T_OPEN@</a>
   </section>
 
   <section class="card qr">

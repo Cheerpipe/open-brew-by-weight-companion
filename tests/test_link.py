@@ -227,7 +227,7 @@ async def main():
             page_url = f"http://127.0.0.1:{pages.port}/__companion"
             async with http.get(page_url + "/") as reply:
                 page = await reply.text()
-                assert reply.status == 200 and "@STYLE@" not in page and "--accent" in page
+                assert reply.status == 200 and "@STYLE@" not in page and "--ac:" in page
                 assert reply.headers["Cache-Control"] == "no-store"
             async with http.post(page_url + "/pair", data="{}") as reply:
                 assert reply.status == 415, "pairing needs a JSON request a foreign page cannot send unasked"
