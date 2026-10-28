@@ -1,11 +1,13 @@
-"""The companion service: pairing, the controller link, the La Marzocco route and its pages.
+"""The companion service: pairing, the Web UI relay, the controller link, the La Marzocco route and its pages.
 
 It runs on its own thread and event loop inside the gateway supervisor, which
 tells it the controller's address on start and on every mDNS announcement.
-nginx serves its pages under /__companion/ through a Unix socket.
+nginx serves its pages under /__companion/, and the Web UI's API and live
+updates, through a Unix socket.
 """
 
 import asyncio
+import html
 import itertools
 import json
 import threading
@@ -20,6 +22,8 @@ from . import VERSION, crypto, dashboard, log
 from .lamarzocco import LaMarzocco
 from .link import Erased, LinkClosed, open_link
 from .pairing import Pairing
+from .relay import Relay
+from .screens import Screens
 from .store import Store
 
 HERE = Path(__file__).resolve().parent
@@ -55,6 +59,8 @@ class Companion:
         self.command_lock = asyncio.Lock()
         self.reported = None
         self.lm = upstream(self.store, self)
+        self.relay = Relay(self)
+        self.screens = Screens(self, self.relay)
 
     def spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -84,6 +90,7 @@ class Companion:
         if self.ws is None:
             self.wake.set()  # Reconnect now instead of waiting out the backoff.
         self.pairing.start()
+        self.spawn(self.relay.handshake())  # Also how a forgotten companion learns it.
 
     async def controller_request(self, method, url, body=None):
         """(status, JSON object) from the controller, or (None, {}) when it did not answer."""
@@ -106,6 +113,7 @@ class Companion:
         if self.ws is not None:
             self.spawn(self.ws.close())
         self.wake.set()
+        self.spawn(self.relay.handshake())
 
     def erase(self, why):
         """Delete the pairing, the La Marzocco account and its installation key."""
@@ -113,7 +121,28 @@ class Companion:
         self.lm.erase()
         self.creds_gen = None
         self.pairing.state, self.pairing.auto = "unpaired", False
+        self.relay.reset()
         log(f"{why}; its pairing, La Marzocco account and installation key are erased")
+        self.wake.set()
+
+    def not_recognized(self):
+        """The controller does not know this companion, unsigned: stop using the account, keep every secret."""
+        if self.pairing.state == "paired":
+            self.pairing.state = "not_recognized"
+            self.lm.configure(None, self.cfg["conn"], self.cfg["observe"])
+            log("the controller does not recognize this companion; La Marzocco is stopped")
+
+    def recognized(self):
+        """A relay session proved the pairing: a controller that did not know us does again."""
+        if self.pairing.state == "not_recognized":
+            self.pairing.state = "paired"
+            self._apply_account()
+
+    def link_wanted(self, wanted):
+        """The relay learned whether a feature needs the link [D4]; with no relay it always opens."""
+        if wanted is False and self.ws is not None:
+            log("the controller needs no link now; closing it")
+            self.spawn(self.ws.close())
         self.wake.set()
 
     # --- Link ----------------------------------------------------------------
@@ -141,7 +170,7 @@ class Companion:
     async def _link(self):
         """One link attempt and its session: why it ended, or None to look again at once."""
         pairing = self.store.pairing()
-        if self.controller is None or pairing is None:
+        if self.controller is None or pairing is None or self.relay.link is not True:
             self.link, self.link_reason = "down", ""
             self.wake.clear()
             await self.wake.wait()
@@ -157,11 +186,8 @@ class Companion:
             self.erase("the controller forgot this companion")
             return None
         except LinkClosed as error:
-            if error.code == "NOT_PAIRED" and self.pairing.state == "paired":
-                # Unsigned, so it could be forged: stop using the account, but keep every secret.
-                self.pairing.state = "not_recognized"
-                self.lm.configure(None, self.cfg["conn"], self.cfg["observe"])
-                log("the controller does not recognize this companion; La Marzocco is stopped")
+            if error.code == "NOT_PAIRED":  # Unsigned, so it could be forged.
+                self.not_recognized()
             return error.code
         self.failures = 0
         self.pairing.state = "paired"
@@ -430,22 +456,34 @@ class Companion:
             "route": self.route, "unknownFrames": self.unknown_frames,
             "laMarzocco": {"enabled": self.cfg["lm"], "account": self.store.credentials() is not None,
                            "connection": self.cfg["conn"], "subscribed": self.lm.sub, "up": self.lm.up},
+            "relay": self.relay.mode, **self.screens.mux.status(),
         }
 
 
-def render_page():
-    """The status and pairing page, styled like the setup page it sits beside."""
+def render_page(name="page.html"):
+    """A companion page, styled like the setup page it sits beside."""
     setup = (HERE.parent / "gateway" / "setup.html").read_text()
     style = setup[setup.index("<style>") + 7:setup.index("</style>")]
-    return (HERE / "page.html").read_text().replace("@STYLE@", style)
+    return (HERE / name).read_text().replace("@STYLE@", style)
 
 
 def web_app(companion):
-    page = render_page()
+    page, notice = render_page(), render_page("ui-off.html")
     no_store = {"Cache-Control": "no-store"}
 
     async def show(request):
         return web.Response(text=page, content_type="text/html", headers=no_store)
+
+    async def gate(request):
+        """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens directly."""
+        page = request.headers.get("X-Original-URI", "").partition("?")[0]
+        allowed = companion.relay.mode != "disabled" or page == "/sw.js"
+        return web.Response(status=204 if allowed else 403)
+
+    async def ui_off(request):
+        address = html.escape(companion.base_url()) if companion.controller else ""
+        return web.Response(text=notice.replace("@ADDRESS@", address), content_type="text/html",
+                            headers=no_store)
 
     async def status(request):
         return web.json_response(companion.status(), headers=no_store)
@@ -468,8 +506,11 @@ def web_app(companion):
         companion.erase("erased on the companion's page")
         return web.json_response(companion.status(), headers=no_store)
 
-    app = web.Application()
+    app = web.Application(client_max_size=2 << 20)  # An OTA chunk is 64 KiB; nginx allows 1 MiB.
     app.router.add_get("/__companion/", show)
+    app.router.add_get("/__companion/ui-gate", gate)
+    app.router.add_get("/__companion/ui-off", ui_off)
+    app.router.add_routes(companion.screens.routes())
     app.router.add_get("/__companion/pair", show)
     app.router.add_get("/__companion/status", status)
     app.router.add_post("/__companion/pair", pair)
@@ -514,6 +555,7 @@ async def _serve(cfg, data, socket_path, handle, ready):
         finally:
             companion.lm.stop()
             await runner.cleanup()
+            await companion.relay.close()
 
 
 def start(cfg, data, run, on_exit):

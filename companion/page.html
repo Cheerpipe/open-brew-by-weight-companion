@@ -31,6 +31,7 @@
     <h2 id="status-title"></h2>
     <dl>
       <dt id="controller-label"></dt><dd id="controller"></dd>
+      <dt id="ui-label"></dt><dd id="ui"></dd>
       <dt id="link-label"></dt><dd id="link"></dd>
       <dt id="lm-label"></dt><dd id="lm"></dd>
     </dl>
@@ -45,7 +46,7 @@
       title: "Companion", pairingTitle: "Pairing", statusTitle: "Status", controller: "Controller",
       link: "Link", lm: "La Marzocco", pair: "Pair with the controller", pairAgain: "Pair again",
       searching: "Looking for the controller on your network…",
-      unpaired: "Not paired yet. Pairing lets the controller hand its La Marzocco cloud connection to this companion, so the espresso machine's controller has less to do.",
+      unpaired: "Not paired yet. Pairing lets several phones, tablets and computers use the Web UI through this companion at the same time, and lets the controller hand its La Marzocco cloud connection to it, so the espresso machine's controller has less to do.",
       requesting: "Asking the controller…",
       pending: "Waiting for your approval. In the Web UI, open Admin → Companion and type this code:",
       pendingNoCode: "Waiting for the controller to prepare the request…",
@@ -67,13 +68,16 @@
       lmOff: "Off. Turn it on in Admin → Companion.", lmWaiting: "Waiting for the account from the controller",
       lmConnecting: "Connecting to La Marzocco…", lmConnected: "Connected",
       routeCompanion: "the controller uses this connection", routeDirect: "the controller uses its own",
-      versionLine: "Version {v}", none: "Not found yet"
+      versionLine: "Version {v}", none: "Not found yet",
+      ui: "Web UI", uiReady: "Through the companion · {screens}", uiPassthrough: "Straight to the controller, one screen at a time",
+      uiDisabled: "Directly on the controller (off in Admin → Companion)",
+      screens0: "no screen open", screens1: "1 screen open", screensN: "{n} screens open"
     },
     es: {
       title: "Companion", pairingTitle: "Vinculación", statusTitle: "Estado", controller: "Controlador",
       link: "Enlace", lm: "La Marzocco", pair: "Vincular con el controlador", pairAgain: "Vincular de nuevo",
       searching: "Buscando el controlador en tu red…",
-      unpaired: "Aún no está vinculado. Al vincularlo, el controlador le entrega su conexión con la nube de La Marzocco a este companion y así tiene menos trabajo.",
+      unpaired: "Aún no está vinculado. Al vincularlo, varios teléfonos, tablets y computadores pueden usar la Web UI a través de este companion al mismo tiempo, y el controlador le entrega su conexión con la nube de La Marzocco, así que tiene menos trabajo.",
       requesting: "Consultando al controlador…",
       pending: "Esperando tu aprobación. En la Web UI, abre Admin → Companion y escribe este código:",
       pendingNoCode: "Esperando que el controlador prepare la solicitud…",
@@ -95,7 +99,10 @@
       lmOff: "Apagado. Actívalo en Admin → Companion.", lmWaiting: "Esperando la cuenta desde el controlador",
       lmConnecting: "Conectando con La Marzocco…", lmConnected: "Conectado",
       routeCompanion: "el controlador usa esta conexión", routeDirect: "el controlador usa la suya",
-      versionLine: "Versión {v}", none: "Aún no encontrado"
+      versionLine: "Versión {v}", none: "Aún no encontrado",
+      ui: "Web UI", uiReady: "A través del companion · {screens}", uiPassthrough: "Directo al controlador, una pantalla a la vez",
+      uiDisabled: "Directamente en el controlador (desactivada en Admin → Companion)",
+      screens0: "ninguna pantalla abierta", screens1: "1 pantalla abierta", screensN: "{n} pantallas abiertas"
     }
   };
   var lang = /^es/i.test(navigator.language || "") ? "es" : "en", t = T[lang];
@@ -109,6 +116,7 @@
   $("status-title").textContent = t.statusTitle;
   $("controller-label").textContent = t.controller;
   $("link-label").textContent = t.link;
+  $("ui-label").textContent = t.ui;
   $("lm-label").textContent = t.lm;
 
   var timer;
@@ -131,6 +139,9 @@
     $("mismatch").hidden = !(s.linkReason === "VERSION" || s.unknownFrames);
     $("mismatch").textContent = s.linkReason === "VERSION" ? t.version : t.unknown;
     $("link").textContent = fill(t[s.link] || s.link, { reason: s.linkReason || "" });
+    var screens = s.screens === 1 ? t.screens1 : s.screens ? fill(t.screensN, { n: s.screens }) : t.screens0;
+    $("ui").textContent = s.relay === "ready" ? fill(t.uiReady, { screens: screens })
+      : s.relay === "disabled" ? t.uiDisabled : t.uiPassthrough;
     var lm = s.laMarzocco;
     $("lm").textContent = !s.paired ? "—" : !lm.enabled ? t.lmOff : !lm.account ? t.lmWaiting
       : (lm.up ? t.lmConnected : t.lmConnecting) + " · " + (s.route === "companion" ? t.routeCompanion : t.routeDirect);
