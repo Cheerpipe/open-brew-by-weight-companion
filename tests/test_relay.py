@@ -59,20 +59,20 @@ async def eventually(predicate, timeout=3):
 
 
 def relay_vectors():
-    """The relay formulas against the fake controller's own copy; printed for the firmware's vectors."""
-    rb, nc = bytes(range(32, 48)), crypto.unb64(V["companionNonce"], 16)
+    """The relay formulas against the firmware's shared vectors and the fake controller."""
+    r = V["relay"]
+    rb, nc = crypto.unb64(r["challenge"], 16), crypto.unb64(r["nonce"], 16)
+    assert crypto.mac(SECRET, b"R", rb, nc) == crypto.unb64(r["request"])
+    assert crypto.mac(SECRET, b"Q", rb, nc) == crypto.unb64(r["reply"])
+    assert crypto.mac(SECRET, b"E", nc) == crypto.unb64(r["erase"])
     key = crypto.relay_key(SECRET, rb, nc)
-    assert key == fake_controller.relay_key(SECRET, rb, nc)
-    args = ("POST", "/api/v1/config?x=1", 7, "192.168.1.50", A, "token")
-    tag = crypto.relay_tag(key, *args)
-    assert tag == fake_controller.relay_tag(key, *args) and len(tag) == 32
-    assert crypto.relay_tag(key, "POST", "/api/v1/config?x=1", 7, "192.168.1.50", A, "") != tag
-    vectors = {"relayChallenge": crypto.b64(rb), "relayNonce": V["companionNonce"],
-               "relayProof": crypto.b64(crypto.mac(SECRET, b"R", rb, nc)),
-               "relayAnswer": crypto.b64(crypto.mac(SECRET, b"Q", rb, nc)), "relayKey": key.hex(),
-               "relayRequest": {"method": args[0], "uri": args[1], "q": args[2], "addr": args[3], "screen": args[4],
-                                "session": args[5], "mac": tag}}
-    print("relay vectors (for the integrator):", json.dumps(vectors))
+    assert key.hex() == r["key"] and key == fake_controller.relay_key(SECRET, rb, nc)
+    for case in r["requests"]:
+        _, q, addr, screen, tag = case["header"].split(" ")
+        args = (case["method"], case["uri"], int(q), addr, screen, case["session"])
+        assert crypto.relay_tag(key, *args) == tag == fake_controller.relay_tag(key, *args)
+    assert crypto.relay_tag(key, "POST", "/api/v1/config?x=1", 7, "192.168.1.50", A, "") != \
+        r["requests"][0]["header"].split(" ")[4]
 
 
 async def main():
