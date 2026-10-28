@@ -75,7 +75,7 @@ except ValueError:
 
 # --- Frame codec ---------------------------------------------------------------
 companion = FrameCodec(session)
-controller = FrameCodec(session, send=b"f", receive=b"c", known={"ping", "lm", "creds", "st", "res"})
+controller = FrameCodec(session, send=b"f", receive=b"c")
 assert companion.encode({"t": "ping", "up": True}) == V["companionFrame"]
 assert controller.encode({"t": "cfg", "lm": True, "conn": "ws", "observe": True}) == V["controllerFrame"]
 assert controller.decode(V["companionFrame"]) == {"q": 1, "t": "ping", "up": True}
@@ -89,12 +89,13 @@ fresh = FrameCodec(session)
 fresh.decode(V["controllerFrame"])
 raises(lambda: fresh.decode(fourth))  # ...and grow by exactly one.
 tampered = third.replace('"on":true', '"on":false')
-raises(lambda: FrameCodec(session, known={"hold"}).decode(tampered))
+raises(lambda: FrameCodec(session).decode(tampered))
 raises(lambda: FrameCodec(session).decode(V["companionFrame"]))  # Direction is part of the MAC.
 raises(lambda: FrameCodec(bytes(32)).decode(V["controllerFrame"]))
 raises(lambda: FrameCodec(session).decode("no dot at all"))
 other = FrameCodec(session, send=b"f", receive=b"c")
-raises(lambda: FrameCodec(session).decode(other.encode({"t": "webhook"})))  # Unknown t.
+# An unknown t is authentic: the codec passes it on, and the service ignores and counts it.
+assert FrameCodec(session).decode(other.encode({"t": "webhook"})) == {"q": 1, "t": "webhook"}
 boolean = FrameCodec(session, send=b"f")
 body = '{"q":true,"t":"cfg"}'
 raises(lambda: FrameCodec(session).decode(f"{boolean._tag(b'f', body)}.{body}"))
@@ -106,7 +107,7 @@ try:
     raise AssertionError("frames over 4,096 bytes are never sent")
 except ValueError:
     pass
-receiver = FrameCodec(session, send=b"f", receive=b"c", known={"ping"})
+receiver = FrameCodec(session, send=b"f", receive=b"c")
 assert receiver.decode(sender.encode({"t": "ping", "up": False}))["q"] == 1, "a dropped frame uses no sequence number"
 
 # --- Dashboard filter -------------------------------------------------------------

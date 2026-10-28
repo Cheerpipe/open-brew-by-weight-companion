@@ -24,6 +24,8 @@ from .store import Store
 
 HERE = Path(__file__).resolve().parent
 BACKOFF_S = (5, 15, 60, 300)
+RETRY_LATER_S = 15  # The controller is busy with its scale: a steady short retry, never a longer one.
+FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd"})
 PING_S = {"companion": 15, "direct": 120}
 CONFIRM_S = 5
 FULL_RETRY_S = (1, 2, 5, 10, 30)
@@ -41,10 +43,11 @@ class Companion:
         self.tasks = set()
         self.wake = asyncio.Event()
         self.pairing = Pairing(self)
-        self.link, self.link_reason = "down", ""
+        self.link, self.link_reason, self.failures = "down", "", 0
         self.ws = self.outbox = None
         self.route, self.hold, self.held = "direct", False, None
-        self.route_changed = asyncio.Event()
+        self.ping_now = asyncio.Event()
+        self.unknown_frames, self.unknown_kinds = 0, set()
         self.cfg = {"lm": False, "conn": "ws", "observe": True}
         self.creds_gen = None  # Generation whose sign-in result the controller still waits for.
         self.full_ep, self.full_task = None, None
@@ -96,7 +99,7 @@ class Companion:
             return None, {}
 
     def paired(self, secret):
-        self.store.erase_account()
+        self.store.erase_pairing()
         self.lm.erase()
         self.store.save_pairing(secret, self.controller[0])
         log(f"paired with {self.controller[0]}")
@@ -104,43 +107,30 @@ class Companion:
             self.spawn(self.ws.close())
         self.wake.set()
 
-    def _erased(self):
+    def erase(self, why):
+        """Delete the pairing, the La Marzocco account and its installation key."""
         self.store.erase_pairing()
         self.lm.erase()
         self.creds_gen = None
         self.pairing.state, self.pairing.auto = "unpaired", False
-        log("the controller forgot this companion; its pairing and La Marzocco account are erased")
+        log(f"{why}; its pairing, La Marzocco account and installation key are erased")
+        self.wake.set()
 
     # --- Link ----------------------------------------------------------------
     async def run_link(self):
-        failures = 0
         while True:
-            pairing = self.store.pairing()
-            if self.controller is None or pairing is None:
-                self.link, self.link_reason = "down", ""
-                self.wake.clear()
-                await self.wake.wait()
-                continue
-            self.wake.clear()
-            self.link = "connecting"
-            hello = {"id": self.id, "name": self.name, "version": VERSION}
             try:
-                ws, codec = await open_link(self.http, self.base_url("ws") + "/api/v1/companion/link",
-                                            hello, pairing["secret"])
-            except Erased:
-                self._erased()
-                failures = 0
+                reason = await self._link()
+            except Exception:  # A bug or a disk error ends this attempt, never the gateway.
+                log("the link failed unexpectedly:\n" + traceback.format_exc())
+                reason = "ERROR"
+            if reason is None:
                 continue
-            except LinkClosed as error:
-                reason = error.code
-                if reason == "NOT_PAIRED":
-                    self.pairing.state = "not_recognized"
+            if reason == "RETRY_LATER":
+                delay = RETRY_LATER_S
             else:
-                failures = 0
-                self.pairing.state = "paired"
-                reason = await self._session(ws, codec)
-            delay = BACKOFF_S[min(failures, len(BACKOFF_S) - 1)]
-            failures += 1
+                delay = BACKOFF_S[min(self.failures, len(BACKOFF_S) - 1)]
+                self.failures += 1
             self.link, self.link_reason = "retry", reason
             log(f"link closed ({reason}); reopening in {delay} s, or as soon as the controller announces itself")
             try:
@@ -148,10 +138,41 @@ class Companion:
             except asyncio.TimeoutError:
                 pass
 
+    async def _link(self):
+        """One link attempt and its session: why it ended, or None to look again at once."""
+        pairing = self.store.pairing()
+        if self.controller is None or pairing is None:
+            self.link, self.link_reason = "down", ""
+            self.wake.clear()
+            await self.wake.wait()
+            return None
+        self.wake.clear()
+        self.link = "connecting"
+        hello = {"id": self.id, "name": self.name, "version": VERSION}
+        try:
+            ws, codec = await open_link(self.http, self.base_url("ws") + "/api/v1/companion/link",
+                                        hello, pairing["secret"])
+        except Erased:
+            self.failures = 0
+            self.erase("the controller forgot this companion")
+            return None
+        except LinkClosed as error:
+            if error.code == "NOT_PAIRED" and self.pairing.state == "paired":
+                # Unsigned, so it could be forged: stop using the account, but keep every secret.
+                self.pairing.state = "not_recognized"
+                self.lm.configure(None, self.cfg["conn"], self.cfg["observe"])
+                log("the controller does not recognize this companion; La Marzocco is stopped")
+            return error.code
+        self.failures = 0
+        self.pairing.state = "paired"
+        return await self._session(ws, codec)
+
     async def _session(self, ws, codec):
         self.ws, self.outbox = ws, asyncio.Queue()
         self.link, self.link_reason = "open", ""
         self.hold, self.held, self.full_ep, self.reported = False, None, None, None
+        self.unknown_frames = 0
+        self.unknown_kinds.clear()
         log(f"link open to {self.controller[0]}")
         writer = self.spawn(self._writer(ws, codec, self.outbox))
         pinger = self.spawn(self._pinger())
@@ -195,19 +216,32 @@ class Companion:
                 return
 
     async def _pinger(self):
+        """A ping when the session opens, whenever `up` changes or the route turns to the companion,
+        and then every PING_S of the route."""
+        loop = asyncio.get_running_loop()
         while True:
-            self.route_changed.clear()
-            try:
-                await asyncio.wait_for(self.route_changed.wait(), PING_S[self.route])
-                if self.route != "companion":
-                    continue  # Back to the slow interval, counted from now.
-            except asyncio.TimeoutError:
-                pass
-            self.post({"t": "ping", "up": self.lm.up})
+            up, route = self.lm.up, self.route
+            self.post({"t": "ping", "up": up})
+            deadline = loop.time() + PING_S[route]
+            while True:
+                self.ping_now.clear()
+                try:
+                    await asyncio.wait_for(self.ping_now.wait(), max(0.0, deadline - loop.time()))
+                except asyncio.TimeoutError:
+                    break
+                if self.lm.up != up or self.route != route == "direct":
+                    break
+                if self.route != route:  # Back to direct: the slow interval, counted from now.
+                    route, deadline = self.route, loop.time() + PING_S[self.route]
 
     async def _on_frame(self, frame):
-        kind = frame["t"]
-        if kind == "cfg":
+        kind = frame.get("t")
+        if not isinstance(kind, str) or kind not in FROM_CONTROLLER:  # A newer controller's: counted, shown.
+            self.unknown_frames += 1
+            if len(self.unknown_kinds) < 8 and str(kind)[:32] not in self.unknown_kinds:
+                self.unknown_kinds.add(str(kind)[:32])
+                log(f"ignored a frame this version does not know ({str(kind)[:32]!r}); update the companion")
+        elif kind == "cfg":
             self.cfg = {"lm": frame.get("lm") is True, "conn": "api" if frame.get("conn") == "api" else "ws",
                         "observe": frame.get("observe") is not False}
             self._apply_account()
@@ -218,7 +252,7 @@ class Companion:
             self._set_route("companion" if frame.get("to") == "companion" else "direct")
         elif kind == "hold":
             self._set_hold(frame.get("on") is True)
-        else:
+        else:  # cmd
             command_id, op, value = frame.get("id"), frame.get("op"), frame.get("v")
             if type(command_id) is not int or command_id < 1:
                 raise LinkClosed("PROTOCOL", "command without an id")
@@ -232,7 +266,7 @@ class Companion:
         if route == self.route:
             return
         self.route = route
-        self.route_changed.set()
+        self.ping_now.set()
         log(f"La Marzocco route: {route}")
         if route == "companion":
             self.full_ep = None
@@ -256,8 +290,8 @@ class Companion:
             raise LinkClosed("PROTOCOL", "credentials without a generation")
         if frame.get("erase") is True:
             self.store.erase_account()
-            self.lm.erase()
             self.creds_gen = None
+            self._apply_account()
             log("the controller erased the La Marzocco account")
             return
         try:
@@ -282,13 +316,13 @@ class Companion:
 
     # --- Events from the La Marzocco client ------------------------------------
     def account(self, ok):
-        if self.creds_gen is not None and self.post(
-                {"t": "creds", "gen": self.creds_gen, "ok": True} if ok else
-                {"t": "creds", "gen": self.creds_gen, "ok": False, "code": "AUTH"}):
+        """A sign-in (also one a read or command needed) or a refusal: report it with the new token's life."""
+        if self.creds_gen is not None and self.post({"t": "creds", "gen": self.creds_gen, "ok": ok}):
             self.creds_gen = None
-        self._report()
+        self._report(force=True)
 
     def upstream(self):
+        self.ping_now.set()
         self._report()
 
     def subscribed(self):
@@ -327,7 +361,9 @@ class Companion:
         reduced = dashboard.reduce(data, push=kind == "push")
         if reduced is None:
             return False
-        frame = {"t": "st", "k": kind, "ep": self.lm.ep if ep is None else ep, "ac": ac, "d": reduced}
+        frame = {"t": "st", "k": kind, "ep": self.lm.ep if ep is None else ep, "d": reduced}
+        if kind != "push":  # Pushes take their order from when the controller receives them.
+            frame["ac"] = ac
         if kind == "read" and self.hold:
             self.held = frame
             return True
@@ -391,7 +427,7 @@ class Companion:
             if self.controller else None,
             "pairing": self.pairing.status(),
             "link": self.link, "linkReason": self.link_reason or None,
-            "route": self.route,
+            "route": self.route, "unknownFrames": self.unknown_frames,
             "laMarzocco": {"enabled": self.cfg["lm"], "account": self.store.credentials() is not None,
                            "connection": self.cfg["conn"], "subscribed": self.lm.sub, "up": self.lm.up},
         }
@@ -422,11 +458,22 @@ def web_app(companion):
         companion.pairing.start(manual=True)
         return web.json_response(companion.pairing.status(), status=202, headers=no_store)
 
+    async def erase(request):
+        if request.content_type != "application/json":
+            return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+        if companion.store.pairing() is None or companion.ws is not None or companion.pairing.state in (
+                "paired", "requesting", "pending"):
+            return web.json_response({"error": "IN_USE", "message": "Only a pairing the controller no longer "
+                                      "recognizes can be erased here; use Forget in Admin"}, status=409)
+        companion.erase("erased on the companion's page")
+        return web.json_response(companion.status(), headers=no_store)
+
     app = web.Application()
     app.router.add_get("/__companion/", show)
     app.router.add_get("/__companion/pair", show)
     app.router.add_get("/__companion/status", status)
     app.router.add_post("/__companion/pair", pair)
+    app.router.add_post("/__companion/erase", erase)
     return app
 
 

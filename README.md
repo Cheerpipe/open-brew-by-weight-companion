@@ -52,6 +52,12 @@ companion's requests until you choose **Stop ignoring**; **Forget** unpairs
 it, and the companion then erases everything it received from the
 controller.
 
+A factory reset of the controller forgets the companion too, but the
+companion cannot be sure the controller really means it, so it only stops
+using your La Marzocco account and keeps it. Its page then offers **Pair
+again** or **Erase this pairing**; until you choose one, your La Marzocco
+account stays on the companion.
+
 ## La Marzocco
 
 On a Linea Micra, turn on **La Marzocco** in **Admin → Companion** after
@@ -70,7 +76,11 @@ account to the companion, encrypted with a key only the two of them know.
   goes back to its own connection by itself, waiting until a shot with a
   scale has ended.
 - Turning the switch off, or disconnecting the account in the Web UI, makes
-  the companion erase the account and its installation key.
+  the companion erase the account. It keeps its installation key, so
+  turning the switch on again adds no new installation to your account; the
+  key goes when the companion is unpaired.
+- With **Show power state** off the controller keeps using its own La
+  Marzocco connection, and the companion does not sign in at all.
 
 The companion's page shows whether it is paired, connected to the
 controller, and whether the controller is using its La Marzocco connection.
@@ -176,7 +186,7 @@ Everything lives in the `data` folder on your server:
 | `secrets/identity.json` | The companion's id and its pairing key. |
 | `secrets/pairing.json` | The secret it shares with the controller after pairing. |
 | `secrets/credentials.json` | Your La Marzocco email, password and machine serial, only while La Marzocco is on. |
-| `secrets/lamarzocco.json` | The key of the companion's own La Marzocco installation. |
+| `secrets/lamarzocco.json` | The key of the companion's own La Marzocco installation, kept until the companion is unpaired. |
 
 - The `secrets` folder and the keys can be read only by the server's
   administrator (root).
@@ -215,8 +225,9 @@ Everything lives in the `data` folder on your server:
   Wi-Fi once rather than once per device. Only while it has not found the
   controller yet does it ask the network again, every few minutes. Once
   paired, it keeps one quiet connection open to the controller: a short
-  message every two minutes, or every 15 seconds while it carries La
-  Marzocco (replacing the controller's own La Marzocco check one for one),
+  message when it connects, every two minutes, or every 15 seconds while it
+  carries La Marzocco (replacing the controller's own La Marzocco check one
+  for one), and when its La Marzocco connection comes up or goes down,
   plus the machine's updates as La Marzocco sends them, each a few hundred
   bytes. The controller still allows one live Web UI at a time, exactly as
   without the companion.

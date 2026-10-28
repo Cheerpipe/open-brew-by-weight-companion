@@ -108,9 +108,27 @@ different companions, do not approve it.
 ## The companion says the controller no longer recognizes it
 
 The controller lost its pairing, for example after a factory reset, but the
-companion still has it. Press **Pair again** on the companion's page and
-approve the request in Admin → Companion; the new pairing replaces the old
-one.
+companion still has it. The companion stops using your La Marzocco account
+right away but keeps it, because anyone on your network could pretend to be
+the controller. Then choose on the companion's page:
+
+- **Pair again**, and approve the request in Admin → Companion. The new
+  pairing replaces the old one.
+- **Erase this pairing**, if you no longer want the companion. It deletes
+  the pairing, your La Marzocco account and the companion's La Marzocco
+  installation key.
+
+Until you choose one, your La Marzocco account stays on the companion.
+
+## The companion asks you to update it
+
+**The controller and this companion use different versions of their
+connection** means the link was refused because the two speak different
+versions; everything stays on the controller's own connection. **The
+controller sent messages this companion does not understand** means the
+controller is newer: the link keeps working with what both know. In both
+cases update the companion (`git pull && ./setup --yes`) and the controller
+to their latest releases.
 
 ## La Marzocco stays on the controller's own connection
 
@@ -120,9 +138,12 @@ page:
 
 - **Link** says **Connected**. If it says **Reconnecting**, the reason in
   brackets says why; `RETRY_LATER` means a shot with a scale or a scale
-  connection was in progress, and it tries again by itself.
+  connection was in progress, and it tries again every 15 seconds by itself.
+  `ERROR` means something unexpected happened; the log
+  (`docker compose logs`) shows the details, and it tries again by itself.
 - **La Marzocco** says **Connected**. **Off** means the switch in Admin →
-  Companion is off. **Waiting for the account** means the controller has not
+  Companion is off. With **Show power state** off in Settings the
+  controller always keeps its own connection. **Waiting for the account** means the controller has not
   sent it yet: connect the La Marzocco account in the Web UI first.
 - The log (`docker compose logs`) says
   `La Marzocco refused the account` when the email or password is wrong.

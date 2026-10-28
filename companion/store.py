@@ -63,7 +63,7 @@ class Store:
         self.write(CREDENTIALS, {"gen": generation, **account})
 
     def installation_key(self):
-        """The La Marzocco installation key, created once and reused until the account is erased."""
+        """The La Marzocco installation key, created once and kept until the pairing is erased."""
         saved = self.read(INSTALLATION)
         if not saved:
             saved = {"key": crypto.scalar(crypto.new_key()).hex(), "registered": False}
@@ -74,7 +74,8 @@ class Store:
         self.write(INSTALLATION, {**self.read(INSTALLATION), "registered": True})
 
     def erase_account(self):
-        self.delete(CREDENTIALS, INSTALLATION)
+        """The account only: the installation stays, so turning La Marzocco on again adds none to the account."""
+        self.delete(CREDENTIALS)
 
     def erase_pairing(self):
         self.delete(PAIRING, CREDENTIALS, INSTALLATION)

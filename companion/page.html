@@ -24,6 +24,7 @@
     <p id="code" class="code" hidden></p>
     <p id="pairing-help" class="muted"></p>
     <button id="pair" type="button" hidden></button>
+    <button id="erase" type="button" hidden></button>
   </section>
 
   <section class="card">
@@ -33,6 +34,7 @@
       <dt id="link-label"></dt><dd id="link"></dd>
       <dt id="lm-label"></dt><dd id="lm"></dd>
     </dl>
+    <p id="mismatch" class="status warn" hidden></p>
   </section>
   <p class="muted" id="version"></p>
 </main>
@@ -56,13 +58,16 @@
       busy: "Another companion is asking to pair right now. Try again in a few minutes.",
       rate_limited: "The controller received another request a moment ago. Try again in a few seconds.",
       unreachable: "The controller did not answer. Is it on?",
-      not_recognized: "The controller no longer recognizes this companion, for example after a factory reset. Pair it again.",
+      not_recognized: "The controller no longer recognizes this companion, for example after a factory reset, so the companion stopped using your La Marzocco account. It still keeps the account until you pair again or erase this pairing.",
+      erase: "Erase this pairing", eraseConfirm: "Erase this pairing, the La Marzocco account and the companion's La Marzocco installation from this companion?",
+      version: "The controller and this companion use different versions of their connection. Update both to their latest release.",
+      unknown: "The controller sent messages this companion does not understand. Update the companion.",
       error: "Pairing did not work. The companion's log says why.",
       down: "Not connected", connecting: "Connecting…", open: "Connected", retry: "Reconnecting ({reason})",
       lmOff: "Off. Turn it on in Admin → Companion.", lmWaiting: "Waiting for the account from the controller",
       lmConnecting: "Connecting to La Marzocco…", lmConnected: "Connected",
       routeCompanion: "the controller uses this connection", routeDirect: "the controller uses its own",
-      version: "Version {v}", none: "Not found yet"
+      versionLine: "Version {v}", none: "Not found yet"
     },
     es: {
       title: "Companion", pairingTitle: "Vinculación", statusTitle: "Estado", controller: "Controlador",
@@ -81,13 +86,16 @@
       busy: "Otro companion está pidiendo vincularse ahora. Inténtalo en unos minutos.",
       rate_limited: "El controlador recibió otra solicitud hace un momento. Inténtalo en unos segundos.",
       unreachable: "El controlador no respondió. ¿Está encendido?",
-      not_recognized: "El controlador ya no reconoce este companion, por ejemplo tras un restablecimiento de fábrica. Vuelve a vincularlo.",
+      not_recognized: "El controlador ya no reconoce este companion, por ejemplo tras un restablecimiento de fábrica, así que el companion dejó de usar tu cuenta de La Marzocco. La sigue guardando hasta que lo vuelvas a vincular o borres esta vinculación.",
+      erase: "Borrar esta vinculación", eraseConfirm: "¿Borrar de este companion esta vinculación, la cuenta de La Marzocco y su instalación de La Marzocco?",
+      version: "El controlador y este companion usan versiones distintas de su conexión. Actualiza ambos a su última versión.",
+      unknown: "El controlador envió mensajes que este companion no entiende. Actualiza el companion.",
       error: "La vinculación no funcionó. El registro del companion dice por qué.",
       down: "Sin conexión", connecting: "Conectando…", open: "Conectado", retry: "Reconectando ({reason})",
       lmOff: "Apagado. Actívalo en Admin → Companion.", lmWaiting: "Esperando la cuenta desde el controlador",
       lmConnecting: "Conectando con La Marzocco…", lmConnected: "Conectado",
       routeCompanion: "el controlador usa esta conexión", routeDirect: "el controlador usa la suya",
-      version: "Versión {v}", none: "Aún no encontrado"
+      versionLine: "Versión {v}", none: "Aún no encontrado"
     }
   };
   var lang = /^es/i.test(navigator.language || "") ? "es" : "en", t = T[lang];
@@ -107,7 +115,7 @@
   function render(s) {
     var p = s.pairing, state = p.state, pending = state === "pending" || state === "requesting";
     $("brand").textContent = "Open Brew by Weight Companion · " + s.name;
-    $("version").textContent = fill(t.version, { v: s.version });
+    $("version").textContent = fill(t.versionLine, { v: s.version });
     $("controller").textContent = s.controller ? s.controller.name + " (" + s.controller.address + ")" : t.none;
     var message = !s.controller && !s.paired ? t.searching
       : state === "paired" ? fill(t.paired, { name: s.pairedWith || (s.controller && s.controller.name) })
@@ -119,6 +127,9 @@
     $("pairing-help").textContent = state === "pending" ? fill(t.expires, { m: Math.max(1, Math.ceil(p.expiresInS / 60)) }) : "";
     $("pair").hidden = !s.controller || pending || state === "paired";
     $("pair").textContent = state === "unpaired" ? t.pair : t.pairAgain;
+    $("erase").hidden = !s.paired || pending || state === "paired" || s.link === "open";
+    $("mismatch").hidden = !(s.linkReason === "VERSION" || s.unknownFrames);
+    $("mismatch").textContent = s.linkReason === "VERSION" ? t.version : t.unknown;
     $("link").textContent = fill(t[s.link] || s.link, { reason: s.linkReason || "" });
     var lm = s.laMarzocco;
     $("lm").textContent = !s.paired ? "—" : !lm.enabled ? t.lmOff : !lm.account ? t.lmWaiting
@@ -135,6 +146,13 @@
   $("pair").addEventListener("click", function () {
     $("pair").hidden = true;
     fetch("/__companion/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(refresh, refresh);
+  });
+  $("erase").textContent = t.erase;
+  $("erase").addEventListener("click", function () {
+    if (!confirm(t.eraseConfirm)) return;
+    $("erase").hidden = true;
+    fetch("/__companion/erase", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
       .then(refresh, refresh);
   });
   refresh();

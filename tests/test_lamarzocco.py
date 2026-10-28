@@ -240,15 +240,22 @@ async def main():
             await events.wait(lambda: lm.sub)
             assert lm.ep == 2 and cloud.calls.count("signin") == 1, "a reconnection reuses the token"
 
-            # Token renewal before it runs out: refresh, then the companion's read.
+            # Token renewal before it runs out: only the renew loop refreshes, then the companion's read.
             lamarzocco.RENEW_AFTER_S = 0.5
-            lm.configure(ACCOUNT, "ws", False)  # Restarts its tasks with the short token life.
+            lm.configure(ACCOUNT, "api", True)  # Restarts its tasks with the short token life.
             await events.wait(lambda: ("renewed",) in events.log)
             assert cloud.calls.count("refresh") >= 1 and lm.access == cloud.access
             lamarzocco.RENEW_AFTER_S = 50 * 60
             lm.stop()
             await asyncio.sleep(0.1)
             assert not lm.sub
+            refreshes, renewals = cloud.calls.count("refresh"), events.log.count(("renewed",))
+            lm.issued_at -= 3 * 3600  # Long past due: a read uses the token it has and refreshes nothing.
+            assert (await lm.read())[1] is not None and cloud.calls.count("refresh") == refreshes
+            lm.access = None  # As after a 401: the read gets a new token and reports it.
+            refreshes, accounts = cloud.calls.count("refresh"), events.log.count(("account", True))
+            assert (await lm.read())[1] is not None and cloud.calls.count("refresh") == refreshes + 1
+            assert events.log.count(("account", True)) == accounts + 1 and events.log.count(("renewed",)) == renewals
 
             # The installation survives a restart: no second registration, same id.
             events = Events()
@@ -258,15 +265,24 @@ async def main():
             polls = [e for e in events.log if e[0] == "polled"]
             assert polls[0][2] is True and polls[1][2] is False and lm.sub and lm.up and lm.ep == 1
             assert cloud.calls.count("init") == 1 and list(cloud.installations) == [installation]
-            lm.configure(ACCOUNT, "api", False)  # Show power state off: commands only, no polling.
-            await asyncio.sleep(0.5)
-            before = cloud.calls.count("dashboard")
+            lm.configure(ACCOUNT, "api", False)  # Show power state off: La Marzocco stays on the controller.
+            await asyncio.sleep(0.1)
+            calls = len(cloud.calls)
+            lm.access = None
+            lm.configure(None, "api", False)
+            lm.configure(ACCOUNT, "api", False)
             await asyncio.sleep(0.7)
-            assert cloud.calls.count("dashboard") == before and not lm.sub
+            assert len(cloud.calls) == calls and not lm.sub and not lm.tasks, "no sign-in, renewal or polling"
+            assert (await lm.read())[1] is None and await lm.command(12, "on") == 0 and len(cloud.calls) == calls
+            lm.configure(None, "api", True)
+
+            # Erasing the account keeps the installation; erasing the pairing removes it.
+            store.erase_account()
+            assert (store.dir / "lamarzocco.json").exists() and store.credentials() is None
 
             # A refused account: one sign-in, reported once, never retried with the same account.
             lm.erase()
-            store.erase_account()
+            store.erase_pairing()
             assert not (store.dir / "lamarzocco.json").exists()
             wrong = {**ACCOUNT, "password": "wrong"}
             store.save_credentials(2, wrong)

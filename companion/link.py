@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 
 import aiohttp
 
@@ -12,7 +13,9 @@ from . import PROTOCOL, crypto
 
 MAX_FRAME = 4096
 STEP_TIMEOUT_S = 10
-FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd"})
+# A ping the controller has not acknowledged within this time closes the link: the controller sends
+# nothing on its own, so this finds a half-open link at the next ping without any extra traffic.
+ACK_TIMEOUT_S = 30
 
 
 class LinkClosed(Exception):
@@ -30,8 +33,8 @@ class Erased(Exception):
 class FrameCodec:
     """`<mac>.<json>` frames with a per-direction sequence that starts at 1 and grows by one."""
 
-    def __init__(self, key, send=b"c", receive=b"f", known=FROM_CONTROLLER):
-        self.key, self.send_dir, self.receive_dir, self.known = key, send, receive, known
+    def __init__(self, key, send=b"c", receive=b"f"):
+        self.key, self.send_dir, self.receive_dir = key, send, receive
         self.sent = self.received = 0
 
     def _tag(self, direction, body):
@@ -56,8 +59,6 @@ class FrameCodec:
         if not isinstance(frame, dict) or type(frame.get("q")) is not int or frame["q"] != self.received + 1:
             raise LinkClosed("PROTOCOL", "frame out of sequence")
         self.received += 1
-        if frame.get("t") not in self.known:
-            raise LinkClosed("PROTOCOL", f"unknown frame {frame.get('t')!r}")
         return frame
 
 
@@ -84,6 +85,7 @@ async def open_link(http, url, hello, secret):
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
         raise LinkClosed("UNREACHABLE", type(error).__name__) from None
     try:
+        ws.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, ACK_TIMEOUT_S * 1000)
         nc = os.urandom(16)
         await ws.send_str(json.dumps({"t": "hello", **hello, "protocol": PROTOCOL, "nonce": crypto.b64(nc)}))
         reply = await _receive(ws)
@@ -92,7 +94,8 @@ async def open_link(http, url, hello, secret):
                 raise Erased()
             raise LinkClosed("AUTH", "erase failed its MAC check")
         if reply.get("t") == "error":
-            raise LinkClosed(str(reply.get("code") or "ERROR"))
+            code = str(reply.get("code") or "ERROR")
+            raise LinkClosed("VERSION" if code == "PROTOCOL" else code)
         if reply.get("t") != "challenge":
             raise LinkClosed("PROTOCOL", "expected a challenge")
         ns = crypto.unb64(reply.get("nonce"), 16)

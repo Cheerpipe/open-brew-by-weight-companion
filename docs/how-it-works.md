@@ -48,10 +48,12 @@ scale, so the gateway avoids generating traffic toward it:
   which frees the controller's few sockets right away. Live updates use one
   WebSocket, as without the gateway.
 - Once paired, the companion keeps one link open to the controller and
-  sends only what the protocol needs: a ping every 2 minutes (15 seconds
-  while it carries La Marzocco, replacing the controller's own La Marzocco
-  WebSocket ping), and machine updates of a few hundred bytes as La Marzocco
-  sends them. Pairing requests and polling happen only while you pair.
+  sends only what the protocol needs: a ping when the link opens, every 2
+  minutes (15 seconds while it carries La Marzocco, replacing the
+  controller's own La Marzocco WebSocket ping) and when its La Marzocco
+  connection comes up or goes down, and machine updates of a few hundred
+  bytes as La Marzocco sends them. Pairing requests and polling happen only
+  while you pair.
 
 ## Publishing the name
 
@@ -164,21 +166,37 @@ On first start the service creates its id and a P-256 pairing key in
 The service opens `ws://<controller>/api/v1/companion/link`; the controller
 never connects to it. Both sides prove the pairing secret with fresh nonces
 and derive a session key; every later frame carries a sequence number and
-an HMAC, and a bad MAC, a wrong sequence or an unknown frame closes the
-link.
+an HMAC, and a bad MAC or a wrong sequence closes the link. A frame type
+this version does not know (from a newer controller) is ignored and
+counted, and the page asks you to update the companion.
 
-- **Liveness:** a `ping` every 2 minutes, every 15 seconds while the
-  controller uses the companion for La Marzocco (and one right when it
-  starts to).
+- **Liveness:** a `ping` as soon as the link opens, then every 2 minutes,
+  every 15 seconds while the controller uses the companion for La Marzocco
+  (and one right when it starts to), and one at once whenever its La
+  Marzocco connection comes up or goes down (`up`), so the controller can
+  move the route without waiting for the next interval.
+- **Liveness is not symmetric.** The controller sends nothing on its own,
+  so it notices a silent companion after two ping intervals, while the
+  companion notices a vanished controller through its own pings: the link
+  socket closes when the controller has not acknowledged a ping within 30
+  seconds (`TCP_USER_TIMEOUT`), that is within 2.5 minutes at most, without
+  any extra traffic.
 - **Reconnection:** after 5, 15 and 60 seconds, then every 5 minutes, and at
   once when the controller announces itself over mDNS. `RETRY_LATER` (a shot
-  with a scale or a scale connection in progress) waits the same way.
+  with a scale or a scale connection in progress) retries every 15 seconds,
+  however often it comes. An unexpected error in one session is logged with
+  its traceback and counts as a failed attempt; the gateway keeps serving.
 - **Forgotten:** when **Forget** was chosen in Admin, the controller answers
   the next link with `erase`, signed with the pairing secret. Only then does
   the service delete its pairing, the La Marzocco account and the
-  installation key. A controller that simply does not know the companion
-  (after a factory reset) cannot make it delete anything; the page offers
-  to pair again.
+  installation key on its own.
+- **Not recognized:** a controller that simply does not know the companion
+  (after a factory reset) answers unsigned, so the service cannot trust it
+  to delete anything. It stops its La Marzocco client at once and keeps
+  every secret, and the page offers **Pair again** or **Erase this
+  pairing**, which deletes the pairing, the La Marzocco account and the
+  installation key. The account stays on the companion until one of them is
+  chosen.
 
 ### La Marzocco
 
@@ -189,11 +207,14 @@ in, signs every request with the installation key, renews the token after
 uses (boiler temperature and mode). With the WebSocket connection type it
 subscribes over STOMP to the machine's dashboard and pings every 15 seconds,
 reconnecting after 30 seconds without an answer; with the API type it reads
-the dashboard every 30 seconds. **Show power state** off means commands
-only, no observation.
+the dashboard every 30 seconds. Only its renewal loop refreshes a valid
+token; a token it needs at start or after a `401` is reported to the
+controller at once with its new life.
 
-It runs while it holds the account and the controller's La Marzocco switch
-is on, whether the controller uses it or not. It sends machine state only
+It runs while it holds the account, the controller's La Marzocco switch is
+on and **Show power state** is on, whether the controller uses it or not.
+With **Show power state** off the controller keeps La Marzocco on its own
+connection, commands included, so the companion does not even sign in. It sends machine state only
 while the controller has set the route to the companion:
 
 - **Only what the controller reads.** Each La Marzocco event is reduced to
@@ -207,11 +228,16 @@ while the controller has set the route to the companion:
   command, API polling, or to check a command no push confirmed within 5
   seconds). While the controller reports a shot with a scale, reads wait and
   the last one is sent when the shot ends.
-- Each state frame carries the id of the last command sent to La Marzocco
-  before the observation was taken, so an older observation never undoes a
-  newer power command.
+- `full` and `read` frames carry the id of the last command sent to La
+  Marzocco before the observation was taken, so an older observation never
+  undoes a newer power command. Pushes do not need it: the controller
+  orders them by when it receives them.
 - Commands answer `accepted` or `failed` with La Marzocco's HTTP status (0
   when it could not be reached).
+- When the controller erases the account (switch off, or the account
+  disconnected), the service deletes the account but keeps its
+  installation key, so turning La Marzocco on again adds no installation to
+  your account. The installation key goes only with the pairing.
 
 The service never logs passwords, tokens, keys or pairing codes.
 
@@ -221,10 +247,14 @@ The service never logs passwords, tokens, keys or pairing codes.
 `/__companion/status` returns the same state as JSON for the Web UI's
 Diagnostic page: `name`, `version`, `id`, `paired`, `pairedWith`, the
 `controller`, `pairing` (`state`, and the `code` while pending), `link`
-(`down`, `connecting`, `open` or `retry` with `linkReason`), the La
-Marzocco `route` and `laMarzocco` (`enabled`, `account`, `connection`,
-`subscribed`, `up`). `POST /__companion/pair` with a JSON body sends a new
-pairing request; a page on another site cannot send it without asking.
+(`down`, `connecting`, `open` or `retry` with `linkReason`, for example
+`VERSION` when the controller speaks another link version or `ERROR` after
+an unexpected error), the La Marzocco `route`, `unknownFrames` (frames of
+an unknown type in this session) and `laMarzocco` (`enabled`, `account`,
+`connection`, `subscribed`, `up`). `POST /__companion/pair` with a JSON
+body sends a new pairing request, and `POST /__companion/erase` erases a
+pairing the controller no longer recognizes (`409` while it works); a page
+on another site cannot send either without asking.
 
 ## Status and health checks
 

@@ -122,7 +122,9 @@ class LaMarzocco:
 
     `events` receives: account(ok), upstream(), subscribed(), pushed(data, ac),
     polled(data, ac, first) and renewed(). It runs while configured with an
-    account; the companion configures it from the controller's cfg and creds.
+    account and observation on; the companion configures it from the
+    controller's cfg and creds. With observation off the controller keeps La
+    Marzocco on its own connection, so this client does not even sign in.
     """
 
     def __init__(self, store, http, events, api_root=API_ROOT, ws_url=WS_URL):
@@ -167,7 +169,7 @@ class LaMarzocco:
         if wanted[0] != self.account:
             self.account, self.rejected = wanted[0], False
             self.access = self.refresh = None
-        if account and not self.rejected:
+        if self._usable():
             self._spawn(self._run())
 
     def stop(self):
@@ -176,8 +178,11 @@ class LaMarzocco:
         self.tasks.clear()
         self._set_subscribed(False)
 
+    def _usable(self):
+        return self.account is not None and not self.rejected and self.wanted[2]
+
     def erase(self):
-        """Forget the account and the installation: a later account registers a new one."""
+        """Forget the account and the installation (the pairing is gone): a later account registers a new one."""
         self.configure(None, *self.wanted[1:])
         self.installation = None
         self.access = self.refresh = None
@@ -209,9 +214,7 @@ class LaMarzocco:
                 if self.renewal not in self.tasks:
                     self.renewal = self._spawn(self._renew_loop())
                 attempt = 0
-                if not self.wanted[2]:
-                    await asyncio.Event().wait()  # Commands only: no observation.
-                elif self.wanted[1] == "ws":
+                if self.wanted[1] == "ws":
                     await self._websocket()
                 else:
                     await self._poll()
@@ -279,10 +282,12 @@ class LaMarzocco:
         log("signed in to La Marzocco")
 
     async def _session(self, renew=False):
-        """A valid access token: refresh it when due, sign in when there is none or refresh fails."""
+        """An access token. Only the renew loop (renew) replaces a valid one; a missing one (at start, after a
+        401) is refreshed or signed in here, and every new token outside the renew loop is reported."""
         async with self.session_lock:
-            if self.access and not renew and time.monotonic() - self.issued_at < RENEW_AFTER_S:
+            if self.access and not renew:
                 return
+            refreshed = False
             if self.refresh:
                 account = self.store.credentials() or {}
                 body = json.dumps({"username": account.get("email"), "refreshToken": self.refresh})
@@ -290,16 +295,19 @@ class LaMarzocco:
                     status, text = await self._request("POST", "/auth/refreshtoken", body, authenticated=False)
                     if status == 200:
                         self._tokens(text)
-                        return
+                        refreshed = True
                 except (TransportError, ValueError):
                     pass
-            self.access = None
-            await self._sign_in()
-            self.events.account(True)
+            if not refreshed:
+                self.access = None
+                await self._sign_in()
+            if not (renew and refreshed):
+                self.events.account(True)
 
     async def _renew_loop(self):
         while True:
-            await asyncio.sleep(max(0.0, self.issued_at + RENEW_AFTER_S - time.monotonic()))
+            while (due := self.issued_at + RENEW_AFTER_S - time.monotonic()) > 0:
+                await asyncio.sleep(due)  # A sign-in meanwhile (after a 401) moves the deadline.
             try:
                 await self._session(renew=True)
             except AuthRejected:
@@ -314,7 +322,7 @@ class LaMarzocco:
     async def read(self):
         """One dashboard read: (HTTP status, parsed dashboard or None, last command id when taken)."""
         ac = self.last_command
-        if not self.account or self.rejected:
+        if not self._usable():
             return 0, None, ac
         try:
             await self._session()
@@ -334,7 +342,7 @@ class LaMarzocco:
 
     async def command(self, command_id, op, value=None):
         """Send one command; returns its HTTP status (0 for a transport failure)."""
-        if not self.account or self.rejected:
+        if not self._usable():
             return 0
         body = (f'{{"boilerIndex":1,"targetTemperature":{value // 10}.{value % 10}}}' if op == "temp"
                 else '{"mode":"StandBy"}' if op == "standby" else '{"mode":"BrewingMode"}')
