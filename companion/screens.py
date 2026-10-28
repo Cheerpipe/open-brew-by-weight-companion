@@ -23,6 +23,7 @@ from .upstream import MAX_FRAME, PATH as STREAM, REQUEST_BYTES
 CLAIM, LOGIN, COMPANION_ADMIN = "/api/v1/ui/claim", "/api/v1/auth/login", "/api/v1/companion/admin"
 COMMAND_SETTLE_S = 10
 CHUNK = 16 * 1024
+HEARTBEAT_S = 30  # A screen that stops answering pongs is closed and frees its slot.
 
 
 def _error(status, code, message):
@@ -63,7 +64,7 @@ class Screens:
             return refusal
         if self.relay.mode != "ready":
             return await self._passthrough_stream(request)
-        ws = web.WebSocketResponse(max_msg_size=REQUEST_BYTES, autoping=True)
+        ws = web.WebSocketResponse(max_msg_size=REQUEST_BYTES, autoping=True, heartbeat=HEARTBEAT_S)
         await ws.prepare(request)
         screen = self.mux.connect(ws, address(request.headers.get("X-Real-IP")))
         try:
@@ -84,7 +85,7 @@ class Screens:
                 max_msg_size=MAX_FRAME)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
-        ws = web.WebSocketResponse(max_msg_size=MAX_FRAME, autoping=True)
+        ws = web.WebSocketResponse(max_msg_size=MAX_FRAME, autoping=True, heartbeat=HEARTBEAT_S)
         await ws.prepare(request)
 
         async def pipe(source, target):

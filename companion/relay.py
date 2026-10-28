@@ -19,6 +19,7 @@ import aiohttp
 from yarl import URL
 
 from . import crypto, log
+from .store import offload
 
 PATH = "/api/v1/companion/relay"
 PROTOCOL = 1
@@ -30,7 +31,10 @@ FORWARDED = ("Content-Type", "X-WebUI-Session", "X-WebUI-Activity", "X-Device-Pa
 HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer",
                         "upgrade", "content-length"})
 READ_LIMIT = 64 * 1024  # JSON answers are read whole: claims, commands and errors are small.
-TIMEOUT = aiohttp.ClientTimeout(total=None, connect=5, sock_read=180)
+# Every relayed request is bounded (an OTA chunk is one 64 KiB POST, far under
+# this), matching nginx's own 5-minute proxy_read_timeout. The total does not
+# reach the two WebSockets: aiohttp drops the timer on upgrade, by design.
+TIMEOUT = aiohttp.ClientTimeout(total=300, connect=5, sock_read=180)
 
 
 def address(text):
@@ -92,7 +96,7 @@ class Relay:
         return self.mode
 
     async def _handshake(self):
-        companion, pairing = self.companion, self.companion.store.pairing()
+        companion, pairing = self.companion, await offload(self.companion.store.pairing)
         if companion.controller is None:
             return
         if pairing is None:
@@ -125,14 +129,14 @@ class Relay:
             self.key, self.counter = crypto.relay_key(secret, challenge, nonce), 0
             self.mode = "disabled" if reply.get("ui") is False else "ready"
             self._set_link(reply.get("link") is True)
-            companion.recognized()
+            await companion.recognized()
             self._note("relay ready: every screen shares the controller's Web UI" if self.mode == "ready" else
                        "the controller turned the Web UI through the companion off")
         elif status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED":
             erase = reply.get("erase")
             if erase and hmac.compare_digest(crypto.unb64(erase, 32), crypto.mac(secret, b"E", nonce)):
                 self.reset()
-                companion.erase("the controller forgot this companion")
+                await companion.erase("the controller forgot this companion")
             else:
                 self.reset()
                 companion.not_recognized()

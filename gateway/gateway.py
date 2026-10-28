@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -76,7 +77,12 @@ def instance_name(value):
 
 
 def log(message):
-    print(f"gateway: {message}", flush=True)
+    try:
+        from companion import gateway_logger
+    except ImportError:  # Before the path is set up, or in standalone tests: plain stdout.
+        print(f"gateway: {message}", flush=True)
+        return
+    gateway_logger.info("%s", message)
 
 
 def local_ip():
@@ -545,6 +551,8 @@ def main():
         raise SystemExit(scan(cfg, DATA))
     if sys.argv[1:2] == ["mdns-check"]:
         raise SystemExit(mdns_check(cfg, *sys.argv[2:3]))
+    from companion import configure_logging, stop_logging
+    configure_logging(DATA)  # The supervisor only: check/scan never share the rotating file.
     target, source = static_controller(cfg), "manual"
     if not target and (saved := remembered_controller(cfg, DATA)):
         target, source = saved
@@ -560,11 +568,12 @@ def main():
     companion.controller(target)
 
     zc = Zeroconf(interfaces=[cfg["ip"]], ip_version=IPVersion.V4Only)
-    heard = set()  # Devices whose mDNS address records reached the companion, to tell why none is found.
+    heard, heard_lock = set(), threading.Lock()  # Devices whose mDNS address records reached the companion.
 
     class Heard(RecordUpdateListener):
         def async_update_records(self, zc, now, records):
-            heard.update(r.new.name for r in records if isinstance(r.new, DNSAddress))
+            with heard_lock:
+                heard.update(r.new.name for r in records if isinstance(r.new, DNSAddress))
 
     zc.add_listener(Heard(), None)
     if cfg["mdns_publish"]:
@@ -603,6 +612,7 @@ def main():
         threading.Thread(target=fallback, args=(cfg, lambda: (target, source), events, stop), daemon=True).start()
     retries = iter(RETRY_S)
     status = 0
+    unhandled = 0
     try:
         while True:
             searching = browser and source != "mdns"
@@ -610,62 +620,74 @@ def main():
                 event = events.get(timeout=next(retries, RETRY_S[-1]) if searching else CERT_CHECK_S)
             except queue.Empty:
                 event = ("tick",)
-                if searching:
-                    others = sorted(n.removesuffix(".local.") for n in heard - {cfg["hostname"] + "."})
+            try:
+                if event[0] == "tick" and searching:
+                    with heard_lock:
+                        others = sorted(n.removesuffix(".local.") for n in heard - {cfg["hostname"] + "."})
                     log("no controller confirmed yet; asking the network again (" + (
                         f"mDNS reaches the companion from {len(others)} devices: {', '.join(others[:5])}"
                         if others else f"no mDNS answer from any device has reached {cfg['ip']}") + ")")
                     browser.cancel()
                     browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
-            site_changed = status_changed = False
-            if event[0] == "nginx":
-                log(f"nginx exited with status {nginx.returncode}")
-                status = 1
-                break
-            if event[0] == "companion":
-                log("the companion service stopped")
-                status = 1
-                break
-            if event[0] == "skip" and note(*event[1:]):
-                log(f"skipping {event[1]}: {event[3]}")
-                status_changed = True
-            elif event[0] == "found" and source == "mdns" and event[1][0] != target[0] \
-                    and not cfg["controller_name"]:
-                reason = "another controller; set OBBW_CONTROLLER_NAME to choose"
-                if note(event[1][0], True, reason):
-                    log(f"ignoring {event[1][0]}: {reason}")
+                site_changed = status_changed = False
+                if event[0] == "nginx":
+                    log(f"nginx exited with status {nginx.returncode}")
+                    status = 1
+                    break
+                if event[0] == "companion":
+                    log("the companion service stopped")
+                    status = 1
+                    break
+                if event[0] == "skip" and note(*event[1:]):
+                    log(f"skipping {event[1]}: {event[3]}")
                     status_changed = True
-            elif event[0] == "found" and (event[1], "mdns") != (target, source):
-                target, source = event[1], "mdns"
-                note(target[0], True, "in use")
-                remember_controller(cfg, DATA, target)
-                log(f"controller {target[0]} at {target[1][0]}:{target[1][1]}")
-                site_changed = True
-            elif event[0] == "scanned" and source != "mdns":
-                found = scan_target(event[1][0])
-                for other in event[1][1:]:
-                    status_changed |= note(other["name"], True, f"another controller, at {other['ip']}; "
-                                                                "set OBBW_CONTROLLER_NAME to choose")
-                if found != target:
-                    remember_controller(cfg, DATA, found, "scan")
-                    log(f"controller {found[0]} at {found[1][0]}:{found[1][1]}, found by searching the network "
-                        f"(firmware {event[1][0]['firmware']})")
-                    note(found[0], True, "in use")
+                elif event[0] == "found" and source == "mdns" and event[1][0] != target[0] \
+                        and not cfg["controller_name"]:
+                    reason = "another controller; set OBBW_CONTROLLER_NAME to choose"
+                    if note(event[1][0], True, reason):
+                        log(f"ignoring {event[1][0]}: {reason}")
+                        status_changed = True
+                elif event[0] == "found" and (event[1], "mdns") != (target, source):
+                    target, source = event[1], "mdns"
+                    note(target[0], True, "in use")
+                    remember_controller(cfg, DATA, target)
+                    log(f"controller {target[0]} at {target[1][0]}:{target[1][1]}")
                     site_changed = True
-                status_changed |= source != "scan"
-                target, source = found, "scan"
-            elif event[0] == "tick" and ensure_certificates(cfg, DATA):
-                site_changed = True
-            if (event[0] == "found" and event[1] == target) or (event[0] == "scanned" and source == "scan"):
-                companion.controller(target)  # Every announcement: reconnect now if the link is down.
-            if site_changed:
-                write_site(cfg, DATA, RUN, target)
-                nginx.send_signal(signal.SIGHUP)
-            if site_changed or status_changed:
-                write_status(cfg, DATA, RUN, target, source, seen)
+                elif event[0] == "scanned" and source != "mdns":
+                    found = scan_target(event[1][0])
+                    for other in event[1][1:]:
+                        status_changed |= note(other["name"], True, f"another controller, at {other['ip']}; "
+                                                                    "set OBBW_CONTROLLER_NAME to choose")
+                    if found != target:
+                        remember_controller(cfg, DATA, found, "scan")
+                        log(f"controller {found[0]} at {found[1][0]}:{found[1][1]}, found by searching the network "
+                            f"(firmware {event[1][0]['firmware']})")
+                        note(found[0], True, "in use")
+                        site_changed = True
+                    status_changed |= source != "scan"
+                    target, source = found, "scan"
+                elif event[0] == "tick" and ensure_certificates(cfg, DATA):
+                    site_changed = True
+                if (event[0] == "found" and event[1] == target) or (event[0] == "scanned" and source == "scan"):
+                    companion.controller(target)  # Every announcement: reconnect now if the link is down.
+                if site_changed:
+                    write_site(cfg, DATA, RUN, target)
+                    nginx.send_signal(signal.SIGHUP)
+                if site_changed or status_changed:
+                    write_status(cfg, DATA, RUN, target, source, seen)
+                unhandled = 0
+            except Exception:
+                # One bad event must not end the supervisor; ten in a row is a state a
+                # restart clears better than a limp.
+                unhandled += 1
+                log("an event was not handled:\n" + traceback.format_exc())
+                if unhandled >= 10:
+                    status = 1
+                    break
     except KeyboardInterrupt:
         pass
     finally:
+        stop_logging()
         stop.set()
         companion.stop()
         zc.close()  # Sends mDNS goodbyes for the published name.

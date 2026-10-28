@@ -4,11 +4,24 @@ Nothing here is ever logged. The pairing key and id are independent of the
 HTTPS gateway's certificate authority, so a hostname change keeps the pairing.
 """
 
+import asyncio
+import concurrent.futures
+import functools
 import json
 import os
 import uuid
 
 from . import crypto
+
+# One disk thread for every secret-store call from the event loop: the loop
+# never waits on the filesystem, and writes stay ordered because they share
+# the single worker. It is never the loop's default executor, which aiohttp
+# uses for name resolution.
+_DISK = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="obbw-disk")
+
+
+async def offload(work, *args):
+    return await asyncio.get_running_loop().run_in_executor(_DISK, functools.partial(work, *args))
 
 IDENTITY, PAIRING, CREDENTIALS, INSTALLATION = "identity", "pairing", "credentials", "lamarzocco"
 

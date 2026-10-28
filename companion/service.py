@@ -10,6 +10,7 @@ import asyncio
 import html
 import json
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -23,13 +24,18 @@ from .link import Erased, LinkClosed, open_link
 from .pairing import Pairing
 from .relay import Relay
 from .screens import Screens
-from .store import Store
+from .store import Store, offload
 
 HERE = Path(__file__).resolve().parent
 BACKOFF_S = (5, 15, 60, 300)
 RETRY_LATER_S = 15  # The controller is busy with its scale: a steady short retry, never a longer one.
 FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd"})
 PING_S = {"companion": 15, "direct": 120}
+# A sleep that comes back this late means the loop stood still; 20 s is where
+# the controller's 30 s ping contract starts to break.
+STALL_WARN_S = 5
+WATCHDOG_S = 10
+STALL_BREACH_S = 20
 CONFIRM_S = 5
 FULL_RETRY_S = (1, 2, 5, 10, 30)
 HTTP_TIMEOUT_S = 10
@@ -50,6 +56,7 @@ class Companion:
         self.ws = self.outbox = None
         self.route, self.hold, self.held = "direct", False, None
         self.ping_now = asyncio.Event()
+        self.heard_at = 0.0  # time.monotonic() of the last controller frame.
         self.unknown_frames, self.unknown_kinds = 0, set()
         self.cfg = {"lm": False, "conn": "ws", "observe": True}
         self.creds_gen = None  # Generation whose sign-in result the controller still waits for.
@@ -104,19 +111,19 @@ class Companion:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             return None, {}
 
-    def paired(self, secret):
-        self.store.erase_pairing()
+    async def paired(self, secret):
+        await offload(self.store.erase_pairing)
         self.lm.erase()
-        self.store.save_pairing(secret, self.controller[0])
+        await offload(self.store.save_pairing, secret, self.controller[0])
         log(f"paired with {self.controller[0]}")
         if self.ws is not None:
             self.spawn(self.ws.close())
         self.wake.set()
         self.spawn(self.relay.handshake())
 
-    def erase(self, why):
+    async def erase(self, why):
         """Delete the pairing, the La Marzocco account and its installation key."""
-        self.store.erase_pairing()
+        await offload(self.store.erase_pairing)
         self.lm.erase()
         self.creds_gen = None
         self.pairing.state, self.pairing.auto = "unpaired", False
@@ -131,11 +138,11 @@ class Companion:
             self.lm.configure(None, self.cfg["conn"], self.cfg["observe"])
             log("the controller does not recognize this companion; La Marzocco is stopped")
 
-    def recognized(self):
+    async def recognized(self):
         """A relay session proved the pairing: a controller that did not know us does again."""
         if self.pairing.state == "not_recognized":
             self.pairing.state = "paired"
-            self._apply_account()
+            await self._apply_account()
 
     def link_wanted(self, wanted):
         """The relay learned whether a feature needs the link [D4]; with no relay it always opens."""
@@ -160,7 +167,9 @@ class Companion:
                 delay = BACKOFF_S[min(self.failures, len(BACKOFF_S) - 1)]
                 self.failures += 1
             self.link, self.link_reason = "retry", reason
-            log(f"link closed ({reason}); reopening in {delay} s, or as soon as the controller announces itself")
+            age = f"; last controller frame {time.monotonic() - self.heard_at:.0f} s ago" if self.heard_at else ""
+            log(f"link closed ({reason}){age}; reopening in {delay} s, "
+                "or as soon as the controller announces itself")
             try:
                 await asyncio.wait_for(self.wake.wait(), delay)
             except asyncio.TimeoutError:
@@ -168,7 +177,7 @@ class Companion:
 
     async def _link(self):
         """One link attempt and its session: why it ended, or None to look again at once."""
-        pairing = self.store.pairing()
+        pairing = await offload(self.store.pairing)
         if self.controller is None or pairing is None or self.relay.link is not True:
             self.link, self.link_reason = "down", ""
             self.wake.clear()
@@ -182,7 +191,7 @@ class Companion:
                                         hello, pairing["secret"])
         except Erased:
             self.failures = 0
-            self.erase("the controller forgot this companion")
+            await self.erase("the controller forgot this companion")
             return None
         except LinkClosed as error:
             if error.code == "NOT_PAIRED":  # Unsigned, so it could be forged.
@@ -198,20 +207,22 @@ class Companion:
         self.hold, self.held, self.full_ep, self.reported = False, None, None, None
         self.unknown_frames = 0
         self.unknown_kinds.clear()
+        self.heard_at = 0.0
         log(f"link open to {self.controller[0]}")
         writer = self.spawn(self._writer(ws, codec, self.outbox))
         pinger = self.spawn(self._pinger())
         try:
             async for message in ws:
                 if message.type is not aiohttp.WSMsgType.TEXT:
-                    return "CLOSED" if message.type is aiohttp.WSMsgType.ERROR else "PROTOCOL"
+                    return self._socket_reason(message, ws)
                 await self._on_frame(codec.decode(message.data))
-            return "CLOSED"
+            # A close frame carries the peer's code; an ended loop without one is a dead transport.
+            return f"CLOSED_{ws.close_code}" if ws.close_code else "SOCKET_RESET"
         except LinkClosed as error:
             log(f"closing the link: {error}")
             return error.code
-        except (aiohttp.ClientError, ConnectionError):
-            return "CLOSED"
+        except (aiohttp.ClientError, ConnectionError) as error:
+            return f"SOCKET_{type(error).__name__}"
         finally:
             writer.cancel()
             pinger.cancel()
@@ -219,6 +230,17 @@ class Companion:
             self._set_route("direct")
             self.hold, self.held = False, None
             await ws.close()
+
+    @staticmethod
+    def _socket_reason(message, ws):
+        """Why the socket ended. aiohttp converts a transport death into a CLOSED
+        or ERROR message instead of raising, with a code it chose itself."""
+        if message.type is aiohttp.WSMsgType.ERROR:
+            return f"SOCKET_{type(message.data).__name__}"
+        if message.type is aiohttp.WSMsgType.CLOSED:
+            # 1006 marks a reset and 1000 an EOF: aiohttp synthesized the code.
+            return "SOCKET_RESET" if ws.close_code in (None, 1006) else "SOCKET_EOF"
+        return "PROTOCOL"
 
     def post(self, frame):
         if self.outbox is None:
@@ -253,13 +275,21 @@ class Companion:
                 try:
                     await asyncio.wait_for(self.ping_now.wait(), max(0.0, deadline - loop.time()))
                 except asyncio.TimeoutError:
+                    self._stalled(loop.time() - deadline)
                     break
                 if self.lm.up != up or self.route != route == "direct":
+                    self._stalled(loop.time() - deadline)
                     break
                 if self.route != route:  # Back to direct: the slow interval, counted from now.
                     route, deadline = self.route, loop.time() + PING_S[self.route]
 
+    @staticmethod
+    def _stalled(late):
+        if late >= STALL_WARN_S:
+            log(f"the event loop stood still {late:.0f} s before a ping")
+
     async def _on_frame(self, frame):
+        self.heard_at = time.monotonic()
         kind = frame.get("t")
         if not isinstance(kind, str) or kind not in FROM_CONTROLLER:  # A newer controller's: counted, shown.
             self.unknown_frames += 1
@@ -269,10 +299,10 @@ class Companion:
         elif kind == "cfg":
             self.cfg = {"lm": frame.get("lm") is True, "conn": "api" if frame.get("conn") == "api" else "ws",
                         "observe": frame.get("observe") is not False}
-            self._apply_account()
+            await self._apply_account()
             self._report(force=True)
         elif kind == "creds":
-            self._on_credentials(frame)
+            await self._on_credentials(frame)
         elif kind == "route":
             self._set_route("companion" if frame.get("to") == "companion" else "direct")
         elif kind == "hold":
@@ -305,22 +335,23 @@ class Companion:
                 self.post(held)
 
     # --- La Marzocco account ---------------------------------------------------
-    def _apply_account(self):
-        account = self.store.credentials() if self.cfg["lm"] else None
+    async def _apply_account(self):
+        account = await offload(self.store.credentials) if self.cfg["lm"] else None
         self.lm.configure(account, self.cfg["conn"], self.cfg["observe"])
 
-    def _on_credentials(self, frame):
+    async def _on_credentials(self, frame):
         generation = frame.get("gen")
         if type(generation) is not int or generation < 0:
             raise LinkClosed("PROTOCOL", "credentials without a generation")
         if frame.get("erase") is True:
-            self.store.erase_account()
+            await offload(self.store.erase_account)
             self.creds_gen = None
-            self._apply_account()
+            await self._apply_account()
             log("the controller erased the La Marzocco account")
             return
         try:
-            plain = crypto.decrypt_credentials(self.store.pairing()["secret"], generation,
+            plain = crypto.decrypt_credentials((await offload(self.store.pairing))["secret"],
+                                               generation,
                                                crypto.unb64(frame.get("iv"), 12), crypto.unb64(frame.get("ct")))
             decoded = json.loads(plain)
             account = {key: decoded[key] for key in ("email", "password", "serial")}
@@ -329,7 +360,7 @@ class Companion:
                 raise ValueError()
         except (ValueError, KeyError, TypeError, InvalidTag):
             raise LinkClosed("PROTOCOL", "credentials did not decrypt") from None
-        self.store.save_credentials(generation, account)
+        await offload(self.store.save_credentials, generation, account)
         self.creds_gen = generation
         log(f"received the La Marzocco account (generation {generation})")
         if self.lm.rejected_for(account):
@@ -337,7 +368,7 @@ class Companion:
         elif self.lm.signed_in_for(account):
             self.account(True)
         else:
-            self._apply_account()
+            await self._apply_account()
 
     # --- Events from the La Marzocco client ------------------------------------
     def account(self, ok):
@@ -445,8 +476,9 @@ class Companion:
         self.spawn(self._read_and_forward())
 
     # --- Pages -----------------------------------------------------------------
-    def status(self):
-        pairing = self.store.pairing()
+    async def status(self):
+        pairing = await offload(self.store.pairing)
+        credentials = await offload(self.store.credentials)
         return {
             "name": self.name, "version": VERSION, "id": self.id,
             "paired": pairing is not None,
@@ -456,7 +488,7 @@ class Companion:
             "pairing": self.pairing.status(),
             "link": self.link, "linkReason": self.link_reason or None,
             "route": self.route, "unknownFrames": self.unknown_frames,
-            "laMarzocco": {"enabled": self.cfg["lm"], "account": self.store.credentials() is not None,
+            "laMarzocco": {"enabled": self.cfg["lm"], "account": credentials is not None,
                            "connection": self.cfg["conn"], "subscribed": self.lm.sub, "up": self.lm.up},
             "relay": self.relay.mode, **self.screens.mux.status(),
         }
@@ -490,7 +522,7 @@ def web_app(companion):
                             headers=no_store)
 
     async def status(request):
-        return web.json_response(companion.status(), headers=no_store)
+        return web.json_response(await companion.status(), headers=no_store)
 
     async def pair(request):
         if request.content_type != "application/json":  # A web page elsewhere cannot send this without asking.
@@ -503,12 +535,12 @@ def web_app(companion):
     async def erase(request):
         if request.content_type != "application/json":
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
-        if companion.store.pairing() is None or companion.ws is not None or companion.pairing.state in (
+        if await offload(companion.store.pairing) is None or companion.ws is not None or companion.pairing.state in (
                 "paired", "requesting", "pending"):
             return web.json_response({"error": "IN_USE", "message": "Only a pairing the controller no longer "
                                       "recognizes can be erased here; use Forget in Admin"}, status=409)
-        companion.erase("erased on the companion's page")
-        return web.json_response(companion.status(), headers=no_store)
+        await companion.erase("erased on the companion's page")
+        return web.json_response(await companion.status(), headers=no_store)
 
     app = web.Application(client_max_size=2 << 20)  # An OTA chunk is 64 KiB; nginx allows 1 MiB.
     app.router.add_get("/__companion/", show)
@@ -551,6 +583,7 @@ async def _serve(cfg, data, socket_path, handle, ready):
         ready.set()
         log(f"'{cfg['name']}' version {VERSION} is running")
         link = companion.spawn(companion.run_link())
+        companion.spawn(_loop_watchdog())
         stopping = companion.spawn(handle.stopping.wait())
         try:
             await asyncio.wait({link, stopping}, return_when=asyncio.FIRST_COMPLETED)
@@ -560,6 +593,19 @@ async def _serve(cfg, data, socket_path, handle, ready):
             companion.lm.stop()
             await runner.cleanup()
             await companion.relay.close()
+
+
+async def _loop_watchdog():
+    """Measure the loop's own sleep overshoot: whatever blocks the loop shows up here."""
+    loop = asyncio.get_running_loop()
+    while True:
+        before = loop.time()
+        await asyncio.sleep(WATCHDOG_S)
+        late = loop.time() - before - WATCHDOG_S
+        if late >= STALL_BREACH_S:
+            log(f"the event loop stood still {late:.0f} s: long enough for the controller to miss its pings")
+        elif late >= STALL_WARN_S:
+            log(f"the event loop stood still {late:.0f} s")
 
 
 def start(cfg, data, run, on_exit):

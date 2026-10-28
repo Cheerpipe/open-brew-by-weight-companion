@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import crypto, dashboard, log
+from .store import offload
 
 API_ROOT = "https://lion.lamarzocco.io/api/customer-app"
 WS_URL = "wss://lion.lamarzocco.io/ws/connect"
@@ -137,6 +138,7 @@ class LaMarzocco:
         self.issued_at = 0.0
         self.rejected = False
         self.sub, self.ep, self.alive_at = False, 0, 0.0
+        self.last_message_at = 0.0
         self.refused = False
         self.last_command = 0
         self.tasks = set()
@@ -247,7 +249,7 @@ class LaMarzocco:
     # --- HTTP ----------------------------------------------------------------
     async def _request(self, method, path, body=None, authenticated=True, registration=False):
         if self.installation is None:
-            self.installation = Installation(self.store.installation_key()[0])
+            self.installation = Installation((await offload(self.store.installation_key))[0])
         headers = {"Accept": "application/json", "User-Agent": "OpenBrewByWeight/1"}
         if registration:
             extra, body = self.installation.registration()
@@ -274,12 +276,12 @@ class LaMarzocco:
         self.issued_at = time.monotonic()
 
     async def _sign_in(self):
-        account = self.store.credentials() or {}
-        if not self.store.installation_key()[1]:
+        account = await offload(self.store.credentials) or {}
+        if not (await offload(self.store.installation_key))[1]:
             status, _ = await self._request("POST", "/auth/init", authenticated=False, registration=True)
             if not 200 <= status < 300:
                 raise TransportError(f"installation registration answered {status}")
-            self.store.installation_registered()
+            await offload(self.store.installation_registered)
             log("registered the companion's La Marzocco installation")
         body = json.dumps({"username": account.get("email"), "password": account.get("password")})
         status, text = await self._request("POST", "/auth/signin", body, authenticated=False)
@@ -298,7 +300,7 @@ class LaMarzocco:
                 return
             refreshed = False
             if self.refresh:
-                account = self.store.credentials() or {}
+                account = await offload(self.store.credentials) or {}
                 body = json.dumps({"username": account.get("email"), "refreshToken": self.refresh})
                 try:
                     status, text = await self._request("POST", "/auth/refreshtoken", body, authenticated=False)
@@ -425,7 +427,10 @@ class LaMarzocco:
                         self.alive_at = time.monotonic()
                         continue
                     if message.type not in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
-                        raise TransportError("La Marzocco closed the WebSocket")
+                        code = message.data if isinstance(message.data, int) else ws.close_code
+                        idle = (f"{time.monotonic() - self.last_message_at:.0f} s since its last message"
+                                if self.last_message_at else "no message ever arrived")
+                        raise TransportError(f"La Marzocco closed the WebSocket (code {code}, {idle})")
                     buffer += message.data if isinstance(message.data, str) else message.data.decode()
                     *frames, buffer = buffer.split("\0")
                     for frame in frames:
@@ -445,6 +450,7 @@ class LaMarzocco:
             self.events.subscribed()
         elif command == "MESSAGE" and self.sub and headers.get("destination") == destination \
                 and headers.get("subscription") == subscription:
+            self.last_message_at = time.monotonic()
             self.events.pushed(dashboard.parse(body), self.last_command)
         else:
             raise TransportError(f"unexpected STOMP {command}")

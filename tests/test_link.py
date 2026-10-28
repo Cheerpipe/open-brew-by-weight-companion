@@ -8,10 +8,12 @@ inside the image (see the README).
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 if not __debug__:
@@ -40,6 +42,18 @@ service.RETRY_LATER_S = 0.2
 service.PING_S = {"companion": 0.4, "direct": 60}
 service.CONFIRM_S = 0.4
 service.FULL_RETRY_S = (0.1,)
+service.STALL_WARN_S = 0.2
+
+
+class Lines(logging.Handler):
+    """Everything the companion logs during the test, message by message."""
+
+    def __init__(self):
+        super().__init__(level=logging.INFO)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
 
 
 class Upstream:
@@ -107,6 +121,7 @@ class Controller:
         self.pair_requests, self.pair_state, self.mode, self.retries = [], "pending", "ok", 0
         self.commitment, self.key_sent, self.revealed, self.reveal_status = None, False, False, 202
         self.sessions = asyncio.Queue()
+        self.transports = []
 
     async def pair_post(self, request):
         assert request.content_type == "application/json"
@@ -154,6 +169,13 @@ class Controller:
             await ws.send_json({"t": "ready", "mac": crypto.b64(crypto.mac(SECRET, b"F", nc, ns))})
             session = Session(ws, FrameCodec(crypto.session_key(SECRET, nc, ns), send=b"f", receive=b"c"))
             await self.sessions.put(session)
+            self.transports.append(request.transport)
+            if mode == "close":
+                await ws.close(code=4000, message=b"busy")
+                return ws
+            if mode == "abort":
+                request.transport.abort()
+                return ws
             async for message in ws:
                 frame = session.codec.decode(message.data)
                 assert frame["t"] in TO_CONTROLLER, frame
@@ -206,6 +228,8 @@ def encrypt(generation, account):
 
 
 async def main():
+    lines = Lines()
+    logging.getLogger("obbw").addHandler(lines)
     fake = Controller()
     app = web.Application()
     app.router.add_post("/api/v1/companion/pair", fake.pair_post)
@@ -256,7 +280,7 @@ async def main():
             assert secrets.stat().st_mode & 0o777 == 0o700
             assert all(path.stat().st_mode & 0o777 == 0o600 for path in secrets.iterdir())
             await eventually(lambda: companion.link == "open")
-            assert companion.status()["paired"] and companion.status()["pairedWith"] == "Cafe Bar"
+            assert (await companion.status())["paired"] and (await companion.status())["pairedWith"] == "Cafe Bar"
             assert companion.ws.get_extra_info("socket").getsockopt(
                 socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT) == 30000, "an unacknowledged ping closes the link"
             async with http.post(page_url + "/erase", json={}) as reply:
@@ -340,6 +364,27 @@ async def main():
             assert (await session.next("lm"))["ep"] == 2
             assert (await session.next("st"))["k"] == "full"
 
+            # --- A loop stall is named before the ping it delayed ----------------
+            lines.lines.clear()
+            time.sleep(1.2)  # The whole loop, this test task included, stands still.
+            await asyncio.sleep(0.05)
+            assert any("stood still" in line for line in lines.lines), "a stall before a ping is named"
+
+            # --- Why the link ended is named: close code, socket death -----------
+            fake.mode = "close"
+            await session.ws.close()
+            await eventually(lambda: companion.link_reason == "CLOSED_4000")
+            fake.mode = "abort"
+            await asyncio.wait_for(fake.sessions.get(), 3)  # The close session, already dead.
+            session = await asyncio.wait_for(fake.sessions.get(), 3)  # Killed by the transport.
+            await eventually(lambda: companion.link_reason.startswith("SOCKET_"))
+            fake.mode = "ok"
+            session = await asyncio.wait_for(fake.sessions.get(), 3)
+            await eventually(lambda: companion.link == "open")
+            await session.next("ping", skip=())  # The new session's opening ping.
+            upstream.events.upstream()           # One re-report on the fresh session; nothing pending after it.
+            await session.next("lm")
+
             # --- Route back to direct: forwarding stops ----------------------------
             await session.send({"t": "route", "to": "direct"})
             await eventually(lambda: companion.route == "direct")
@@ -367,7 +412,7 @@ async def main():
             await session.send({"t": "webhook", "id": 1})
             await session.send({"t": "hold", "on": True})
             await eventually(lambda: companion.hold)
-            assert companion.link == "open" and companion.status()["unknownFrames"] == 1
+            assert companion.link == "open" and (await companion.status())["unknownFrames"] == 1
             await session.send({"t": "hold", "on": False})
 
             # --- A frame out of sequence closes the link; it reopens after backoff -
@@ -378,7 +423,7 @@ async def main():
             session = await asyncio.wait_for(fake.sessions.get(), 3)
             await eventually(lambda: companion.link == "open")
             assert companion.route == "direct" and not companion.hold, "every session starts direct"
-            assert companion.status()["unknownFrames"] == 0
+            assert companion.link == "open" and (await companion.status())["unknownFrames"] == 0
 
             # --- Any unexpected error ends only that session -----------------------
             save = companion.store.save_credentials
@@ -437,7 +482,7 @@ async def main():
             assert companion.store.pairing()
             fake.mode = "erase"
             await eventually(lambda: companion.store.pairing() is None)
-            assert companion.status()["paired"] is False and companion.pairing.state == "unpaired"
+            assert (await companion.status())["paired"] is False and companion.pairing.state == "unpaired"
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
             await asyncio.sleep(0.3)
             assert len(fake.pair_requests) == 2, "no new request on its own after the controller forgot it"
@@ -449,6 +494,18 @@ async def main():
             await eventually(lambda: companion.pairing.state == "error")
             assert companion.pairing.code is None and companion.store.pairing() is None
             assert "commitment" in fake.pair_requests[2] and "publicKey" in fake.pair_requests[3]
+
+            # --- An approved pairing whose save fails is an error, never stuck -----
+            fake.pair_state, fake.reveal_status = "approved", 202
+            broken = companion.store.save_pairing
+
+            def refused(*_):
+                raise OSError("disk full")
+            companion.store.save_pairing = refused
+            async with http.post(page_url + "/pair", json={}) as reply:
+                assert reply.status == 202
+            await eventually(lambda: companion.pairing.state == "error")
+            companion.store.save_pairing = broken
 
             # --- Paired again, then not recognized: "Erase this pairing" on the page ----
             fake.mode, fake.pair_state, fake.reveal_status = "ok", "approved", 202

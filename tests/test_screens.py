@@ -465,7 +465,7 @@ async def main():
 
             # --- No screens left: the session closes, the claim stays ------------------------------------
             assert fake.streams == [] and the_mux.claimed and fake.active == relay_id
-            status = companion.status()
+            status = await companion.status()
             assert status["screens"] == 0 and status["relay"] == "ready" and status["owner"] is True
             await pages.close()
             await companion.relay.close()

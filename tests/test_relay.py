@@ -106,7 +106,7 @@ async def main():
             companion.pairing.auto = False
             companion.set_controller(target)
             await asyncio.sleep(0.1)
-            assert relay.mode == "passthrough" and companion.status()["relay"] == "passthrough"
+            assert relay.mode == "passthrough" and (await companion.status())["relay"] == "passthrough"
             fake.active = A
             status, _, body = await call("GET", "/api/v1/status/admin", headers={"Cookie": "x=1"})
             method, uri, headers, _, identity = fake.requests[-1]
@@ -117,7 +117,7 @@ async def main():
             companion.store.save_pairing(SECRET, "Cafe Bar")
             companion.pairing.state = "paired"
             assert await relay.handshake() == "ready" and fake.handshakes == 1
-            assert companion.status()["relay"] == "ready" and relay.link is False, "no feature needs the link"
+            assert (await companion.status())["relay"] == "ready" and relay.link is False, "no feature needs the link"
             status, _, body = await call("POST", "/api/v1/ui/claim", json={}, headers={
                 "X-WebUI-Session": "token", "X-Evil": "1", "Cookie": "x=1"})
             assert status == 200 and json.loads(body)["active"] is True
@@ -125,7 +125,7 @@ async def main():
             assert headers["X-WebUI-Client"] == relay.client_id and fake.active == relay.client_id
             assert identity == {"q": 1, "addr": "192.168.1.50", "screen": A, "session": "token"}
             assert not {"X-Evil", "Cookie", "X-Real-IP"} & set(headers)
-            assert companion.screens.mux.claimed == {A} and companion.status()["owner"] is True
+            assert companion.screens.mux.claimed == {A} and (await companion.status())["owner"] is True
 
             # A claimed screen's calls carry the shared id; another screen's keep its own.
             status, _, _ = await call("GET", "/api/v1/time/zones?q=a%20b&x=1")
@@ -186,7 +186,7 @@ async def main():
 
             # --- The Web UI through the companion turned off ---------------------------------------
             fake.ui = False
-            assert await relay.handshake() == "disabled" and companion.status()["relay"] == "disabled"
+            assert await relay.handshake() == "disabled" and (await companion.status())["relay"] == "disabled"
             status, _, body = await call("GET", "/api/v1/status/admin")
             assert status == 409 and json.loads(body)["error"] == "COMPANION_UI_OFF"
             status, _, _ = await call("GET", "/api/v1/ui/ui-stream")

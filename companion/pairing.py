@@ -75,8 +75,13 @@ class Pairing:
             if state == "pending":
                 continue
             if state == "approved" and self.code and self._controller_key(reply) in (None, key):
-                companion.paired(crypto.pairing_secret(companion.key, companion.public, key))
-                self.state = "paired"
+                try:
+                    await companion.paired(crypto.pairing_secret(companion.key, companion.public, key))
+                except OSError as error:
+                    self.state = "error"
+                    log(f"pairing approved, but saving it failed ({error}); the pairing may be lost")
+                else:
+                    self.state = "paired"
             else:
                 self.state = "error" if state == "approved" else state if state in ("denied", "expired") \
                     else "expired"
