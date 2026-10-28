@@ -24,7 +24,7 @@ from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestServer  # noqa: E402
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
 
-from companion import crypto, service  # noqa: E402
+from companion import VERSION, crypto, service  # noqa: E402
 from companion.link import FrameCodec  # noqa: E402
 from companion.service import Companion, web_app  # noqa: E402
 
@@ -237,7 +237,7 @@ async def main():
             companion.spawn(companion.run_link())
             companion.set_controller(target)
             await eventually(lambda: companion.pairing.state == "pending" and companion.pairing.code)
-            identity = {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "name": "Kitchen server", "version": "1.0.0",
+            identity = {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "name": "Kitchen server", "version": VERSION,
                         "protocol": 1}
             assert fake.pair_requests == [{**identity, "commitment": V["commitment"]},
                                           {**identity, "publicKey": V["companionKey"]}]

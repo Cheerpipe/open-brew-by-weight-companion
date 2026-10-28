@@ -28,6 +28,8 @@
   details { border-top: 1px solid var(--line); padding: 12px 0; }
   details:first-of-type { border-top: 0; }
   summary { cursor: pointer; font-weight: 600; font-size: 1.05rem; }
+  footer { margin: 0 0 24px; text-align: center; color: var(--muted); font-size: .85rem; line-height: 1.7; }
+  footer a { color: inherit; }
   ol { padding-left: 20px; margin: 8px 0; }
   li { margin: 6px 0; }
   code { font-size: .85rem; overflow-wrap: anywhere; }
@@ -81,6 +83,11 @@
     <p class="muted">@T_FINGERPRINT@<br><code>@FINGERPRINT@</code></p>
   </section>
 </main>
+<footer>
+  <div>Companion @VERSION@ · @NAME@</div>
+  <div><a href="https://github.com/Cheerpipe/open-brew-by-weight-companion" target="_blank" rel="noopener">GitHub</a>
+    @T_MADE_BY@ <a href="https://github.com/Cheerpipe" target="_blank" rel="noopener">Cheerpipe</a></div>
+</footer>
 <script>
   (function () {
     var ua = navigator.userAgent, id = "windows";

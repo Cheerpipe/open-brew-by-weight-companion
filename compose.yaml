@@ -3,7 +3,10 @@
 # Each COMPANION_* setting also accepts the HTTPS gateway's earlier name.
 services:
   companion:
-    build: .
+    build:
+      context: .
+      args:
+        COMPANION_COMMIT: ${COMPANION_COMMIT:-}
     image: openbrewbyweight-companion:local
     container_name: openbrewbyweight-companion
     restart: unless-stopped

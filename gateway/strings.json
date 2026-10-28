@@ -39,7 +39,8 @@
       "Open <a href=\"@SECURE_URL@/\">@SECURE_URL@</a> in Chrome. Android 12 or newer is needed to open <code>.local</code> addresses."
     ],
     "firefox": "Firefox keeps its own list of certificates on some systems. If it still shows a warning, import the certificate under <strong>Settings → Privacy &amp; Security → View Certificates → Authorities</strong> and trust it for websites.",
-    "fingerprint": "To check the download, compare its SHA-256 fingerprint:"
+    "fingerprint": "To check the download, compare its SHA-256 fingerprint:",
+    "made_by": "· Made by"
   },
   "es": {
     "lang": "es",
@@ -81,6 +82,7 @@
       "Abre <a href=\"@SECURE_URL@/\">@SECURE_URL@</a> en Chrome. Se necesita Android 12 o más reciente para abrir direcciones <code>.local</code>."
     ],
     "firefox": "En algunos sistemas Firefox usa su propia lista de certificados. Si sigue mostrando una advertencia, importa el certificado en <strong>Ajustes → Privacidad y seguridad → Ver certificados → Autoridades</strong> y márcalo como confiable para sitios web.",
-    "fingerprint": "Para verificar la descarga, compara su huella SHA-256:"
+    "fingerprint": "Para verificar la descarga, compara su huella SHA-256:",
+    "made_by": "· Hecho por"
   }
 }

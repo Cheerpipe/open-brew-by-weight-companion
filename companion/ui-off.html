@@ -16,6 +16,12 @@
     <p id="help" class="muted"></p>
   </section>
 </main>
+<footer>
+  <div>Companion @VERSION@ · @NAME@</div>
+  <div><a href="https://github.com/Cheerpipe/open-brew-by-weight-companion" target="_blank" rel="noopener">GitHub</a>
+    <span id="made-by">· Made by</span>
+    <a href="https://github.com/Cheerpipe" target="_blank" rel="noopener">Cheerpipe</a></div>
+</footer>
 <script>
 (function () {
   var T = {
@@ -23,13 +29,15 @@
       title: "Open the Web UI on the controller",
       intro: "Your controller is set to show its Web UI directly, not through this companion. Open it at its own address:",
       none: "The companion has not found the controller yet. Open the Web UI at the controller's own address.",
-      help: "To use the companion's secure address again, turn on Web UI through the companion in Admin → Companion."
+      help: "To use the companion's secure address again, turn on Web UI through the companion in Admin → Companion.",
+      madeBy: "· Made by"
     },
     es: {
       title: "Abre la Web UI en el controlador",
       intro: "Tu controlador está configurado para mostrar su Web UI directamente, no a través de este companion. Ábrela en su propia dirección:",
       none: "El companion aún no encuentra el controlador. Abre la Web UI en la dirección del propio controlador.",
-      help: "Para volver a usar la dirección segura del companion, activa Web UI a través del companion en Admin → Companion."
+      help: "Para volver a usar la dirección segura del companion, activa Web UI a través del companion en Admin → Companion.",
+      madeBy: "· Hecho por"
     }
   };
   var lang = /^es/i.test(navigator.language || "") ? "es" : "en", t = T[lang], open = document.getElementById("open");
@@ -38,6 +46,7 @@
   open.hidden = !open.textContent;
   document.getElementById("intro").textContent = open.hidden ? t.none : t.intro;
   document.getElementById("help").textContent = t.help;
+  document.getElementById("made-by").textContent = t.madeBy;
 })();
 </script>
 </body>

@@ -468,7 +468,9 @@ def render_page(name="page.html"):
 
 
 def web_app(companion):
-    page, notice = render_page(), render_page("ui-off.html")
+    page = render_page()
+    notice = render_page("ui-off.html").replace("@VERSION@", html.escape(VERSION)).replace(
+        "@NAME@", html.escape(companion.name))
     no_store = {"Cache-Control": "no-store"}
 
     async def show(request):

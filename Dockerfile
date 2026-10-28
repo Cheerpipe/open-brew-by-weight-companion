@@ -3,6 +3,10 @@ FROM nginx:1.28-alpine
 # Alpine's own packages only: nothing is installed with pip, so the tests run offline.
 RUN apk add --no-cache python3 py3-zeroconf py3-aiohttp py3-cryptography ca-certificates openssl libqrencode-tools
 
+# The commit the image is built from, for the version shown on the companion's pages.
+ARG COMPANION_COMMIT=
+ENV COMPANION_COMMIT=$COMPANION_COMMIT
+
 COPY gateway/ /opt/gateway/
 COPY companion/ /opt/companion/
 

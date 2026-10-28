@@ -361,6 +361,7 @@ def write_site(cfg, data, run, target):
     values = {
         "SECURE_URL": html.escape(site_url("https", cfg, cfg["https_port"], 443)),
         "NAME": html.escape(cfg["name"]),
+        "VERSION": html.escape(companion_version()),
         "HOSTNAME": html.escape(cfg["hostname"]),
         "CA_NAME": CA_NAME,
         "FINGERPRINT": ":".join(fingerprint[i:i + 2] for i in range(0, len(fingerprint), 2)),
@@ -382,6 +383,13 @@ def write_site(cfg, data, run, target):
         "RUN": run, "DATA": data, "HTTP_PORT": cfg["http_port"], "HTTPS_PORT": cfg["https_port"],
         "UPSTREAM": upstream(target), "OFFLINE": "" if target else "return 503;",
     }))
+
+
+def companion_version():
+    """The companion's version for the page footer, read from its package without importing it."""
+    sys.path.insert(0, str(HERE.parent))
+    from companion import VERSION
+    return VERSION
 
 
 def write_status(cfg, data, run, target, source, seen):
