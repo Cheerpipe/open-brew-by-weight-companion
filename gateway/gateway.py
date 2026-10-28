@@ -687,13 +687,13 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        stop_logging()
         stop.set()
         companion.stop()
         zc.close()  # Sends mDNS goodbyes for the published name.
         if nginx.poll() is None:
             nginx.terminate()
             nginx.wait()
+        stop_logging()  # Last: the companion's shutdown lines still get written.
     raise SystemExit(status)
 
 

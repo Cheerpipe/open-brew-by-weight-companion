@@ -222,6 +222,8 @@ class Companion:
             log(f"closing the link: {error}")
             return error.code
         except (aiohttp.ClientError, ConnectionError) as error:
+            # Deliberately narrow: a local error (a disk OSError, a bug) must
+            # bubble to run_link as ERROR instead of posing as a dead socket.
             return f"SOCKET_{type(error).__name__}"
         finally:
             writer.cancel()

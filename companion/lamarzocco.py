@@ -427,10 +427,11 @@ class LaMarzocco:
                         self.alive_at = time.monotonic()
                         continue
                     if message.type not in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
-                        code = message.data if isinstance(message.data, int) else ws.close_code
+                        why = type(message.data).__name__ if isinstance(message.data, BaseException) else \
+                            f"code {message.data if isinstance(message.data, int) else ws.close_code}"
                         idle = (f"{time.monotonic() - self.last_message_at:.0f} s since its last message"
                                 if self.last_message_at else "no message ever arrived")
-                        raise TransportError(f"La Marzocco closed the WebSocket (code {code}, {idle})")
+                        raise TransportError(f"La Marzocco closed the WebSocket ({why}, {idle})")
                     buffer += message.data if isinstance(message.data, str) else message.data.decode()
                     *frames, buffer = buffer.split("\0")
                     for frame in frames:

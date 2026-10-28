@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     environment:
       # The log's clock matches the controller's, so the two interleave.
-      TZ: ${COMPANION_TZ:-${TZ:-UTC}}
+      TZ: ${COMPANION_TZ:-UTC}
       COMPANION_NAME: ${COMPANION_NAME:-}
       COMPANION_HOSTNAME: ${COMPANION_HOSTNAME:-${GATEWAY_HOSTNAME:-openbrewbyweight-secure}}
       COMPANION_IP: ${COMPANION_IP:-${GATEWAY_IP:-}}
