@@ -11,6 +11,8 @@
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 8px 0 0; }
   dt { color: var(--muted); }
   dd { margin: 0; overflow-wrap: anywhere; }
+  footer { margin: 24px 0 8px; text-align: center; color: var(--muted); font-size: .85rem; line-height: 1.7; }
+  footer a { color: inherit; }
 </style>
 </head>
 <body>
@@ -37,8 +39,13 @@
     </dl>
     <p id="mismatch" class="status warn" hidden></p>
   </section>
-  <p class="muted" id="version"></p>
 </main>
+<footer>
+  <div id="version"></div>
+  <div><a href="https://github.com/Cheerpipe/open-brew-by-weight-companion" target="_blank" rel="noopener">GitHub</a>
+    <span id="made-by">· Made by</span>
+    <a href="https://github.com/Cheerpipe" target="_blank" rel="noopener">Cheerpipe</a></div>
+</footer>
 <script>
 (function () {
   var T = {
@@ -68,7 +75,7 @@
       lmOff: "Off. Turn it on in Admin → Companion.", lmWaiting: "Waiting for the account from the controller",
       lmConnecting: "Connecting to La Marzocco…", lmConnected: "Connected",
       routeCompanion: "the controller uses this connection", routeDirect: "the controller uses its own",
-      versionLine: "Version {v}", none: "Not found yet",
+      versionLine: "Companion {v} · {name}", madeBy: "· Made by", none: "Not found yet",
       ui: "Web UI", uiReady: "Through the companion · {screens}", uiPassthrough: "Straight to the controller, one screen at a time",
       uiDisabled: "Directly on the controller (off in Admin → Companion)",
       screens0: "no screen open", screens1: "1 screen open", screensN: "{n} screens open"
@@ -99,7 +106,7 @@
       lmOff: "Apagado. Actívalo en Admin → Companion.", lmWaiting: "Esperando la cuenta desde el controlador",
       lmConnecting: "Conectando con La Marzocco…", lmConnected: "Conectado",
       routeCompanion: "el controlador usa esta conexión", routeDirect: "el controlador usa la suya",
-      versionLine: "Versión {v}", none: "Aún no encontrado",
+      versionLine: "Companion {v} · {name}", madeBy: "· Hecho por", none: "Aún no encontrado",
       ui: "Web UI", uiReady: "A través del companion · {screens}", uiPassthrough: "Directo al controlador, una pantalla a la vez",
       uiDisabled: "Directamente en el controlador (desactivada en Admin → Companion)",
       screens0: "ninguna pantalla abierta", screens1: "1 pantalla abierta", screensN: "{n} pantallas abiertas"
@@ -118,12 +125,13 @@
   $("link-label").textContent = t.link;
   $("ui-label").textContent = t.ui;
   $("lm-label").textContent = t.lm;
+  $("made-by").textContent = t.madeBy;
 
   var timer;
   function render(s) {
     var p = s.pairing, state = p.state, pending = state === "pending" || state === "requesting";
     $("brand").textContent = "Open Brew by Weight Companion · " + s.name;
-    $("version").textContent = fill(t.versionLine, { v: s.version });
+    $("version").textContent = fill(t.versionLine, { v: s.version, name: s.name });
     $("controller").textContent = s.controller ? s.controller.name + " (" + s.controller.address + ")" : t.none;
     var message = !s.controller && !s.paired ? t.searching
       : state === "paired" ? fill(t.paired, { name: s.pairedWith || (s.controller && s.controller.name) })
