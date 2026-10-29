@@ -288,6 +288,18 @@ async def main():
 
             # --- A ping as the link opens, cfg, then the account ------------------
             assert await session.next("ping", skip=()) == {"q": 1, "t": "ping", "up": False}
+            assert (await companion.status())["controller"]["name"] == "Cafe Bar", "falls back to discovery"
+            await session.send({"t": "dev", "name": "Cafe Bar 2"})
+            await eventually(lambda: companion.device_name == "Cafe Bar 2")
+            status = await companion.status()
+            assert status["controller"]["name"] == "Cafe Bar 2" == status["pairedWith"]
+            assert status["unknownFrames"] == 0
+            await session.send({"t": "dev", "name": 7})  # Not a name: ignored, not unknown.
+            await asyncio.sleep(0.2)
+            assert companion.device_name == "Cafe Bar 2"
+            await session.send({"t": "dev", "name": "Bar"})  # A rename reaches the page.
+            await eventually(lambda: companion.device_name == "Bar")
+            assert (await companion.status())["pairedWith"] == "Bar"
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True})
             assert await session.next("lm") == {"q": 2, "t": "lm", "sub": False, "ep": 0, "tok": 0}
             assert upstream.configured[-1] == (None, "ws", True), "no account yet"

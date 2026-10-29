@@ -29,7 +29,7 @@ from .store import Store, offload
 HERE = Path(__file__).resolve().parent
 BACKOFF_S = (5, 15, 60, 300)
 RETRY_LATER_S = 15  # The controller is busy with its scale: a steady short retry, never a longer one.
-FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd"})
+FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd", "dev"})
 PING_S = {"companion": 15, "direct": 120}
 # A sleep that comes back this late means the loop stood still; 20 s is where
 # the controller's 30 s ping contract starts to break.
@@ -49,6 +49,7 @@ class Companion:
         self.id, self.key = self.store.identity()
         self.public = crypto.public_point(self.key)
         self.controller = None  # (name, (ip, port)) from the supervisor
+        self.device_name = None  # The controller's own name, from its `dev` frame.
         self.tasks = set()
         self.wake = asyncio.Event()
         self.pairing = Pairing(self)
@@ -126,6 +127,7 @@ class Companion:
         await offload(self.store.erase_pairing)
         self.lm.erase()
         self.creds_gen = None
+        self.device_name = None  # It named the pairing, not this controller.
         self.pairing.state, self.pairing.auto = "unpaired", False
         self.relay.reset()
         log(f"{why}; its pairing, La Marzocco account and installation key are erased")
@@ -311,6 +313,8 @@ class Companion:
             self._set_route("companion" if frame.get("to") == "companion" else "direct")
         elif kind == "hold":
             self._set_hold(frame.get("on") is True)
+        elif kind == "dev":
+            self._device_name(frame.get("name"))
         else:  # cmd
             command_id, op, value = frame.get("id"), frame.get("op"), frame.get("v")
             if type(command_id) is not int or command_id < 1:
@@ -337,6 +341,13 @@ class Companion:
             held, self.held = self.held, None
             if held["ep"] == self.lm.ep:  # A read from an older subscription says nothing new.
                 self.post(held)
+
+    def _device_name(self, name):
+        """The controller names itself when the link opens and again after a rename."""
+        if isinstance(name, str) and 0 < len(name.encode()) <= 32 and name.isprintable():
+            if name != self.device_name:
+                log(f"the controller is named '{name}'")
+                self.device_name = name
 
     # --- La Marzocco account ---------------------------------------------------
     async def _apply_account(self):
@@ -486,8 +497,9 @@ class Companion:
         return {
             "name": self.name, "version": VERSION, "id": self.id,
             "paired": pairing is not None,
-            "pairedWith": pairing.get("controller") if pairing else None,
-            "controller": {"name": self.controller[0], "address": self.base_url().removeprefix("http://")}
+            "pairedWith": (self.device_name or pairing.get("controller")) if pairing else None,
+            "controller": {"name": self.device_name or self.controller[0],
+                           "address": self.base_url().removeprefix("http://")}
             if self.controller else None,
             "pairing": self.pairing.status(),
             "link": self.link, "linkReason": self.link_reason or None,

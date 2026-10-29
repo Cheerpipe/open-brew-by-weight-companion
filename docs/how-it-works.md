@@ -223,6 +223,10 @@ an HMAC, and a bad MAC or a wrong sequence closes the link. A frame type
 this version does not know (from a newer controller) is ignored and
 counted, and the page asks you to update the companion.
 
+- **The controller's name:** when the link opens, and again whenever the
+  controller is renamed, it sends its device name in a `dev` frame. The page
+  and its pairing message use that name instead of the address, however the
+  controller was found (by mDNS or by a configured address).
 - **Liveness:** a `ping` as soon as the link opens, then every 2 minutes,
   every 15 seconds while the controller uses the companion for La Marzocco
   (and one right when it starts to), and one at once whenever its La
