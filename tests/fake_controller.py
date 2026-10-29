@@ -1,6 +1,7 @@
 """A fake controller for the relay and screen tests: the relay routes, relay admission, the claim and
-a ui-stream that answers ops the way the firmware does, written from the phase 3 design's formulas
-(not from the companion's code), so the two are checked against each other.
+a ui-stream that answers ops the way the firmware does, written from the design's formulas
+(not from the companion's code), so the two are checked against each other. Relay protocol 2:
+requests arrive signed and sealed, JSON answers leave sealed under the response counter.
 """
 
 import asyncio
@@ -11,9 +12,13 @@ import json
 import os
 import re
 
+import aiohttp
 from aiohttp import web
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 CLIENT = re.compile(r"[0-9a-f]{16,24}")
+CTX_SESSION, CTX_PASSWORD, CTX_BODY = 0, 1, 2
 
 
 def b64(data):
@@ -30,8 +35,26 @@ def relay_key(secret, rb, nc):
     return hmac.new(prk, b"obbw-relay-v1\x01", hashlib.sha256).digest()
 
 
+def body_key(key):
+    """Kb = HKDF-SHA256(ikm=Kr, salt="", info="obbw-relay-body-v2", L=32), written out."""
+    prk = hmac.new(bytes(32), key, hashlib.sha256).digest()
+    return hmac.new(prk, b"obbw-relay-body-v2\x01", hashlib.sha256).digest()
+
+
+def nonce(direction, context, counter):
+    return direction + bytes((context, 0, 0)) + counter.to_bytes(8, "little")
+
+
+def seal(key, context, counter, plaintext):
+    return AESGCM(key).encrypt(nonce(b"c", context, counter), plaintext, None)
+
+
+def open_(key, direction, context, counter, sealed):
+    return AESGCM(key).decrypt(nonce(direction, context, counter), sealed, None)
+
+
 def relay_tag(key, method, uri, q, addr, screen, session):
-    canonical = "\n".join(["obbw-relay-v1", method, uri, str(q), addr, screen, session]) + "\n"
+    canonical = "\n".join(["obbw-relay-v2", method, uri, str(q), addr, screen, session]) + "\n"
     return hmac.new(key, canonical.encode(), hashlib.sha256).digest()[:16].hex()
 
 
@@ -44,10 +67,13 @@ class Controller:
         self.secret, self.companion_id = secret, companion_id
         self.mode = "ok"  # ok, none (phase-1 firmware), forgotten, bad_erase, unknown, bad_proof
         self.ui, self.link = True, False
-        self.rb, self.kr, self.high, self.mask = os.urandom(16), None, 0, 0
+        self.rb, self.kr, self.kb, self.high, self.mask = os.urandom(16), None, None, 0, 0
+        self.responses = 0
         self.handshakes, self.stale_next = 0, False
+        self.corrupt_body, self.corrupt_reply = False, False  # A man in the middle, for tests.
         self.active = None  # activeWebUiClientId_
         self.requests = []  # (method, uri, headers, body, identity)
+        self.wire = []  # The sealed bytes as they arrived: (session header, password header, body).
         self.request_id = 100
         self.streams = []  # Open ui-stream sessions
         self.sessions = asyncio.Queue()
@@ -78,27 +104,38 @@ class Controller:
         if not hmac.compare_digest(base64.b64decode(body["mac"]), mac(self.secret, b"R", self.rb, nc)):
             return web.json_response({"error": "COMPANION_AUTH"}, status=401)
         self.handshakes += 1
-        self.kr, self.high, self.mask = relay_key(self.secret, self.rb, nc), 0, 0
+        self.kr = relay_key(self.secret, self.rb, nc)
+        self.kb, self.high, self.mask, self.responses = body_key(self.kr), 0, 0, 0
         proof = mac(self.secret if self.mode != "bad_proof" else bytes(32), b"Q", self.rb, nc)
         answer = {"mac": b64(proof), "ui": self.ui, "link": self.link}
         self.rb = os.urandom(16)
         return web.json_response(answer)
 
     def admit(self, request):
-        """(identity or None, refusal or None) as relay admission defines them."""
+        """(identity or None, refusal or None) as relay admission defines them; the sealed
+        session and password values open here, so a recorded request names the plaintext."""
         value = request.headers.get("X-OBBW-Relay")
         if value is None:
             return None, None
         parts = value.split(" ")
-        if len(parts) != 5 or parts[0] != "1" or not parts[1].isdigit() or not CLIENT.fullmatch(parts[3]) or \
+        if len(parts) != 5 or parts[0] != "2" or not parts[1].isdigit() or not CLIENT.fullmatch(parts[3]) or \
                 not re.fullmatch(r"[0-9a-f]{32}", parts[4]) or len(parts[2]) > 45:
             return None, web.json_response({"error": "RELAY_INVALID"}, status=400)
         q, addr, screen, tag = int(parts[1]), parts[2], parts[3], parts[4]
-        session = request.headers.get("X-WebUI-Session", "")
-        if self.stale_next or self.kr is None or tag != relay_tag(self.kr, request.method, request.raw_path, q, addr,
-                                                                  screen, session):
+        raw_session = request.headers.get("X-WebUI-Session", "")
+        raw_password = request.headers.get("X-Device-Password", "")
+        if self.stale_next or self.kr is None or tag != relay_tag(self.kr, request.method, request.raw_path, q,
+                                                                  addr, screen, raw_session):
             self.stale_next = False
             return None, web.json_response({"error": "RELAY_STALE"}, status=401)
+        session = password = ""
+        try:
+            if raw_session:
+                session = open_(self.kb, b"c", CTX_SESSION, q, base64.b64decode(raw_session)).decode()
+            if raw_password:
+                password = open_(self.kb, b"c", CTX_PASSWORD, q, base64.b64decode(raw_password)).decode()
+        except (InvalidTag, ValueError, UnicodeDecodeError):
+            return None, web.json_response({"error": "RELAY_INVALID"}, status=400)
         if q > self.high:
             shift = q - self.high
             self.mask = ((self.mask << shift) | 1) & (2 ** 64 - 1) if shift < 64 else 1
@@ -109,29 +146,57 @@ class Controller:
             return None, web.json_response({"error": "RELAY_REPLAY"}, status=401)
         if not self.ui:
             return None, web.json_response({"error": "RELAY_DISABLED"}, status=403)
-        return {"q": q, "addr": addr, "screen": screen, "session": session}, None
+        return {"q": q, "addr": addr, "screen": screen, "session": session, "password": password}, None
+
+    def answer(self, identity, payload, status=200):
+        """A JSON answer: sealed (X-OBBW-Enc names its counter) to a relayed request."""
+        if identity is None:
+            return web.json_response(payload, status=status, dumps=dumps)
+        self.responses += 1
+        sealed = AESGCM(self.kb).encrypt(nonce(b"f", 3, self.responses), dumps(payload).encode(), None)
+        if self.corrupt_reply:
+            sealed = sealed[:-1] + bytes((sealed[-1] ^ 1,))
+        return web.Response(status=status, content_type="application/json",
+                            headers={"Cache-Control": "no-store", "X-OBBW-Enc": str(self.responses)},
+                            body=sealed)
 
     # --- REST -------------------------------------------------------------------------
     async def api(self, request):
         identity, refusal = self.admit(request)
         if refusal is not None:
             return refusal
-        body = await request.read()
-        self.requests.append((request.method, request.raw_path, dict(request.headers), body, identity))
+        raw = await request.read()
+        if self.corrupt_body and raw:  # Flip one sealed byte, as a listener on the wire could.
+            raw = raw[:-1] + bytes((raw[-1] ^ 1,))
+        body = raw
+        if identity is not None and raw:
+            try:  # The relayed body arrived sealed under its request's q.
+                body = open_(self.kb, b"c", CTX_BODY, identity["q"], raw)
+            except InvalidTag:
+                return web.json_response({"error": "RELAY_INVALID"}, status=400)
+        headers = dict(request.headers)
+        if identity is not None:
+            if identity["session"]:
+                headers["X-WebUI-Session"] = identity["session"]
+            if identity["password"]:
+                headers["X-Device-Password"] = identity["password"]
+        self.requests.append((request.method, request.raw_path, headers, body, identity))
+        self.wire.append((request.headers.get("X-WebUI-Session", ""),
+                          request.headers.get("X-Device-Password", ""), raw))
         client, path = request.headers.get("X-WebUI-Client", ""), request.path
         if path == "/api/v1/ui/claim":
             if not CLIENT.fullmatch(client):
-                return web.json_response({"error": "UI_CLIENT_INVALID"}, status=400)
+                return self.answer(identity, {"error": "UI_CLIENT_INVALID"}, status=400)
             if self.active != client:
                 self.active = client
                 for session in list(self.streams):  # A new owner closes the previous one's stream.
                     await session.ws.close(code=4001)
-            return web.json_response({"active": True, "compatibilityMode": False})
+            return self.answer(identity, {"active": True, "compatibilityMode": False})
         if path == "/api/v1/auth/login":
             self.active = client
-            return web.json_response({"token": "t", "remember": False, "active": True})
+            return self.answer(identity, {"token": "t", "remember": False, "active": True})
         if path == "/api/v1/ota" and request.method == "PATCH":
-            return web.json_response({"received": len(body)})
+            return self.answer(identity, {"received": len(body)})
         if path == "/api/v1/debug/export":
             response = web.StreamResponse(headers={
                 "Content-Type": "application/octet-stream", "Content-Encoding": "gzip",
@@ -142,15 +207,16 @@ class Controller:
             await response.write_eof()
             return response
         if path == "/api/v1/companion/admin":
-            return web.json_response({"ok": True})
+            return self.answer(identity, {"ok": True})
         if path == "/api/v1/auth":
-            return web.json_response({"login": False})
+            return self.answer(identity, {"login": False})
         if client != self.active:
-            return web.json_response({"error": "UI_TAKEN_OVER", "message": "Another window took over"}, status=409)
+            return self.answer(identity, {"error": "UI_TAKEN_OVER", "message": "Another window took over"},
+                               status=409)
         if request.method == "GET":
-            return web.json_response({"ok": True, "uri": request.raw_path})
+            return self.answer(identity, {"ok": True, "uri": request.raw_path})
         self.request_id += 1
-        return web.json_response({"accepted": True, "requestId": self.request_id}, status=202)
+        return self.answer(identity, {"accepted": True, "requestId": self.request_id}, status=202)
 
     # --- ui-stream ----------------------------------------------------------------------
     async def stream(self, request):

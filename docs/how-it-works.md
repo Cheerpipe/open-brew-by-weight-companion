@@ -313,22 +313,34 @@ challenge `rb`), then `POST`s its id, a fresh nonce `nc` and
 `HMAC(S, "R" ‖ rb ‖ nc)`. The controller proves the secret back with
 `HMAC(S, "Q" ‖ rb ‖ nc)` and says whether the Web UI goes through the
 companion (`ui`) and whether a feature needs the link (`link`). Both sides
-derive `Kr = HKDF-SHA256(S, salt = rb ‖ nc, info = "obbw-relay-v1")`. A
+derive `Kr = HKDF-SHA256(S, salt = rb ‖ nc, info = "obbw-relay-v1")` for
+signing and, from it, `Kb = HKDF-SHA256(Kr, salt = "",
+info = "obbw-relay-body-v2")` for sealing. A
 forgotten companion receives `erase`, signed like the link's, and then
 deletes its pairing; an unsigned "not paired" only stops La Marzocco.
 
-**Signed requests.** Each request to the controller carries
-`X-OBBW-Relay: 1 <q> <addr> <screen> <mac>`: a counter from 1 per relay
+**Signed and sealed requests.** Each request to the controller carries
+`X-OBBW-Relay: 2 <q> <addr> <screen> <mac>`: a counter from 1 per relay
 session, the browser's address from nginx, the browser's own
 `X-WebUI-Client`, and the first 16 bytes of
-`HMAC-SHA256(Kr, "obbw-relay-v1\nMETHOD\nURI\nq\naddr\nscreen\nsession\n")`
+`HMAC-SHA256(Kr, "obbw-relay-v2\nMETHOD\nURI\nq\naddr\nscreen\nsession\n")`
 in hex, where `URI` is the path and query exactly as sent and `session` the
-browser's `X-WebUI-Session`. The controller accepts each counter once. Only
-`Content-Type`, `X-WebUI-Session`, `X-WebUI-Activity`, `X-Device-Password`,
-the firmware update headers (`X-OTA-*`, `Content-Range`) and the body go to
-the controller; a request the controller refused as `RELAY_STALE` is sent
-once more after a new handshake. The source address alone is never trusted:
-a Docker host may share its address with Home Assistant.
+sealed `X-WebUI-Session` value exactly as sent. Everything that carries a
+credential is sealed with AES-256-GCM under `Kb`: the session token and the
+device password (as base64 header values), the request body (raw ciphertext,
+the 16-byte tag appended) and every JSON answer (sealed under a response
+counter the controller names in `X-OBBW-Enc`, which never reaches the
+browser). The 12-byte nonce is the direction, a context byte, two zeros and
+the counter little-endian, so a seal belongs to exactly one request and
+never repeats under one `Kb`. A seal that does not open — a tampered body,
+or a corrupted answer — is refused (`RELAY_INVALID`) or dropped, never
+delivered or re-sent opened; the answer case starts a new relay session.
+Firmware update ranges (`X-OTA-*`, `Content-Range`) go as they are: the
+image is not secret, and its integrity is pinned by the session's sha256,
+which arrives sealed. The controller accepts each counter once. A request
+the controller refused as `RELAY_STALE` is sent once more after a new
+handshake. The source address alone is never trusted: a Docker host may
+share its address with Home Assistant.
 
 **One client id.** The service has one random 24-digit client id per start.
 Every claim and sign-in goes with that id, so the controller sees one Web UI

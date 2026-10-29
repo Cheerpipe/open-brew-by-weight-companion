@@ -96,7 +96,28 @@ def relay_key(secret, challenge, nonce):
     return hkdf(secret, challenge + nonce, b"obbw-relay-v1")
 
 
+def relay_body_key(key):
+    """Kb: seals relayed bodies, headers and responses (relay protocol 2)."""
+    return hkdf(key, b"", b"obbw-relay-body-v2")
+
+
+def relay_nonce(direction, context, counter):
+    """12 bytes: the direction, the context, two zeros, the counter little-endian."""
+    return direction + bytes((context, 0, 0)) + counter.to_bytes(8, "little")
+
+
+def relay_seal(body_key, context, counter, plaintext):
+    """AES-256-GCM under Kb; the 16-byte tag rides with the bytes."""
+    return AESGCM(body_key).encrypt(relay_nonce(b"c", context, counter), plaintext, None)
+
+
+def relay_open(body_key, counter, sealed):
+    """A sealed response (context 3, controller to companion)."""
+    return AESGCM(body_key).decrypt(relay_nonce(b"f", 3, counter), sealed, None)
+
+
 def relay_tag(key, method, uri, counter, address, screen, session):
-    """The relayed request's MAC: 32 lowercase hex digits over the canonical string."""
-    canonical = f"obbw-relay-v1\n{method}\n{uri}\n{counter}\n{address}\n{screen}\n{session}\n"
+    """The relayed request's MAC: 32 lowercase hex digits over the canonical string
+    (relay protocol 2: the session field is the sealed value exactly as sent)."""
+    canonical = f"obbw-relay-v2\n{method}\n{uri}\n{counter}\n{address}\n{screen}\n{session}\n"
     return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()[:32]

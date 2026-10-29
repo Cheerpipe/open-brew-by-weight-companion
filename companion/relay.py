@@ -1,11 +1,14 @@
-"""The relay: every screen's REST call reaches the controller signed as relayed.
+"""The relay: every screen's REST call reaches the controller signed and sealed.
 
 A relay session needs no clock and nothing stored: a GET returns the
 controller's challenge, a POST proves the pairing secret and both sides derive
-Kr from it. Each request then carries `X-OBBW-Relay: 1 <q> <addr> <screen>
-<mac>`. Without a relay session (not paired, a controller without the relay
-route, or one that turned the Web UI through the companion off) the companion
-forwards as a plain proxy (passthrough) or refuses (disabled).
+Kr (signing) and Kb (sealing) from it. Each request then carries
+`X-OBBW-Relay: 2 <q> <addr> <screen> <mac>`, its body and credential headers
+sealed with AES-256-GCM under Kb (protocol 2): no password, session token or
+sign-in body crosses the hop in the clear. Without a relay session (not
+paired, a controller without the relay route, or one that turned the Web UI
+through the companion off) the companion forwards as a plain proxy
+(passthrough) or refuses (disabled).
 """
 
 import asyncio
@@ -16,6 +19,7 @@ import os
 import re
 
 import aiohttp
+from cryptography.exceptions import InvalidTag
 from yarl import URL
 
 from . import crypto, log
@@ -23,6 +27,7 @@ from .store import offload
 
 PATH = "/api/v1/companion/relay"
 PROTOCOL = 1
+CTX_SESSION, CTX_PASSWORD, CTX_BODY = 0, 1, 2
 COUNTER_MAX = 0xFFFFFFFF
 CLIENT_ID = re.compile(r"[0-9a-f]{16,24}")
 # What the controller reads from a browser's request; everything else stays here.
@@ -30,6 +35,8 @@ FORWARDED = ("Content-Type", "X-WebUI-Session", "X-WebUI-Activity", "X-Device-Pa
              "X-OTA-Transfer", "X-OTA-Offset", "X-OTA-Length", "X-OTA-Allow-Downgrade", "Content-Range")
 HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer",
                         "upgrade", "content-length"})
+# Sealed values stay out of the hop-by-hop set and of the browser's answer.
+SEALED_RESPONSE_HEADER = "X-OBBW-Enc"
 READ_LIMIT = 64 * 1024  # JSON answers are read whole: claims, commands and errors are small.
 # Every relayed request is bounded (an OTA chunk is one 64 KiB POST, far under
 # this), matching nginx's own 5-minute proxy_read_timeout. The total does not
@@ -51,7 +58,7 @@ class Relay:
         self.client_id = os.urandom(12).hex()  # The controller's one Web UI client for every screen.
         self.mode = "passthrough"  # passthrough, ready or disabled
         self.link = None  # Whether the controller wants the link; None until it answered.
-        self.key, self.counter, self.generation = None, 0, 0
+        self.key, self.body_key, self.counter, self.generation = None, None, 0, 0
         self.lock = asyncio.Lock()
         self.http = None
         self.reported = None
@@ -68,7 +75,7 @@ class Relay:
             await self.http.close()
 
     def reset(self, link=None):
-        self.key, self.counter, self.mode = None, 0, "passthrough"
+        self.key, self.body_key, self.counter, self.mode = None, None, 0, "passthrough"
         self._set_link(link)
 
     def _set_link(self, link):
@@ -128,7 +135,8 @@ class Relay:
                 self.reset()
                 self._note("the controller did not prove the pairing secret; the Web UI passes straight through")
                 return
-            self.key, self.counter = crypto.relay_key(secret, challenge, nonce), 0
+            key = crypto.relay_key(secret, challenge, nonce)
+            self.key, self.body_key, self.counter = key, crypto.relay_body_key(key), 0
             self.mode = "disabled" if reply.get("ui") is False else "ready"
             self._set_link(reply.get("link") is True)
             await companion.recognized()
@@ -147,13 +155,24 @@ class Relay:
             self._note(f"the controller refused the relay: HTTP {status} {reply.get('error') or ''}".strip())
 
     # --- Requests --------------------------------------------------------------
+    def admit(self, method, uri, addr, screen, session=""):
+        """Allocate q and build the header with the session sealed for it.
+
+        Returns (header, q, sealed session or ""), or (None, 0, "") when the
+        session needs a new handshake first.
+        """
+        if self.key is None or self.body_key is None or self.counter >= COUNTER_MAX:
+            return None, 0, ""
+        self.counter += 1
+        q = self.counter
+        sealed = "" if session == "" else crypto.b64(
+            crypto.relay_seal(self.body_key, CTX_SESSION, q, session.encode()))
+        tag = crypto.relay_tag(self.key, method, uri, q, addr, screen, sealed)
+        return f"2 {q} {addr} {screen} {tag}", q, sealed
+
     def header(self, method, uri, addr, screen, session=""):
         """The signed X-OBBW-Relay value; None when the session needs a new handshake first."""
-        if self.key is None or self.counter >= COUNTER_MAX:
-            return None
-        self.counter += 1
-        tag = crypto.relay_tag(self.key, method, uri, self.counter, addr, screen, session)
-        return f"1 {self.counter} {addr} {screen} {tag}"
+        return self.admit(method, uri, addr, screen, session)[0]
 
     async def signed(self, method, uri, addr, screen, session=""):
         value = self.header(method, uri, addr, screen, session)
@@ -161,6 +180,15 @@ class Relay:
             await self.handshake()
             value = self.header(method, uri, addr, screen, session) if self.mode == "ready" else None
         return value
+
+    async def sealed(self, method, uri, addr, screen, session=""):
+        """`signed`, keeping the q and the sealed session that belong to it."""
+        value, q, sealed_session = self.admit(method, uri, addr, screen, session)
+        if value is None and self.mode != "disabled":
+            await self.handshake()
+            if self.mode == "ready":
+                value, q, sealed_session = self.admit(method, uri, addr, screen, session)
+        return value, q, sealed_session
 
     @staticmethod
     def forwarded(incoming, client=None):
@@ -172,24 +200,48 @@ class Relay:
         return headers
 
     async def request(self, method, uri, incoming, body, addr, screen, rewrite):
-        """One relayed request, retried once after RELAY_STALE (no handler ran then).
+        """One relayed request, sealed and signed, retried once after RELAY_STALE (no handler ran then).
 
         Returns the open response with `data` set to its whole body when it is a small
         JSON answer (None otherwise: the caller streams it), or None without a relay session.
         """
         for attempt in (0, 1):
             session = incoming.get("X-WebUI-Session", "")
-            value = await self.signed(method, uri, addr, screen, session)
+            value, q, sealed_session = await self.sealed(method, uri, addr, screen, session)
             if value is None:
                 return None
             headers = self.forwarded(incoming, self.client_id if rewrite else None)
+            if sealed_session:
+                headers["X-WebUI-Session"] = sealed_session
+            if headers.get("X-Device-Password"):
+                headers["X-Device-Password"] = crypto.b64(
+                    crypto.relay_seal(self.body_key, CTX_PASSWORD, q,
+                                      headers["X-Device-Password"].encode()))
             headers["X-OBBW-Relay"] = value
-            reply = await self._send(method, uri, headers, body)
+            sealed_body = body and crypto.relay_seal(self.body_key, CTX_BODY, q, body)
+            reply = await self._send(method, uri, headers, sealed_body)
             if reply.data is not None and reply.status == 401 and attempt == 0 and _error(reply.data) == "RELAY_STALE":
                 reply.release()
-                self.key = None
+                self.key, self.body_key = None, None
                 continue
+            await self._open(reply)
             return reply
+
+    async def _open(self, reply):
+        """Open a sealed answer; a seal that does not open is never delivered."""
+        counter = reply.headers.get(SEALED_RESPONSE_HEADER)
+        if counter is None:
+            return
+        sealed = reply.data if reply.data is not None else (
+            await reply.read() if (reply.content_length or 0) <= READ_LIMIT else None)
+        reply.release()
+        try:
+            reply.data = crypto.relay_open(self.body_key, int(counter), sealed)
+        except (InvalidTag, ValueError, TypeError):
+            log("the controller's sealed answer did not open; starting a new relay session")
+            self.key, self.body_key = None, None  # The next request makes a new session.
+            raise aiohttp.ClientResponseError(reply.request_info, (), status=502,
+                                              message="the sealed answer did not open")
 
     async def passthrough(self, method, uri, incoming, body):
         """Today's transparent proxy: the browser's own id, nothing signed."""
@@ -215,4 +267,5 @@ def _error(data):
 
 
 def response_headers(reply):
-    return [(name, value) for name, value in reply.headers.items() if name.lower() not in HOP_BY_HOP]
+    return [(name, value) for name, value in reply.headers.items()
+            if name.lower() not in HOP_BY_HOP and name != SEALED_RESPONSE_HEADER]

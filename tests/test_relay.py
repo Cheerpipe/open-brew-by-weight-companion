@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""The Web UI relay against a fake controller: handshake, signing, the header whitelist, the client id
-rewrite, RELAY_STALE, erase, passthrough, the Web UI switch and the link flag.
-
-The fake controller (tests/fake_controller.py) verifies every relayed request with its own copy of the
-design's formulas. Offline, inside the image (see the README).
+"""The Web UI relay against a fake controller: handshake, signing and sealing, the header
+whitelist, the client id rewrite, RELAY_STALE, erase, passthrough, the Web UI switch and the
+link flag. The fake controller (tests/fake_controller.py) verifies every relayed request with
+its own copy of the design's formulas. Offline, inside the image (see the README).
 """
 
 import asyncio
@@ -68,6 +67,20 @@ def relay_vectors():
     assert crypto.mac(SECRET, b"E", nc) == crypto.unb64(r["erase"])
     key = crypto.relay_key(SECRET, rb, nc)
     assert key.hex() == r["key"] and key == fake_controller.relay_key(SECRET, rb, nc)
+    kb = crypto.relay_body_key(key)
+    assert kb.hex() == r["bodyKey"] and kb == fake_controller.body_key(key), "Kb from the shared vectors"
+    # A seal opens only with its own context, its own request, and untouched bytes.
+    sealed = crypto.relay_seal(kb, 0, 7, b"0123456789abcdef0123456789abcdef")
+    assert fake_controller.open_(kb, b"c", 0, 7, sealed) == b"0123456789abcdef0123456789abcdef"
+    from cryptography.exceptions import InvalidTag
+    for opener in (lambda: fake_controller.open_(kb, b"c", 1, 7, sealed),  # another context
+                   lambda: fake_controller.open_(kb, b"c", 0, 8, sealed),  # another request's q
+                   lambda: fake_controller.open_(kb, b"c", 0, 7, sealed[:-1] + bytes((sealed[-1] ^ 1,)))):
+        try:
+            opener()
+            raise AssertionError("a seal opened for another context, request or after tampering")
+        except InvalidTag:
+            pass
     for case in r["requests"]:
         _, q, addr, screen, tag = case["header"].split(" ")
         args = (case["method"], case["uri"], int(q), addr, screen, case["session"])
@@ -114,18 +127,24 @@ async def main():
             assert status == 200 and identity is None and headers["X-WebUI-Client"] == A
             assert "Cookie" not in headers and "X-Real-IP" not in headers and "X-OBBW-Relay" not in headers
 
-            # --- Paired: one relay session, every call signed -----------------------------------
+            # --- Paired: one relay session, every call signed and sealed --------------------------
             companion.store.save_pairing(SECRET, "Cafe Bar")
             companion.pairing.state = "paired"
             assert await relay.handshake() == "ready" and fake.handshakes == 1
             assert (await companion.status())["relay"] == "ready" and relay.link is False, "no feature needs the link"
-            status, _, body = await call("POST", "/api/v1/ui/claim", json={}, headers={
+            status, reply_headers, body = await call("POST", "/api/v1/ui/claim", json={}, headers={
                 "X-WebUI-Session": "token", "X-Evil": "1", "Cookie": "x=1"})
             assert status == 200 and json.loads(body)["active"] is True
             method, uri, headers, _, identity = fake.requests[-1]
             assert headers["X-WebUI-Client"] == relay.client_id and fake.active == relay.client_id
-            assert identity == {"q": 1, "addr": "192.168.1.50", "screen": A, "session": "token"}
+            assert identity == {"q": 1, "addr": "192.168.1.50", "screen": A,
+                                "session": "token", "password": ""}
             assert not {"X-Evil", "Cookie", "X-Real-IP"} & set(headers)
+            # The wire carried ciphertext: the token never travelled as itself, and the
+            # sealing counter never reached the browser.
+            raw_session, raw_password, raw_body = fake.wire[-1]
+            assert raw_session != "token" and raw_password == "" and raw_body, "the body was sealed too"
+            assert "X-OBBW-Enc" not in reply_headers
             assert companion.screens.mux.claimed == {A} and (await companion.status())["owner"] is True
 
             # A claimed screen's calls carry the shared id; another screen's keep its own.
@@ -142,13 +161,25 @@ async def main():
             await call("GET", "/api/v1/auth", real_ip="")
             assert fake.requests[-1][4]["addr"] == "0.0.0.0"
 
-            # --- Firmware updates: their headers and 64 KiB chunks --------------------------------
+            # --- Firmware updates: their headers and 64 KiB chunks, the password sealed ---------
             ota = {"X-OTA-Transfer": "t1", "X-OTA-Offset": "0", "X-OTA-Length": "65536",
                    "Content-Range": "bytes 0-65535/65536", "Content-Type": "application/octet-stream",
                    "X-Device-Password": "pw"}
             status, _, body = await call("PATCH", "/api/v1/ota", data=bytes(65536), headers=ota)
             assert status == 200 and json.loads(body)["received"] == 65536
             assert all(fake.requests[-1][2][name] == value for name, value in ota.items())
+            _, raw_password, raw_body = fake.wire[-1]
+            assert raw_password != "pw" and len(raw_body) == 65536 + 16, "password and range sealed"
+
+            # --- Seals that do not open: refused, never delivered -------------------------------
+            fake.corrupt_body = True
+            status, _, body = await call("POST", "/api/v1/config", json={"patch": {"a": 1}})
+            assert status == 400 and json.loads(body)["error"] == "RELAY_INVALID"
+            fake.corrupt_body, fake.corrupt_reply = False, True
+            status, _, body = await call("GET", "/api/v1/auth")
+            assert status == 502 and fake.requests[-1][4] is not None, "a tampered answer is never delivered"
+            assert relay.key is None, "the next request makes a new relay session"
+            fake.corrupt_reply = False
 
             # --- Downloads stream through untouched ---------------------------------------------------
             status, headers, body = await call("GET", "/api/v1/debug/export")
@@ -158,13 +189,13 @@ async def main():
             # --- RELAY_STALE: one new session and the same request again ----------------------------
             fake.stale_next = True
             status, _, body = await call("POST", "/api/v1/config", json={"patch": {"a": 1}})
-            assert status == 202 and fake.handshakes == 2
+            assert status == 202 and fake.handshakes == 3, "the tampered answer cost one session already"
             assert json.loads(fake.requests[-1][3]) == {"patch": {"a": 1}} and fake.requests[-1][4]["q"] == 1
 
             # A counter at its end starts a new session first.
             relay.counter = relay_module.COUNTER_MAX
             await call("GET", "/api/v1/auth")
-            assert fake.handshakes == 3 and fake.requests[-1][4]["q"] == 1
+            assert fake.handshakes == 4 and fake.requests[-1][4]["q"] == 1
 
             # --- The link opens only when the controller says a feature needs it [D4] ------------------
             link = companion.spawn(companion.run_link())
@@ -173,7 +204,7 @@ async def main():
             # Admin → Companion's actions may change the switches: the relay asks again.
             fake.link = True
             await call("POST", "/api/v1/companion/admin", json={"action": "switches", "lm": True})
-            await eventually(lambda: fake.handshakes == 4 and relay.link is True)
+            await eventually(lambda: fake.handshakes == 5 and relay.link is True)
             await eventually(lambda: any(r[1] == "/api/v1/companion/link" for r in fake.requests))
             link.cancel()
 
@@ -243,7 +274,8 @@ async def main():
             await pages.close()
             await relay.close()
     await server.close()
-    print("Companion relay: handshake, signing, whitelist, client id, stale retry, erase, passthrough and switch OK")
+    print("Companion relay: handshake, signing, sealing, whitelist, client id, stale retry, erase, "
+          "passthrough and switch OK")
 
 
 asyncio.run(main())
