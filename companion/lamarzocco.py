@@ -3,8 +3,9 @@
 It mirrors src/machine/OpenBrewByWeightMicraService.cpp (installation key and
 id, /auth/init, sign-in, token refresh, signed headers, dashboard, the two
 commands) and OpenBrewByWeightMicraWebSocket.inc (STOMP over the WebSocket,
-WebSocket ping every 15 s, 30 s pong timeout). The companion owns its own
-installation, so the controller's key never leaves the controller.
+WebSocket ping every 15 s, 30 s pong timeout, the socket's instant-first
+reconnect ladder). The companion owns its own installation, so the
+controller's key never leaves the controller.
 """
 
 import asyncio
@@ -31,7 +32,7 @@ PING_S = 15
 PONG_TIMEOUT_S = 30
 SUBSCRIBE_TIMEOUT_S = 10
 CONNECT_TIMEOUT_S = 25
-RETRY_S = (3, 6, 9, 60)  # The controller's reconnection delays, then its cooldown.
+RETRY_S = (0, 1, 3, 6, 9, 60)  # An immediate first retry, then the controller's delays and cooldown.
 COMMANDS = {
     "temp": "CoffeeMachineSettingCoffeeBoilerTargetTemperature",
     "standby": "CoffeeMachineChangeMode",

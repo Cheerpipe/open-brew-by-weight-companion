@@ -29,7 +29,7 @@ ACCOUNT = {"email": "barista@example.com", "password": "correct horse", "serial"
 UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 lamarzocco.PING_S, lamarzocco.PONG_TIMEOUT_S, lamarzocco.POLL_S = 0.2, 1.0, 0.3
-lamarzocco.RETRY_S = (0.1, 0.1, 0.1, 0.1)
+lamarzocco.RETRY_S = (0.1,) * 6
 
 # The STOMP codec on the controller's own frames.
 assert stomp_parse("\n\nCONNECTED\r\nversion:1.2\r\nheart-beat:0,0\r\n\r\n") == (
