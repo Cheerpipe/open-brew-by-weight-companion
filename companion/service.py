@@ -27,7 +27,7 @@ from .screens import Screens
 from .store import Store, offload
 
 HERE = Path(__file__).resolve().parent
-BACKOFF_S = (5, 15, 60, 300)
+BACKOFF_S = (0, 5, 15, 60, 300)  # The first reopen is immediate; then it backs off.
 RETRY_LATER_S = 15  # The controller is busy with its scale: a steady short retry, never a longer one.
 FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd", "dev"})
 PING_S = {"companion": 15, "direct": 120}

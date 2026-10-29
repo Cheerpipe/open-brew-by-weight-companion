@@ -37,7 +37,7 @@ COMPANION_KEY, CONTROLLER_KEY = crypto.unb64(V["companionKey"]), crypto.unb64(V[
 SECRET = bytes.fromhex(V["pairingSecret"])
 TO_CONTROLLER = {"ping", "lm", "creds", "st", "res"}
 
-service.BACKOFF_S = (0.2, 0.2, 0.2, 0.2)
+service.BACKOFF_S = (0.2,) * 5
 service.RETRY_LATER_S = 0.2
 service.PING_S = {"companion": 0.4, "direct": 60}
 service.CONFIRM_S = 0.4
@@ -451,7 +451,7 @@ async def main():
             await eventually(lambda: companion.link == "open")
 
             # --- RETRY_LATER retries at its short interval, without escalating -----
-            service.BACKOFF_S = (0.2, 30, 30, 30)
+            service.BACKOFF_S = (0.2, 30, 30, 30, 30)
             fake.mode, fake.retries = "retry", 3
             await session.ws.close()
             session = await asyncio.wait_for(fake.sessions.get(), 2)
@@ -478,7 +478,7 @@ async def main():
             assert (await session.next("creds", skip=("ping", "lm")))["ok"] is True
 
             # --- Not recognized: La Marzocco stops, every secret stays ----------------
-            service.BACKOFF_S = (0.2, 0.2, 0.2, 0.2)
+            service.BACKOFF_S = (0.2,) * 5
             fake.mode = "not_paired"
             await session.ws.close()
             await eventually(lambda: companion.pairing.state == "not_recognized")
