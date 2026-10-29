@@ -11,7 +11,7 @@ import json
 
 import aiohttp
 
-from . import log
+from . import clip, log
 
 PATH = "/api/v1/ui/ui-stream"
 REQUEST_BYTES = 640  # The controller's request frame (kUiStreamRequestBytes).
@@ -83,7 +83,7 @@ class Upstream:
         try:
             ws = await self._connect()
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
-            log(f"could not open the live updates: {type(error).__name__}")
+            log(f"could not open the live updates: {clip(f'{type(error).__name__}: {error}')}")
             ws = None
         if ws is None:
             self.state = "closed"

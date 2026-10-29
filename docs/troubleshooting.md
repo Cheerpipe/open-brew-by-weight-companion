@@ -211,6 +211,11 @@ page:
   `La Marzocco refused the account` when the email or password is wrong.
   Correct them in the Web UI; the companion tries again with the new account
   only, so a wrong password is never retried until your account is locked.
+- **Connected, but the cloud refuses its reads** on the companion's page, and
+  `La Marzocco answers 401/403 to reads and commands` in the log, mean the
+  cloud accepted the sign-in but refuses the dashboard and commands: the
+  account no longer has access to the machine. Correct the account in the Web
+  UI as well.
 
 ## Start the pairing over
 

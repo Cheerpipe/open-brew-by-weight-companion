@@ -36,6 +36,7 @@ class Idle:
 
     sub = up = False
     ep = tok = 0
+    refused = False
 
     def __init__(self, store, events):
         pass

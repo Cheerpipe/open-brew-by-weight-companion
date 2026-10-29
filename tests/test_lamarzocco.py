@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import sys
 import tempfile
@@ -157,6 +158,17 @@ class Cloud:
             "content-type": "application/json"}, json.dumps(body)))
 
 
+class Lines(logging.Handler):
+    """Everything the companion logs during the test, message by message."""
+
+    def __init__(self):
+        super().__init__(level=logging.INFO)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
 class Events:
     def __init__(self):
         self.log = []
@@ -182,6 +194,8 @@ class Events:
 
 
 async def main():
+    lines = Lines()
+    logging.getLogger("obbw").addHandler(lines)
     cloud = Cloud()
     app = web.Application()
     root = "/api/customer-app"
@@ -238,6 +252,7 @@ async def main():
             cloud.pong = False
             cloud.subscribed.clear()
             await events.wait(lambda: not lm.sub, timeout=3)
+            assert any("no pong within" in line for line in lines.lines), "a silent WebSocket is named"
             cloud.pong = True
             await asyncio.wait_for(cloud.subscribed.wait(), 3)
             await events.wait(lambda: lm.sub)
@@ -265,8 +280,14 @@ async def main():
             upstreams = events.log.count(("upstream",))
             assert (await lm.read())[:2] == (403, None) and lm.refused
             assert events.log.count(("upstream",)) == upstreams + 1, "the refusal is reported at once"
+            assert any("answers 401/403" in line for line in lines.lines), "a refused data plane is logged"
             cloud.refuse_dashboard = 0
             assert (await lm.read())[1] is not None and not lm.refused
+            assert any("accepts reads and commands again" in line for line in lines.lines)
+            cloud.refuse_dashboard = 500
+            assert (await lm.read())[:2] == (500, None)
+            assert any("dashboard read answered 500" in line for line in lines.lines)
+            cloud.refuse_dashboard = 0
             cloud.command_status = 403
             assert await lm.command(13, "on") == 403 and lm.refused
             cloud.command_status = 200

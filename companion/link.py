@@ -9,7 +9,7 @@ import socket
 
 import aiohttp
 
-from . import PROTOCOL, crypto
+from . import PROTOCOL, clip, crypto
 
 MAX_FRAME = 4096
 STEP_TIMEOUT_S = 10
@@ -23,7 +23,7 @@ class LinkClosed(Exception):
 
     def __init__(self, code, detail=""):
         super().__init__(f"{code} {detail}".strip())
-        self.code = code
+        self.code, self.detail = code, detail
 
 
 class Erased(Exception):
@@ -83,7 +83,7 @@ async def open_link(http, url, hello, secret):
     except aiohttp.WSServerHandshakeError as error:
         raise LinkClosed("NOT_PAIRED" if error.status == 404 else f"HTTP_{error.status}") from None
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
-        raise LinkClosed("UNREACHABLE", type(error).__name__) from None
+        raise LinkClosed("UNREACHABLE", clip(f"{type(error).__name__}: {error}")) from None
     try:
         ws.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, ACK_TIMEOUT_S * 1000)
         nc = os.urandom(16)

@@ -637,6 +637,9 @@ class Mux:
             for screen in screens:
                 screen.close(4003 if screen in recent else 4002)
         elif not deliberate:
+            if code is not None:  # A failed open is already named where it failed.
+                log(f"the shared live updates ended (code {code}, "
+                    f"{'heard' if heard else 'never heard'}); the screens reconnect")
             for screen in screens:
                 screen.close(4002 if code == 4002 else 1001)
         self.attributed.clear()

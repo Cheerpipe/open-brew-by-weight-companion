@@ -69,3 +69,9 @@ def stop_logging():
 
 def log(message):
     logger.info("%s", message)
+
+
+def clip(text, limit=120):
+    """A one-line, trimmed excerpt for log lines: exception messages and error bodies."""
+    line = " ".join(str(text).split())
+    return line[:limit] + "…" if len(line) > limit else line

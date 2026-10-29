@@ -10,13 +10,14 @@ installation, so the controller's key never leaves the controller.
 import asyncio
 import json
 import time
+import traceback
 import uuid
 
 import aiohttp
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from . import crypto, dashboard, log
+from . import clip, crypto, dashboard, log
 from .store import offload
 
 API_ROOT = "https://lion.lamarzocco.io/api/customer-app"
@@ -44,6 +45,11 @@ class AuthRejected(Exception):
 
 class TransportError(Exception):
     pass
+
+
+def _answered(what, status, text=""):
+    """`<what> answered <status>`, with a trimmed excerpt of the body when there is one."""
+    return f"{what} answered {status} {clip(text)}".rstrip()
 
 
 def _uuid(raw):
@@ -201,7 +207,7 @@ class LaMarzocco:
     def _done(self, task):
         self.tasks.discard(task)
         if not task.cancelled() and task.exception():
-            log(f"La Marzocco task failed: {task.exception()!r}")
+            log("La Marzocco task failed:\n" + "".join(traceback.format_exception(task.exception())))
 
     def _set_subscribed(self, subscribed):
         if subscribed:
@@ -215,6 +221,8 @@ class LaMarzocco:
         """Reads or commands answered 401/403: the subscription lives, but the data plane does not."""
         if refused != self.refused:
             self.refused = refused
+            log("La Marzocco answers 401/403 to reads and commands; the subscription still lives"
+                if refused else "La Marzocco accepts reads and commands again")
             self.events.upstream()
 
     async def _run(self):
@@ -266,7 +274,8 @@ class LaMarzocco:
                                          timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)) as reply:
                 return reply.status, await reply.text()
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
-            raise TransportError(f"{method} {path.rsplit('/', 1)[-1]}: {type(error).__name__}") from None
+            why = clip(f"{type(error).__name__}: {error}")
+            raise TransportError(f"{method} {path.rsplit('/', 1)[-1]}: {why}") from None
 
     def _tokens(self, text):
         tokens = dashboard.parse(text)
@@ -278,9 +287,9 @@ class LaMarzocco:
     async def _sign_in(self):
         account = await offload(self.store.credentials) or {}
         if not (await offload(self.store.installation_key))[1]:
-            status, _ = await self._request("POST", "/auth/init", authenticated=False, registration=True)
+            status, text = await self._request("POST", "/auth/init", authenticated=False, registration=True)
             if not 200 <= status < 300:
-                raise TransportError(f"installation registration answered {status}")
+                raise TransportError(_answered("installation registration", status, text))
             await offload(self.store.installation_registered)
             log("registered the companion's La Marzocco installation")
         body = json.dumps({"username": account.get("email"), "password": account.get("password")})
@@ -288,7 +297,7 @@ class LaMarzocco:
         if status in (401, 403):
             raise AuthRejected()
         if status != 200:
-            raise TransportError(f"sign-in answered {status}")
+            raise TransportError(_answered("sign-in", status, text))
         self._tokens(text)
         log("signed in to La Marzocco")
 
@@ -341,17 +350,20 @@ class LaMarzocco:
         except AuthRejected:
             self._reject()
             return 0, None, ac
-        except (TransportError, ValueError):
+        except (TransportError, ValueError) as error:
+            log(f"La Marzocco read failed ({error})")
             return 0, None, ac
         if status in (401, 403):
             self.access = None  # A stale token: the next request signs in again.
             self._refused(True)
         elif status == 200:
             self._refused(False)
+        else:
+            log(_answered("dashboard read", status, text))
         try:
             return status, dashboard.parse(text) if status == 200 else None, ac
-        except ValueError:
-            log("La Marzocco sent a dashboard the controller could not decode; dropped")
+        except ValueError as error:
+            log(f"La Marzocco sent a dashboard the controller could not decode ({clip(error)}); dropped")
             return status, None, ac
 
     async def command(self, command_id, op, value=None):
@@ -367,7 +379,8 @@ class LaMarzocco:
         except AuthRejected:
             self._reject()
             return 0
-        except (TransportError, ValueError):
+        except (TransportError, ValueError) as error:
+            log(f"La Marzocco command failed ({error})")
             return 0
         if status in (401, 403):
             self.access = None
@@ -382,7 +395,7 @@ class LaMarzocco:
         while True:
             status, data, ac = await self.read()
             if data is None:
-                raise TransportError(f"dashboard read answered {status}")
+                raise TransportError("the dashboard read failed")  # read() named the reason.
             if first:
                 self._set_subscribed(True)
             self.alive_at = time.monotonic()
@@ -412,7 +425,8 @@ class LaMarzocco:
                     now = time.monotonic()
                     deadline = self.alive_at + PONG_TIMEOUT_S if self.sub else connected_at + SUBSCRIBE_TIMEOUT_S
                     if now >= deadline:
-                        raise TransportError("La Marzocco stopped answering")
+                        raise TransportError(f"no pong within {PONG_TIMEOUT_S} s" if self.sub
+                                             else f"no CONNECTED frame within {SUBSCRIBE_TIMEOUT_S} s")
                     try:
                         message = await ws.receive(timeout=min(deadline, next_ping) - now)
                     except asyncio.TimeoutError:

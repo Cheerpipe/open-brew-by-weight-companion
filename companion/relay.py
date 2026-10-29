@@ -110,7 +110,9 @@ class Relay:
             await self._prove(url, pairing["secret"], bytes(16))  # Only to learn whether it forgot us.
         elif status != 200 or reply.get("protocol") != PROTOCOL:
             self.reset(True)  # A controller without the relay: everything as before, link included.
-            self._note("the controller has no relay; the Web UI passes straight through, one screen at a time")
+            self._note("the controller has no relay; the Web UI passes straight through, one screen at a time"
+                       if status in (200, 404) else
+                       f"the relay handshake answered HTTP {status}; the Web UI passes straight through")
         else:
             await self._prove(url, pairing["secret"], crypto.unb64(reply.get("challenge"), 16))
 

@@ -196,6 +196,8 @@ class Companion:
         except LinkClosed as error:
             if error.code == "NOT_PAIRED":  # Unsigned, so it could be forged.
                 self.not_recognized()
+            elif error.detail:
+                log(f"the link did not open: {error}")  # run_link names the code; this is the why.
             return error.code
         self.failures = 0
         self.pairing.state = "paired"
@@ -491,7 +493,8 @@ class Companion:
             "link": self.link, "linkReason": self.link_reason or None,
             "route": self.route, "unknownFrames": self.unknown_frames,
             "laMarzocco": {"enabled": self.cfg["lm"], "account": credentials is not None,
-                           "connection": self.cfg["conn"], "subscribed": self.lm.sub, "up": self.lm.up},
+                           "connection": self.cfg["conn"], "subscribed": self.lm.sub, "up": self.lm.up,
+                           "refused": self.lm.refused},
             "relay": self.relay.mode, **self.screens.mux.status(),
         }
 

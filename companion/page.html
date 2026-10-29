@@ -92,6 +92,7 @@
       down: "Not connected", connecting: "Connecting…", open: "Connected", retry: "Reconnecting ({reason})",
       lmOff: "Off. Turn it on in Admin → Companion.", lmWaiting: "Waiting for the account from the controller",
       lmConnecting: "Connecting to La Marzocco…", lmConnected: "Connected",
+      lmRefused: "Connected, but the cloud refuses its reads; correct the account in the Web UI",
       routeCompanion: "the controller uses this connection", routeDirect: "the controller uses its own",
       versionLine: "Companion {v} · {name}", madeBy: "· Made by", none: "Not found yet",
       ui: "Web UI", uiReady: "Through the companion · {screens}", uiPassthrough: "Straight to the controller, one screen at a time",
@@ -123,6 +124,7 @@
       down: "Sin conexión", connecting: "Conectando…", open: "Conectado", retry: "Reconectando ({reason})",
       lmOff: "Apagado. Actívalo en Admin → Companion.", lmWaiting: "Esperando la cuenta desde el controlador",
       lmConnecting: "Conectando con La Marzocco…", lmConnected: "Conectado",
+      lmRefused: "Conectado, pero la nube rechaza sus lecturas; corrige la cuenta en la Web UI",
       routeCompanion: "el controlador usa esta conexión", routeDirect: "el controlador usa la suya",
       versionLine: "Companion {v} · {name}", madeBy: "· Hecho por", none: "Aún no encontrado",
       ui: "Web UI", uiReady: "A través del companion · {screens}", uiPassthrough: "Directo al controlador, una pantalla a la vez",
@@ -177,6 +179,7 @@
       : s.relay === "disabled" ? t.uiDisabled : t.uiPassthrough;
     var lm = s.laMarzocco;
     $("lm").textContent = !s.paired ? "—" : !lm.enabled ? t.lmOff : !lm.account ? t.lmWaiting
+      : lm.refused ? t.lmRefused
       : (lm.up ? t.lmConnected : t.lmConnecting) + " · " + (s.route === "companion" ? t.routeCompanion : t.routeDirect);
     clearTimeout(timer);
     timer = setTimeout(refresh, pending ? 1000 : 5000);
