@@ -76,7 +76,7 @@ class Upstream:
                 if error.status != 401 or attempt:
                     log(f"the controller refused the live updates: HTTP {error.status}")
                     return None
-                relay.key = None  # RELAY_STALE: a new relay session, then once more.
+                relay.key, relay.body_key = None, None  # RELAY_STALE: a new relay session, then once more.
         return None
 
     async def _run(self):

@@ -105,7 +105,7 @@ class Controller:
             return web.json_response({"error": "COMPANION_AUTH"}, status=401)
         self.handshakes += 1
         self.kr = relay_key(self.secret, self.rb, nc)
-        self.kb, self.high, self.mask, self.responses = body_key(self.kr), 0, 0, 0
+        self.kb, self.high, self.mask = body_key(self.kr), 0, 0  # responses never reset: nonces.
         proof = mac(self.secret if self.mode != "bad_proof" else bytes(32), b"Q", self.rb, nc)
         answer = {"mac": b64(proof), "ui": self.ui, "link": self.link}
         self.rb = os.urandom(16)
@@ -169,8 +169,12 @@ class Controller:
         if self.corrupt_body and raw:  # Flip one sealed byte, as a listener on the wire could.
             raw = raw[:-1] + bytes((raw[-1] ^ 1,))
         body = raw
-        if identity is not None and raw:
-            try:  # The relayed body arrived sealed under its request's q.
+        # Firmware update ranges travel as they are; every other relayed body
+        # arrived sealed under its request's q.
+        sealed_body = identity is not None and raw and not (
+            request.method == "PATCH" and request.path == "/api/v1/ota")
+        if sealed_body:
+            try:
                 body = open_(self.kb, b"c", CTX_BODY, identity["q"], raw)
             except InvalidTag:
                 return web.json_response({"error": "RELAY_INVALID"}, status=400)

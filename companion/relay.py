@@ -210,24 +210,32 @@ class Relay:
             value, q, sealed_session = await self.sealed(method, uri, addr, screen, session)
             if value is None:
                 return None
+            # The keys this request was signed and sealed with: another screen's
+            # request may rotate the session while this one is in flight, and the
+            # answer still has to open with the keys that asked.
+            body_key = self.body_key
             headers = self.forwarded(incoming, self.client_id if rewrite else None)
             if sealed_session:
                 headers["X-WebUI-Session"] = sealed_session
             if headers.get("X-Device-Password"):
                 headers["X-Device-Password"] = crypto.b64(
-                    crypto.relay_seal(self.body_key, CTX_PASSWORD, q,
+                    crypto.relay_seal(body_key, CTX_PASSWORD, q,
                                       headers["X-Device-Password"].encode()))
             headers["X-OBBW-Relay"] = value
-            sealed_body = body and crypto.relay_seal(self.body_key, CTX_BODY, q, body)
+            # Firmware update ranges are the one relayed body that travels as it
+            # is: the image is not secret, and the controller pins its integrity
+            # with the session's sha256 (docs/COMPANION_LINK.md).
+            plain = method == "PATCH" and uri.split("?", 1)[0] == "/api/v1/ota"
+            sealed_body = body if plain else body and crypto.relay_seal(body_key, CTX_BODY, q, body)
             reply = await self._send(method, uri, headers, sealed_body)
             if reply.data is not None and reply.status == 401 and attempt == 0 and _error(reply.data) == "RELAY_STALE":
                 reply.release()
                 self.key, self.body_key = None, None
                 continue
-            await self._open(reply)
+            await self._open(reply, body_key)
             return reply
 
-    async def _open(self, reply):
+    async def _open(self, reply, body_key):
         """Open a sealed answer; a seal that does not open is never delivered."""
         counter = reply.headers.get(SEALED_RESPONSE_HEADER)
         if counter is None:
@@ -236,7 +244,7 @@ class Relay:
             await reply.read() if (reply.content_length or 0) <= READ_LIMIT else None)
         reply.release()
         try:
-            reply.data = crypto.relay_open(self.body_key, int(counter), sealed)
+            reply.data = crypto.relay_open(body_key, int(counter), sealed)
         except (InvalidTag, ValueError, TypeError):
             log("the controller's sealed answer did not open; starting a new relay session")
             self.key, self.body_key = None, None  # The next request makes a new session.

@@ -162,6 +162,7 @@ async def main():
             assert fake.requests[-1][4]["addr"] == "0.0.0.0"
 
             # --- Firmware updates: their headers and 64 KiB chunks, the password sealed ---------
+            # The range itself travels as it is (its integrity is the session sha256).
             ota = {"X-OTA-Transfer": "t1", "X-OTA-Offset": "0", "X-OTA-Length": "65536",
                    "Content-Range": "bytes 0-65535/65536", "Content-Type": "application/octet-stream",
                    "X-Device-Password": "pw"}
@@ -169,7 +170,7 @@ async def main():
             assert status == 200 and json.loads(body)["received"] == 65536
             assert all(fake.requests[-1][2][name] == value for name, value in ota.items())
             _, raw_password, raw_body = fake.wire[-1]
-            assert raw_password != "pw" and len(raw_body) == 65536 + 16, "password and range sealed"
+            assert raw_password != "pw" and len(raw_body) == 65536, "password sealed, range plain"
 
             # --- Seals that do not open: refused, never delivered -------------------------------
             fake.corrupt_body = True
