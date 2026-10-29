@@ -78,6 +78,7 @@ companion = FrameCodec(session)
 controller = FrameCodec(session, send=b"f", receive=b"c")
 assert companion.encode({"t": "ping", "up": True}) == V["companionFrame"]
 assert controller.encode({"t": "cfg", "lm": True, "conn": "ws", "observe": True}) == V["controllerFrame"]
+assert FrameCodec(session, send=b"f").encode({"t": "dev", "name": "openbrewbyweight"}) == V["deviceFrame"]
 assert controller.decode(V["companionFrame"]) == {"q": 1, "t": "ping", "up": True}
 assert companion.decode(V["controllerFrame"])["conn"] == "ws"
 second = controller.encode({"t": "route", "to": "companion"})

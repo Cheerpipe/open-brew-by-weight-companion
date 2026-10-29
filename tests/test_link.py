@@ -295,6 +295,7 @@ async def main():
             assert status["controller"]["name"] == "Cafe Bar 2" == status["pairedWith"]
             assert status["unknownFrames"] == 0
             await session.send({"t": "dev", "name": 7})  # Not a name: ignored, not unknown.
+            await session.send({"t": "dev", "name": "bad \ud800 name"})  # Nor is a lone surrogate.
             await asyncio.sleep(0.2)
             assert companion.device_name == "Cafe Bar 2"
             await session.send({"t": "dev", "name": "Bar"})  # A rename reaches the page.
@@ -531,7 +532,7 @@ async def main():
             async with http.post(page_url + "/erase", json={}) as reply:
                 assert reply.status == 200 and (await reply.json())["paired"] is False
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
-            assert companion.pairing.state == "unpaired"
+            assert companion.pairing.state == "unpaired" and companion.device_name is None
             await pages.close()
     await server.close()
     print("Companion link: pairing, handshake, pings, cfg, creds, route, hold, commands, errors and erase OK")

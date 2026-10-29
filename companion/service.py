@@ -344,7 +344,8 @@ class Companion:
 
     def _device_name(self, name):
         """The controller names itself when the link opens and again after a rename."""
-        if isinstance(name, str) and 0 < len(name.encode()) <= 32 and name.isprintable():
+        # isprintable() first: it is False for lone surrogates, whose encode() would raise.
+        if isinstance(name, str) and name.isprintable() and 0 < len(name.encode()) <= 32:
             if name != self.device_name:
                 log(f"the controller is named '{name}'")
                 self.device_name = name
