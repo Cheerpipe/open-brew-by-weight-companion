@@ -66,6 +66,7 @@
         <option value="c"></option><option value="e"></option><option value="w"></option>
         <option value="i" selected></option><option value="d"></option>
       </select>
+      <small id="log-level-hint" class="muted"></small>
       <a id="log-export" download></a>
     </p>
     <pre id="log-view" style="max-height:24rem;overflow:auto;margin:0;font-size:.85em"></pre>
@@ -115,8 +116,9 @@
       logTitle: "Diagnostic log", logEmpty: "Nothing stored yet",
       logStats: "{n} events · {mb} MB · kept {days} days",
       logMore: "Show older", logExport: "Export everything",
-      logLevelC: "Critical and noisier", logLevelE: "Error and noisier", logLevelW: "Warning and noisier",
-      logLevelI: "Info and noisier", logLevelD: "Everything",
+      logLevelC: "Critical", logLevelE: "Error", logLevelW: "Warning",
+      logLevelI: "Info", logLevelD: "Debug",
+      logLevelHint: "This severity and above",
       logGap: "· {n} events could not be copied ·", logBoot: "· restart (boot {b}) ·",
       logReset: "· the log was cleared on the controller ·",
       logOff: "The controller keeps its log to itself (off in Admin → Companion)"
@@ -155,8 +157,9 @@
       logTitle: "Registro de diagnóstico", logEmpty: "Aún no hay nada guardado",
       logStats: "{n} eventos · {mb} MB · se conservan {days} días",
       logMore: "Mostrar anteriores", logExport: "Exportar todo",
-      logLevelC: "Crítico y superior", logLevelE: "Error y superior", logLevelW: "Aviso y superior",
-      logLevelI: "Información y superior", logLevelD: "Todo",
+      logLevelC: "Crítico", logLevelE: "Error", logLevelW: "Aviso",
+      logLevelI: "Información", logLevelD: "Debug",
+      logLevelHint: "Esta severidad y superiores",
       logGap: "· {n} eventos no pudieron copiarse ·", logBoot: "· reinicio (arranque {b}) ·",
       logReset: "· el registro se borró en el controlador ·",
       logOff: "El controlador se queda su registro (desactivado en Admin → Companion)"
@@ -246,6 +249,7 @@
   $("log-level").options[2].text = t.logLevelW;
   $("log-level").options[3].text = t.logLevelI;
   $("log-level").options[4].text = t.logLevelD;
+  $("log-level-hint").textContent = " · " + t.logLevelHint;
   $("log-level").addEventListener("change", renderLog);
   function logLine(entry) {
     if (entry.g === "boot") return fill(t.logBoot, { b: entry.boot });
