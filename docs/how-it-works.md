@@ -286,11 +286,11 @@ while the controller has set the route to the companion:
   only, the backflush status. An event that carries none of them is
   dropped; one that does is sent even when nothing changed.
 - **`full`** when the route starts and after every new La Marzocco
-  subscription; **`push`** for each WebSocket push, at once, also during a
-  shot; **`read`** for its own reads (after a token renewal, a `refresh`
-  command, API polling, or to check a command no push confirmed within 5
-  seconds). While the controller reports a shot with a scale, reads wait and
-  the last one is sent when the shot ends.
+  subscription; **`push`** for each WebSocket push; **`read`** for its own
+  reads (after a token renewal, a `refresh` command, API polling, or to check
+  a command no push confirmed within 5 seconds). While the controller reports
+  a shot with a scale, pushes and reads wait out the shot: only the latest of
+  each goes, in the order observed, once it ends.
 - `full` and `read` frames carry the id of the last command sent to La
   Marzocco before the observation was taken, so an older observation never
   undoes a newer power command. Pushes do not need it: the controller

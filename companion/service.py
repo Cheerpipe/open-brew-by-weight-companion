@@ -442,7 +442,7 @@ class Companion:
     # --- Machine state -----------------------------------------------------------
     def _forward(self, kind, data, ac, ep=None):
         """Send one observation while the route is the companion's; a hold keeps
-        the latest push and read, so the controller's scale hears nothing but pings."""
+        the latest push and read back until it ends."""
         if self.route != "companion" or self.outbox is None:
             return False
         reduced = dashboard.reduce(data, push=kind == "push")

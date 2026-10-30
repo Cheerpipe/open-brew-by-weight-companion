@@ -393,6 +393,17 @@ async def main():
             await session.send({"t": "hold", "on": False})
             await session.quiet(0.3)
 
+            # A route back to direct while a hold stands: what it held is discarded.
+            await session.send({"t": "hold", "on": True})
+            await eventually(lambda: companion.hold)
+            upstream.events.pushed(D["pushes"]["standby"], 0)
+            await session.quiet(0.2)
+            await session.send({"t": "route", "to": "direct"})
+            await session.send({"t": "hold", "on": False})
+            await session.quiet(0.3)
+            await session.send({"t": "route", "to": "companion"})
+            assert (await session.next("st"))["k"] == "full"
+
             # --- Commands --------------------------------------------------------
             reads = upstream.reads
             await session.send({"t": "cmd", "id": 7, "op": "temp", "v": 935})
