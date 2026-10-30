@@ -136,7 +136,10 @@ only answers requests addressed to itself. The API (`/api/`) and the live
 updates (`/api/v1/ui/ui-stream`) go to the companion service instead, with
 the browser's address in `X-Real-IP`, unbuffered, so live readings flow
 without delay; it relays them for every screen (see
-[Screens and the relay](#screens-and-the-relay)). Firmware updates from the
+[Screens and the relay](#screens-and-the-relay)). Larger JSON answers, such
+as the shot list, curves and statistics, leave compressed (`gzip`) for every
+screen that accepts it; files the controller already sends compressed and
+firmware update bytes are passed through untouched. Firmware updates from the
 Web UI work through the companion as well: their 64 KiB chunks go through
 it, signed like any other request. The companion's own controller routes
 (`/api/v1/companion/…`) answer `404` through the secure address, except

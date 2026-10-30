@@ -109,6 +109,22 @@ class Companion(http.server.BaseHTTPRequestHandler):
             self.send_header("Sec-WebSocket-Accept", accept.decode())
             self.end_headers()
             self.close_connection = True
+        elif self.path == "/api/v1/history":
+            body = b'{"shots":[' + b",".join(b'{"id":%d,"doseG":360,"timeMs":28000}' % i
+                                             for i in range(80)) + b"]}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/v1/ota/image":
+            body = b"\0" * 4096
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             body = b"notice" if self.path == "/__companion/ui-off" else b'{"ok":true}'
             self.send_response(200)
@@ -198,6 +214,18 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
             assert status == 200 and "x-gateway-cache" not in headers
         api = [request for request in state["companion"] if request[1] == "/api/v1/status"]
         assert len(api) == 2 and api[0][2]["X-Real-IP"] == "127.0.0.1" and not upstream("/api/v1/status")
+
+        # Dynamic JSON answers leave compressed for screens that accept it; a
+        # screen that does not, and firmware update bytes, stay untouched.
+        history = b'{"shots":[' + b",".join(b'{"id":%d,"doseG":360,"timeMs":28000}' % i
+                                            for i in range(80)) + b"]}"
+        status, headers, body = get("/api/v1/history")
+        assert status == 200 and headers["content-encoding"] == "gzip" and gzip.decompress(body) == history
+        assert headers["vary"] == "Accept-Encoding" and len(body) < len(history) / 4
+        status, headers, body = get("/api/v1/history", **{"Accept-Encoding": "identity"})
+        assert status == 200 and "content-encoding" not in headers and body == history
+        status, headers, body = get("/api/v1/ota/image")
+        assert status == 200 and "content-encoding" not in headers and body == b"\0" * 4096
         assert get("/api/v1/companion/pair")[0] == 404 and get("/api/v1/companion/relay")[0] == 404
         assert get("/api/v1/companion/admin")[0] == 200, "Admin → Companion's actions are relayed"
         assert not [request for request in state["companion"] if request[1].startswith("/api/v1/companion/p")]
