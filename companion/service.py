@@ -55,7 +55,7 @@ class Companion:
         self.pairing = Pairing(self)
         self.link, self.link_reason, self.failures = "down", "", 0
         self.ws = self.outbox = None
-        self.route, self.hold, self.held = "direct", False, None
+        self.route, self.hold, self.held = "direct", False, []
         self.ping_now = asyncio.Event()
         self.heard_at = 0.0  # time.monotonic() of the last controller frame.
         self.unknown_frames, self.unknown_kinds = 0, set()
@@ -217,7 +217,7 @@ class Companion:
     async def _session(self, ws, codec):
         self.ws, self.outbox = ws, asyncio.Queue()
         self.link, self.link_reason = "open", ""
-        self.hold, self.held, self.full_ep, self.reported = False, None, None, None
+        self.hold, self.held, self.full_ep, self.reported = False, [], None, None
         self.unknown_frames = 0
         self.unknown_kinds.clear()
         self.heard_at = 0.0
@@ -243,7 +243,7 @@ class Companion:
             pinger.cancel()
             self.ws = self.outbox = None
             self._set_route("direct")
-            self.hold, self.held = False, None
+            self.hold, self.held = False, []
             await ws.close()
 
     @staticmethod
@@ -343,13 +343,16 @@ class Companion:
         if route == "companion":
             self.full_ep = None
             self._start_full()
+        else:
+            self.held = []  # Nothing forwards on the direct route.
 
     def _set_hold(self, on):
         self.hold = on
         if not on and self.held:
-            held, self.held = self.held, None
-            if held["ep"] == self.lm.ep:  # A read from an older subscription says nothing new.
-                self.post(held)
+            held, self.held = self.held, []
+            for frame in held:  # In the order each was last observed.
+                if frame["ep"] == self.lm.ep:  # An older subscription says nothing new.
+                    self.post(frame)
 
     def _device_name(self, name):
         """The controller names itself when the link opens and again after a rename."""
@@ -438,7 +441,8 @@ class Companion:
 
     # --- Machine state -----------------------------------------------------------
     def _forward(self, kind, data, ac, ep=None):
-        """Send one observation while the route is the companion's; reads wait out a hold."""
+        """Send one observation while the route is the companion's; a hold keeps
+        the latest push and read, so the controller's scale hears nothing but pings."""
         if self.route != "companion" or self.outbox is None:
             return False
         reduced = dashboard.reduce(data, push=kind == "push")
@@ -447,8 +451,8 @@ class Companion:
         frame = {"t": "st", "k": kind, "ep": self.lm.ep if ep is None else ep, "d": reduced}
         if kind != "push":  # Pushes take their order from when the controller receives them.
             frame["ac"] = ac
-        if kind == "read" and self.hold:
-            self.held = frame
+        if kind != "full" and self.hold:  # The latest of each kind, in observation order.
+            self.held = [held for held in self.held if held["k"] != kind] + [frame]
             return True
         return self.post(frame)
 

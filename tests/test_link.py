@@ -364,18 +364,33 @@ async def main():
             assert push["k"] == "push" and push["d"]["widgets"][0]["code"] == "CMBackFlush"
             assert "ac" not in push, "pushes take their order from when the controller receives them"
 
-            # --- Hold: pushes go at once, reads wait and go once -------------------
+            # --- Hold: the latest push and read wait, and go once in order --------
             await session.send({"t": "hold", "on": True})
             await eventually(lambda: companion.hold)
             upstream.events.renewed()
             assert (await session.next("lm"))["tok"] == 3000
             upstream.events.pushed(D["pushes"]["standby"], 0)
-            assert (await session.next("st"))["k"] == "push"
+            await session.quiet(0.3)
             upstream.events.polled(D["read"], 0, False)
+            upstream.events.pushed(D["pushes"]["backflush"], 0)  # A later push supersedes the held one.
             await session.quiet(0.3)
             await session.send({"t": "hold", "on": False})
             held = await session.next("st")
             assert held["k"] == "read" and held["d"]["widgets"][0]["code"] == "CMMachineStatus"
+            held = await session.next("st")
+            assert held["k"] == "push" and held["d"]["widgets"][0]["code"] == "CMBackFlush"
+            await session.quiet(0.3)
+
+            # A new subscription mid-hold: its full frame goes at once, the held push never does.
+            await session.send({"t": "hold", "on": True})
+            await eventually(lambda: companion.hold)
+            upstream.events.pushed(D["pushes"]["standby"], 0)
+            await session.quiet(0.2)
+            upstream.subscribe()
+            await session.next("lm")
+            full = await session.next("st")
+            assert full["k"] == "full" and full["ep"] == 2
+            await session.send({"t": "hold", "on": False})
             await session.quiet(0.3)
 
             # --- Commands --------------------------------------------------------
@@ -404,7 +419,7 @@ async def main():
 
             # --- A new La Marzocco subscription epoch sends `full` again ---------
             upstream.subscribe()
-            assert (await session.next("lm"))["ep"] == 2
+            assert (await session.next("lm"))["ep"] == 3
             assert (await session.next("st"))["k"] == "full"
 
             # --- A loop stall is named before the ping it delayed ----------------
