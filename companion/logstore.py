@@ -157,7 +157,7 @@ class LogStore:
                 entries.append(marker)
             if row["sequence"] == 1 and row["boot_id"] in cleared:
                 entries.append({"g": "reset"})
-            entries.append(_entry(row))
+            entries.append({"b": row["boot_id"], **_entry(row)})
             emitted = True
             previous = (row["boot_id"], row["sequence"])
         following = (rows[-1]["boot_id"], rows[-1]["sequence"]) if rows else None
