@@ -266,6 +266,7 @@
   function logPage() {
     var url = "/__companion/log?limit=100" + (logNext ? "&boot=" + logNext.boot + "&before=" + logNext.before : "");
     fetch(url, { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (page) {
+      if (!page || !Array.isArray(page.entries)) return;  // A closed store answers an error.
       logEntries = logEntries.concat(page.entries);
       logNext = page.next;
       $("log-more").hidden = !page.next;

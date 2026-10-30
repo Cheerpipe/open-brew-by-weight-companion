@@ -391,10 +391,15 @@ class Companion:
     def _log_device(self):
         return self.device_id or "controller"
 
+    def _log_usable(self):
+        """A store that opened: a companion whose log store failed keeps every
+        other feature (the relay, La Marzocco) and simply stores no history."""
+        return self.logs.connection is not None
+
     async def _log_configure(self, on):
         """cfg's log switch: subscribe once per session with the store's cursor."""
         self.log_on = on
-        if not on or self.log_subscribed or self.outbox is None:
+        if not on or self.log_subscribed or self.outbox is None or not self._log_usable():
             return
         self.log_subscribed = True
         cursor = await self.logs.cursor(self._log_device())
@@ -403,6 +408,8 @@ class Companion:
 
     async def _on_log(self, frame):
         """One page of the controller's log: store it, naming any gap or reset."""
+        if not self._log_usable():
+            return  # The store never opened; its failure is logged once.
         boot, events = frame.get("b"), frame.get("e")
         if type(boot) is not int or boot < 0 or not isinstance(events, list) or not events:
             raise LinkClosed("PROTOCOL", "log frame without a boot or events")
@@ -676,9 +683,11 @@ def web_app(companion):
         device = companion._log_device()
         if companion.logs.connection is None:
             return web.json_response({"error": "STORE", "message": "not open"}, status=503)
+        # Colons are not welcome in every filesystem: the id keeps its shape.
         answer = web.StreamResponse(headers={"Content-Type": "application/json",
                                              "Content-Disposition":
-                                                 f'attachment; filename="obbw-log-{device}.json"',
+                                                 'attachment; filename="obbw-log-{}.json"'.format(
+                                                     device.replace(":", "-")),
                                              "Cache-Control": "no-store"})
         await answer.prepare(request)
         await answer.write(b'{"device":')
@@ -731,13 +740,14 @@ class Handle:
 async def _retention(companion):
     """Prune the log store on start and daily: by age, then to the size budget."""
     while True:
-        try:
-            days, megabytes = companion.retention
-            deleted = await companion.logs.prune(days, megabytes)
-            if deleted:
-                log(f"log retention pruned {deleted} event(s)")
-        except sqlite3.Error as error:
-            log(f"log retention failed ({error})")
+        if companion.logs.connection is not None:
+            try:
+                days, megabytes = companion.retention
+                deleted = await companion.logs.prune(days, megabytes)
+                if deleted:
+                    log(f"log retention pruned {deleted} event(s)")
+            except sqlite3.Error as error:
+                log(f"log retention failed ({error})")
         await asyncio.sleep(RETENTION_S)
 
 
@@ -749,7 +759,12 @@ async def _serve(cfg, data, socket_path, handle, ready):
                               lambda store, events: LaMarzocco(store, cloud, events))
         companion.retention = (cfg.get("log_retention_days", RETENTION_DAYS_DEFAULT),
                                cfg.get("log_retention_mb", RETENTION_MB_DEFAULT))
-        await companion.logs.open()
+        try:
+            await companion.logs.open()
+        except (sqlite3.Error, OSError) as error:
+            # A store that cannot open disables only the log history: the
+            # relay, the screens and La Marzocco keep working.
+            log(f"the log store could not open ({error}); the log history is disabled")
         runner = web.AppRunner(web_app(companion), access_log=None)
         await runner.setup()
         socket_path.unlink(missing_ok=True)
