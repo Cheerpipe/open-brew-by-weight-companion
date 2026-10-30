@@ -112,7 +112,18 @@ def load_config(env):
         "controller": controller,
         "controller_name": (env.get("OBBW_CONTROLLER_NAME") or "").strip().lower(),
         "mdns_publish": enabled(setting(env, "MDNS_PUBLISH") or "true"),
+        "log_retention_days": _bounded(env.get("COMPANION_LOG_RETENTION_DAYS"), 1, 3650, 30),
+        "log_retention_mb": _bounded(env.get("COMPANION_LOG_RETENTION_MB"), 1, 10240, 50),
     }
+
+
+def _bounded(value, low, high, default):
+    """A positive whole setting within bounds, or the default."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(parsed, low), high)
 
 
 def static_controller(cfg):

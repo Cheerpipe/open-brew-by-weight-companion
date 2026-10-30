@@ -226,6 +226,8 @@ hand, edit `.env`, leave a value empty to use its default, and run
 | `OBBW_CONTROLLER_URL` | empty | Empty finds the controller by itself. `http://<ip>` or `http://<name>.local` uses that one controller only. |
 | `OBBW_CONTROLLER_NAME` | empty | With more than one controller, the device name to use, as shown in the Web UI. |
 | `COMPANION_DATA` | `./data` | Folder that keeps the companion's certificate authority, pairing and keys. |
+| `COMPANION_LOG_RETENTION_DAYS` | `30` | How long the controller's diagnostic log history is kept. |
+| `COMPANION_LOG_RETENTION_MB` | `50` | Size budget for the stored diagnostic log; the oldest events go first. |
 
 See [examples](examples/README.md) for setups done by hand: a server on
 Wi-Fi, a fixed controller address, several controllers, your own DNS, and
@@ -320,7 +322,7 @@ controller (`tests/fake_controller.py` for the relay and the screens) and a
 fake La Marzocco cloud:
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
+docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
 ```
 
 `./setup`'s test runs the script against a fake Docker (about 20 seconds,

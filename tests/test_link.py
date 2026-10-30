@@ -35,7 +35,7 @@ D = json.loads((ROOT / "tests/fixtures/lamarzocco-dashboard.json").read_text())
 ACCOUNT = {"email": "barista@example.com", "password": "correct horse", "serial": "MR012345"}
 COMPANION_KEY, CONTROLLER_KEY = crypto.unb64(V["companionKey"]), crypto.unb64(V["controllerKey"])
 SECRET = bytes.fromhex(V["pairingSecret"])
-TO_CONTROLLER = {"ping", "lm", "creds", "st", "res"}
+TO_CONTROLLER = {"ping", "lm", "creds", "st", "res", "logsub"}
 
 service.BACKOFF_S = (0.2,) * 5
 service.RETRY_LATER_S = 0.2
@@ -236,6 +236,15 @@ async def eventually(predicate, timeout=3):
     raise AssertionError("condition not reached")
 
 
+async def settles(read, want, timeout=3):
+    """Poll an async read (the store's cursor) until it equals `want`."""
+    for _ in range(int(timeout / 0.02)):
+        if await read() == want:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"{want!r} not reached")
+
+
 def encrypt(generation, account):
     iv = os.urandom(12)
     ct = AESGCM(crypto.credentials_key(SECRET)).encrypt(iv, json.dumps(account).encode(),
@@ -263,6 +272,7 @@ async def main():
             seed = service.Store(data)
             seed.write("identity", {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "key": V["companionPrivate"]})
             companion = Companion("Kitchen server", data, http, Upstream)
+            await companion.logs.open()  # _serve opens it; the test builds the service by hand.
             upstream = companion.lm
             pages = TestServer(web_app(companion), host="127.0.0.1")
             await pages.start_server()
@@ -532,6 +542,66 @@ async def main():
             assert (secrets / "lamarzocco.json").exists() and upstream.account is None
             await session.send(encrypt(6, ACCOUNT))
             assert (await session.next("creds", skip=("ping", "lm")))["ok"] is True
+
+            # --- Diagnostic log: subscribe, pages, gaps, resume, reset ------------
+            # The switch arrives in cfg before the id names the controller, so the
+            # first rows land under the fallback key and the id adopts them.
+            await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
+            sub = await session.next("logsub", skip=("ping", "lm"))
+            assert sub["on"] is True and sub["boot"] == 0 and sub["after"] == 0
+            await session.send({"t": "log", "b": 7, "e": [
+                [1, 100, 1789000000, "i", "state", "Open Brew by Weight 1.1.0 (bootId=7)"],
+                [2, 200, 1789000000, "w", "scale", "the scale link was lost"]]})
+            await settles(lambda: companion.logs.cursor("controller"), (7, 2))
+            await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
+            await eventually(lambda: companion.device_id == "AA:BB:CC:DD:EE:FF")
+            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 2))
+            assert await companion.logs.cursor("controller") is None, "the id adopted the rows"
+            # One more page, then the paged history: newest first, older on demand.
+            await session.send({"t": "log", "b": 7, "e": [[3, 300, 1789000001, "i", "state", "shot done"]]})
+            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 3))
+            async with http.get(page_url + "/log?limit=2") as reply:
+                assert reply.status == 200
+                page = await reply.json()
+            assert page["device"] == "AA:BB:CC:DD:EE:FF"
+            assert [entry.get("s") for entry in page["entries"]] == [3, 2]
+            assert page["next"] == {"boot": 7, "before": 2} and page["hasMore"] is True
+            async with http.get(page_url + "/log?boot=7&before=2&limit=10") as reply:
+                page = await reply.json()
+            assert [entry.get("s") for entry in page["entries"]] == [1] and page["next"] is None
+            # A gap names itself between the events it separates.
+            await session.send({"t": "log", "b": 7, "miss": 4, "e": [
+                [8, 900, 1789000010, "e", "network", "the Web UI socket was lost"]]})
+            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 8))
+            async with http.get(page_url + "/log?limit=3") as reply:
+                page = await reply.json()
+            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [8, "gap", 3, 2]
+            assert page["entries"][1]["count"] == 4 and page["entries"][1]["after"] == 3
+            status = await companion.status()
+            assert status["log"]["enabled"] and status["log"]["rows"] == 4 and status["log"]["missed"] == 4
+            # A reconnect resumes from the stored cursor.
+            await session.ws.close()
+            session = await asyncio.wait_for(fake.sessions.get(), 3)
+            await eventually(lambda: companion.link == "open")
+            await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
+            sub = await session.next("logsub", skip=("ping", "lm"))
+            assert sub["boot"] == 7 and sub["after"] == 8
+            # A cleared ring replaces that boot's rows, and the export shows it.
+            await session.send({"t": "log", "b": 7, "reset": True, "e": [
+                [1, 5000, 1789000020, "i", "state", "the log was cleared"]]})
+            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 1))
+            async with http.get(page_url + "/log?limit=10") as reply:
+                page = await reply.json()
+            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == ["reset", 1]
+            async with http.get(page_url + "/log/export") as reply:
+                assert reply.headers["Content-Disposition"].startswith("attachment")
+                exported = await reply.json()
+            assert exported["device"] == "AA:BB:CC:DD:EE:FF"
+            assert [row["s"] for row in exported["events"]] == [1]
+            # The switch off stops the subscription; the store keeps what it has.
+            await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": False})
+            await eventually(lambda: companion.log_on is False)
+            assert (await companion.status())["log"]["rows"] == 1
 
             # --- Not recognized: La Marzocco stops, every secret stays ----------------
             service.BACKOFF_S = (0.2,) * 5

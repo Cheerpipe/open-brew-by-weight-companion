@@ -57,6 +57,20 @@
     </dl>
     <p id="mismatch" class="status warn" hidden></p>
   </section>
+
+  <section class="card">
+    <h2 id="log-title"></h2>
+    <p id="log-stats" class="muted"></p>
+    <p>
+      <select id="log-level">
+        <option value="c"></option><option value="e"></option><option value="w"></option>
+        <option value="i" selected></option><option value="d"></option>
+      </select>
+      <a id="log-export" download></a>
+    </p>
+    <pre id="log-view" style="max-height:24rem;overflow:auto;margin:0;font-size:.85em"></pre>
+    <button id="log-more" type="button" hidden></button>
+  </section>
 </main>
 <footer>
   <div id="version"></div>
@@ -97,7 +111,15 @@
       versionLine: "Companion {v} · {name}", madeBy: "· Made by", none: "Not found yet",
       ui: "Web UI", uiReady: "Through the companion · {screens}", uiPassthrough: "Straight to the controller, one screen at a time",
       uiDisabled: "Directly on the controller (off in Admin → Companion)",
-      screens0: "no screen open", screens1: "1 screen open", screensN: "{n} screens open"
+      screens0: "no screen open", screens1: "1 screen open", screensN: "{n} screens open",
+      logTitle: "Diagnostic log", logEmpty: "Nothing stored yet",
+      logStats: "{n} events · {mb} MB · kept {days} days",
+      logMore: "Show older", logExport: "Export everything",
+      logLevelC: "Critical and noisier", logLevelE: "Error and noisier", logLevelW: "Warning and noisier",
+      logLevelI: "Info and noisier", logLevelD: "Everything",
+      logGap: "· {n} events could not be copied ·", logBoot: "· restart (boot {b}) ·",
+      logReset: "· the log was cleared on the controller ·",
+      logOff: "The controller keeps its log to itself (off in Admin → Companion)"
     },
     es: {
       title: "Companion", pairingTitle: "Vinculación", statusTitle: "Estado", controller: "Controlador",
@@ -129,7 +151,15 @@
       versionLine: "Companion {v} · {name}", madeBy: "· Hecho por", none: "Aún no encontrado",
       ui: "Web UI", uiReady: "A través del companion · {screens}", uiPassthrough: "Directo al controlador, una pantalla a la vez",
       uiDisabled: "Directamente en el controlador (desactivada en Admin → Companion)",
-      screens0: "ninguna pantalla abierta", screens1: "1 pantalla abierta", screensN: "{n} pantallas abiertas"
+      screens0: "ninguna pantalla abierta", screens1: "1 pantalla abierta", screensN: "{n} pantallas abiertas",
+      logTitle: "Registro de diagnóstico", logEmpty: "Aún no hay nada guardado",
+      logStats: "{n} eventos · {mb} MB · se conservan {days} días",
+      logMore: "Mostrar anteriores", logExport: "Exportar todo",
+      logLevelC: "Crítico y superior", logLevelE: "Error y superior", logLevelW: "Aviso y superior",
+      logLevelI: "Información y superior", logLevelD: "Todo",
+      logGap: "· {n} eventos no pudieron copiarse ·", logBoot: "· reinicio (arranque {b}) ·",
+      logReset: "· el registro se borró en el controlador ·",
+      logOff: "El controlador se queda su registro (desactivado en Admin → Companion)"
     }
   };
   var lang = /^es/i.test(navigator.language || "") ? "es" : "en", t = T[lang];
@@ -181,6 +211,7 @@
     $("lm").textContent = !s.paired ? "—" : !lm.enabled ? t.lmOff : !lm.account ? t.lmWaiting
       : lm.refused ? t.lmRefused
       : (lm.up ? t.lmConnected : t.lmConnecting) + " · " + (s.route === "companion" ? t.routeCompanion : t.routeDirect);
+    renderLogStats(s);
     clearTimeout(timer);
     timer = setTimeout(refresh, pending ? 1000 : 5000);
   }
@@ -202,6 +233,60 @@
     fetch("/__companion/erase", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
       .then(refresh, refresh);
   });
+
+  // The stored diagnostic log: read from this companion's own store, so it
+  // shows and exports with the controller down. Newest first, older pages on
+  // demand; gaps and restarts name themselves between the events.
+  var LEVELS = { c: 0, e: 1, w: 2, i: 3, d: 4 }, logEntries = [], logNext = null;
+  $("log-title").textContent = t.logTitle;
+  $("log-more").textContent = t.logMore;
+  $("log-export").textContent = t.logExport;
+  $("log-level").options[0].text = t.logLevelC;
+  $("log-level").options[1].text = t.logLevelE;
+  $("log-level").options[2].text = t.logLevelW;
+  $("log-level").options[3].text = t.logLevelI;
+  $("log-level").options[4].text = t.logLevelD;
+  $("log-level").addEventListener("change", renderLog);
+  function logLine(entry) {
+    if (entry.g === "boot") return fill(t.logBoot, { b: entry.boot });
+    if (entry.g === "gap") return fill(t.logGap, { n: entry.count });
+    if (entry.g === "reset") return t.logReset;
+    var when = entry.w ? new Date(entry.w * 1000).toLocaleString() : "+" + (entry.ms / 1000).toFixed(3) + "s";
+    return when + " " + entry.l.toUpperCase() + " [" + entry.c + "] " + entry.m;
+  }
+  function renderLog() {
+    var ceiling = LEVELS[$("log-level").value], lines = [];
+    for (var i = 0; i < logEntries.length; i++) {
+      var entry = logEntries[i];
+      if (!entry.g && LEVELS[entry.l] > ceiling) continue;
+      lines.push(logLine(entry));
+    }
+    $("log-view").textContent = lines.length ? lines.join("\n") : t.logEmpty;
+  }
+  function logPage() {
+    var url = "/__companion/log?limit=100" + (logNext ? "&boot=" + logNext.boot + "&before=" + logNext.before : "");
+    fetch(url, { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (page) {
+      logEntries = logEntries.concat(page.entries);
+      logNext = page.next;
+      $("log-more").hidden = !page.next;
+      renderLog();
+    }, function () {});
+  }
+  $("log-more").addEventListener("click", logPage);
+  function renderLogStats(s) {
+    var log = s.log || {};
+    if (log.error) { $("log-stats").textContent = "—"; return; }
+    if (!s.paired || !log.enabled) {
+      $("log-stats").textContent = s.paired ? t.logOff : "";
+      $("log-more").hidden = true;
+      return;
+    }
+    $("log-stats").textContent = log.rows ? fill(t.logStats, {
+      n: log.rows, mb: (log.bytes / 1048576).toFixed(1), days: log.days || 30
+    }) : t.logEmpty;
+    $("log-export").href = "/__companion/log/export";
+    if (!logEntries.length) logPage();
+  }
   refresh();
 })();
 </script>
