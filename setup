@@ -177,8 +177,9 @@ build() {
 	COMPANION_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
 	[[ -z $COMPANION_COMMIT ]] || git diff --quiet HEAD -- 2>/dev/null || COMPANION_COMMIT+=-dirty
 	export COMPANION_COMMIT
-	if ! out=$(docker compose build 2>&1); then
-		printf '%s\n' "$out" | tail -n 5
+	# Plain progress: apk's own error lines are the ones that say why.
+	if ! out=$(docker compose build --progress plain 2>&1); then
+		printf '%s\n' "$out" | tail -n 20
 		die "Docker could not build the companion image; the lines above say why."
 	fi
 	step_done "Image ready"

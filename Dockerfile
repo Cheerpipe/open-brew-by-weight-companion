@@ -1,7 +1,9 @@
-FROM nginx:1.28-alpine
+FROM alpine:3.24
 
-# Alpine's own packages only: nothing is installed with pip, so the tests run offline.
-RUN apk add --no-cache python3 py3-zeroconf py3-aiohttp py3-cryptography py3-sqlite3 ca-certificates openssl libqrencode-tools tzdata
+# Alpine 3.24's own packages only: nothing is installed with pip, so the tests
+# run offline. nginx comes from the branch's package (the supervisor renders
+# the whole config itself), and Python's sqlite3 module is built into python3.
+RUN apk add --no-cache nginx python3 py3-zeroconf py3-aiohttp py3-cryptography ca-certificates openssl libqrencode-tools tzdata
 
 # The commit the image is built from, for the version shown on the companion's pages.
 ARG COMPANION_COMMIT=

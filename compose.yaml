@@ -5,6 +5,9 @@ services:
   companion:
     build:
       context: .
+      # Always from the current alpine:3.24: a cached older base is how a
+      # package that no longer exists reached a server's build.
+      pull: true
       args:
         COMPANION_COMMIT: ${COMPANION_COMMIT:-}
     image: openbrewbyweight-companion:local
