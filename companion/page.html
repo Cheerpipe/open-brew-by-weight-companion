@@ -33,7 +33,7 @@
   <p class="muted" id="brand">Open Brew by Weight Companion</p>
   <nav class="menu">
     <a id="m-webui" href="/" target="_blank" rel="noopener">Web UI</a>
-    <a id="m-access" href="/"></a>
+    <a id="m-access" href="/">Secure access</a>
     <a id="m-companion" href="/__companion/" aria-current="page">Companion</a>
   </nav>
   <h1 id="title">Companion</h1>
@@ -122,51 +122,9 @@
       logGap: "· {n} events could not be copied ·", logBoot: "· restart (boot {b}) ·",
       logReset: "· the log was cleared on the controller ·",
       logOff: "The controller keeps its log to itself (off in Admin → Companion)"
-    },
-    es: {
-      title: "Companion", pairingTitle: "Vinculación", statusTitle: "Estado", controller: "Controlador",
-      link: "Enlace", lm: "La Marzocco", pair: "Vincular con el controlador", pairAgain: "Vincular de nuevo",
-      searching: "Buscando el controlador en tu red…",
-      unpaired: "Aún no está vinculado. Al vincularlo, varios teléfonos, tablets y computadores pueden usar la Web UI a través de este companion al mismo tiempo, y el controlador le entrega su conexión con la nube de La Marzocco, así que tiene menos trabajo.",
-      requesting: "Consultando al controlador…",
-      pending: "Esperando tu aprobación. En la Web UI, abre Admin → Companion y escribe este código:",
-      pendingNoCode: "Esperando que el controlador prepare la solicitud…",
-      expires: "La solicitud vence en {m} min.",
-      paired: "Vinculado con {name}.",
-      denied: "El controlador rechazó la solicitud.",
-      expired: "La solicitud venció antes de ser aprobada.",
-      ignored: "El controlador ignora este companion. Elige Dejar de ignorar en Admin → Companion y vuelve a vincularlo.",
-      already_paired: "El controlador ya está vinculado con un companion. Primero olvídalo en Admin → Companion.",
-      busy: "Otro companion está pidiendo vincularse ahora. Inténtalo en unos minutos.",
-      rate_limited: "El controlador recibió otra solicitud hace un momento. Inténtalo en unos segundos.",
-      unreachable: "El controlador no respondió. ¿Está encendido?",
-      not_recognized: "El controlador ya no reconoce este companion, por ejemplo tras un restablecimiento de fábrica, así que el companion dejó de usar tu cuenta de La Marzocco. La sigue guardando hasta que lo vuelvas a vincular o borres esta vinculación.",
-      erase: "Borrar esta vinculación", eraseConfirm: "¿Borrar de este companion esta vinculación, la cuenta de La Marzocco y su instalación de La Marzocco?",
-      version: "El controlador y este companion usan versiones distintas de su conexión. Actualiza ambos a su última versión.",
-      unknown: "El controlador envió mensajes que este companion no entiende. Actualiza el companion.",
-      error: "La vinculación no funcionó. El registro del companion dice por qué.",
-      down: "Sin conexión", connecting: "Conectando…", open: "Conectado", retry: "Reconectando ({reason})",
-      lmOff: "Apagado. Actívalo en Admin → Companion.", lmWaiting: "Esperando la cuenta desde el controlador",
-      lmConnecting: "Conectando con La Marzocco…", lmConnected: "Conectado",
-      lmRefused: "Conectado, pero la nube rechaza sus lecturas; corrige la cuenta en la Web UI",
-      routeCompanion: "el controlador usa esta conexión", routeDirect: "el controlador usa la suya",
-      versionLine: "Companion {v} · {name}", madeBy: "· Hecho por", none: "Aún no encontrado",
-      ui: "Web UI", uiReady: "A través del companion · {screens}", uiPassthrough: "Directo al controlador, una pantalla a la vez",
-      uiDisabled: "Directamente en el controlador (desactivada en Admin → Companion)",
-      screens0: "ninguna pantalla abierta", screens1: "1 pantalla abierta", screensN: "{n} pantallas abiertas",
-      logTitle: "Registro de diagnóstico", logEmpty: "Aún no hay nada guardado",
-      logStats: "{n} eventos · {mb} MB · se conservan {days} días",
-      logMore: "Mostrar anteriores", logExport: "Exportar todo",
-      logLevelC: "Crítico", logLevelE: "Error", logLevelW: "Aviso",
-      logLevelI: "Información", logLevelD: "Debug",
-      logLevelHint: "Esta severidad y superiores",
-      logGap: "· {n} eventos no pudieron copiarse ·", logBoot: "· reinicio (arranque {b}) ·",
-      logReset: "· el registro se borró en el controlador ·",
-      logOff: "El controlador se queda su registro (desactivado en Admin → Companion)"
     }
   };
-  var lang = /^es/i.test(navigator.language || "") ? "es" : "en", t = T[lang];
-  document.documentElement.lang = lang;
+  var t = T.en;
   function $(id) { return document.getElementById(id); }
   function fill(text, values) {
     return text.replace(/\{(\w+)\}/g, function (_, key) { return values[key]; });
@@ -179,7 +137,6 @@
   $("ui-label").textContent = t.ui;
   $("lm-label").textContent = t.lm;
   // The menu's addresses: the secure Web UI and the plain-HTTP pages beside it.
-  document.getElementById("m-access").textContent = /^es/i.test(navigator.language || "") ? "Acceso seguro" : "Secure access";
   fetch("/__companion/gateway", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (g) {
     document.getElementById("m-webui").href = g.secure_url + "/";
     // Plain HTTP: the access page is this server's root; over HTTPS the root is the Web UI.

@@ -88,21 +88,20 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert "proxy_pass http://192.168.1.50:8080;" in conf
     assert "proxy_set_header Origin http://192.168.1.50:8080;" in conf
     assert "return 503;" not in conf
-    pages = {lang: (run / f"www/index.{lang}.html").read_text() for lang in ("en", "es")}
-    assert "Found Cafe Bar at 192.168.1.50:8080" in pages["en"] and '<html lang="en">' in pages["en"]
-    assert "Controlador Cafe Bar encontrado" in pages["es"] and "Ajustes de confianza" in pages["es"]
-    assert "data-text='http://openbrewbyweight-secure.local'" in pages["es"]
-    assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in pages["en"]
-    assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.crt'" in pages["en"]
-    assert "index.es.html" in conf and conf.count("location = /__companion/gateway") == 2
+    page = (run / "www/index.en.html").read_text()
+    assert "Found Cafe Bar at 192.168.1.50:8080" in page and '<html lang="en">' in page
+    assert "data-text='http://openbrewbyweight-secure.local'" in page
+    assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in page
+    assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.crt'" in page
+    assert "index.en.html" in conf and conf.count("location = /__companion/gateway") == 2
     assert conf.count("return 301 /__companion/gateway;") == 2, "the gateway's earlier status address redirects"
-    assert "Open Brew by Weight Companion · Kitchen server" in pages["en"]
-    assert 'fetch("https://openbrewbyweight-secure.local/__companion/ping"' in pages["en"]
+    assert "Open Brew by Weight Companion · Kitchen server" in page
+    assert 'fetch("https://openbrewbyweight-secure.local/__companion/ping"' in page
     assert f"proxy_cache_path {run}/cache " in conf
     api = conf.split("    location / {", 1)[1].split("\n    }", 1)[0]
     assert "proxy_pass" in api and "proxy_cache" not in api, "API and WebSocket traffic is never cached"
     assert conf.count("proxy_cache webui;") == 2
-    for rendered in (conf, *pages.values()):
+    for rendered in (conf, page):
         assert not re.search(r"@[A-Z_]+@", rendered), "unfilled placeholder"
     profile = plistlib.loads((run / f"www/{gateway.CA_NAME}.mobileconfig").read_bytes())
     assert profile["PayloadContent"][0]["PayloadContent"] == ssl.PEM_cert_to_DER_cert(ca_pem)

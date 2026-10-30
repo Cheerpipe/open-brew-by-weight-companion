@@ -29,7 +29,7 @@ The companion does the fiddly parts for you:
   open it without touching your router.
 - **Creates and renews its certificate**, signed by a private certificate
   authority that only works for the companion's name.
-- **Serves a setup page**, in English or Spanish to match the device, with
+- **Serves a setup page**, with
   step-by-step instructions, the right download for iPhone and iPad, Mac,
   Windows and Android, and a QR code to open it on a phone.
 - **Sets itself up**: one command picks how the companion joins your network,

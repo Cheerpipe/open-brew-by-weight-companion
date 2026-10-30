@@ -367,7 +367,7 @@ def qr_svg(text):
 
 
 def write_site(cfg, data, run, target):
-    """Render nginx.conf and the setup page, in every language, for the current controller."""
+    """Render nginx.conf and the setup page for the current controller."""
     www = run / "www"
     www.mkdir(parents=True, exist_ok=True)
     www.chmod(0o755)

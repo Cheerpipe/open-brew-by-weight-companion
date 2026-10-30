@@ -467,7 +467,7 @@ name). It asks for the controller's address only when nothing answers.
 | `gateway/gateway.py` | Supervisor: configuration, discovery, mDNS, certificates, rendering. |
 | `gateway/nginx.conf.in` | nginx configuration template. |
 | `gateway/setup.html` | Setup page template. |
-| `gateway/strings.json` | Setup page texts in English and Spanish. |
+| `gateway/strings.json` | Setup page texts. |
 | `companion/service.py` | Companion service: the link, the La Marzocco route, the status page and JSON. |
 | `companion/relay.py` | Relay session, signed requests, header whitelist, passthrough. |
 | `companion/screens.py`, `companion/mux.py`, `companion/upstream.py` | Screens' API and live updates, the multiplexer, and the one session with the controller. |

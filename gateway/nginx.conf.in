@@ -36,17 +36,11 @@ http {
   # URI: the controller only marks ?v=<asset tag> URLs cacheable.
   proxy_cache_path @RUN@/cache levels=1:2 keys_zone=webui:1m max_size=16m inactive=30d use_temp_path=off;
 
-  # The setup page follows the browser's first language.
-  map $http_accept_language $setup_page {
-    ~*^es index.es.html;
-    default index.en.html;
-  }
-
   # Setup page and certificate downloads, reachable before the CA is trusted.
   server {
     listen @HTTP_PORT@ default_server;
     root @RUN@/www;
-    index $setup_page;
+    index index.en.html;
     add_header Cache-Control "no-store" always;
     log_not_found off;  # Browsers probe for icons this page does not have.
 

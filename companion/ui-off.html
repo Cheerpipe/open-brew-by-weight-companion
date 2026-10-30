@@ -24,7 +24,7 @@
   <p class="muted">Open Brew by Weight Companion</p>
   <nav class="menu">
     <a id="m-webui" href="/" target="_blank" rel="noopener">Web UI</a>
-    <a id="m-access" href="/"></a>
+    <a id="m-access" href="/">Secure access</a>
     <a id="m-companion" href="/__companion/">Companion</a>
   </nav>
   <h1 id="title"></h1>
@@ -49,24 +49,15 @@
       none: "The companion has not found the controller yet. Open the Web UI at the controller's own address.",
       help: "To use the companion's secure address again, turn on Web UI through the companion in Admin → Companion.",
       madeBy: "· Made by"
-    },
-    es: {
-      title: "Abre la Web UI en el controlador",
-      intro: "Tu controlador está configurado para mostrar su Web UI directamente, no a través de este companion. Ábrela en su propia dirección:",
-      none: "El companion aún no encuentra el controlador. Abre la Web UI en la dirección del propio controlador.",
-      help: "Para volver a usar la dirección segura del companion, activa Web UI a través del companion en Admin → Companion.",
-      madeBy: "· Hecho por"
     }
   };
-  var lang = /^es/i.test(navigator.language || "") ? "es" : "en", t = T[lang], open = document.getElementById("open");
-  document.documentElement.lang = lang;
+  var t = T.en, open = document.getElementById("open");
   document.getElementById("title").textContent = t.title;
   open.hidden = !open.textContent;
   document.getElementById("intro").textContent = open.hidden ? t.none : t.intro;
   document.getElementById("help").textContent = t.help;
   document.getElementById("made-by").textContent = t.madeBy;
   // The menu's addresses: the secure Web UI and the plain-HTTP pages beside it.
-  document.getElementById("m-access").textContent = /^es/i.test(navigator.language || "") ? "Acceso seguro" : "Secure access";
   fetch("/__companion/gateway", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (g) {
     document.getElementById("m-webui").href = g.secure_url + "/";
     // Plain HTTP: the access page is this server's root; over HTTPS the root is the Web UI.
