@@ -94,6 +94,8 @@ class Companion:
         if moved and self.ws is not None:
             log("the controller has a new address; reopening the link")
             self.spawn(self.ws.close())
+        elif self.ws is not None:
+            self.poke()  # It announced itself: a socket that died with a restart is found now.
         if self.ws is None:
             self.wake.set()  # Reconnect now instead of waiting out the backoff.
         self.pairing.start()
@@ -152,6 +154,13 @@ class Companion:
             log("the controller needs no link now; closing it")
             self.spawn(self.ws.close())
         self.wake.set()
+
+    def poke(self):
+        """Fresh evidence the controller answered (an announcement, a relay handshake):
+        ping at once, so a link whose socket died with its restart — a reboot sends no
+        FIN or RST — is found now, not at the next ping cadence."""
+        if self.ws is not None:
+            self.post({"t": "ping", "up": self.lm.up})
 
     # --- Link ----------------------------------------------------------------
     async def run_link(self):

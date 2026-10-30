@@ -140,6 +140,7 @@ class Relay:
             self.mode = "disabled" if reply.get("ui") is False else "ready"
             self._set_link(reply.get("link") is True)
             await companion.recognized()
+            companion.poke()  # The controller just proved itself again: a dead link socket is found now.
             self._note("relay ready: every screen shares the controller's Web UI" if self.mode == "ready" else
                        "the controller turned the Web UI through the companion off")
         elif status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED":

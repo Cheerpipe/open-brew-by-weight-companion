@@ -238,6 +238,12 @@ counted, and the page asks you to update the companion.
   socket closes when the controller has not acknowledged a ping within 30
   seconds (`TCP_USER_TIMEOUT`), that is within 2.5 minutes at most, without
   any extra traffic.
+- **A restarted controller is found at once.** An mDNS announcement and a
+  relay handshake are both the controller answering right now, so each
+  sends a ping immediately: a link whose socket died with the controller's
+  restart — a reboot sends no FIN or RST — fails that ping at once, or by
+  the 30-second timeout at the latest, instead of at the next ping
+  interval.
 - **Reconnection:** after 5, 15 and 60 seconds, then every 5 minutes, and at
   once when the controller announces itself over mDNS. `RETRY_LATER` (a shot
   with a scale or a scale connection in progress) retries every 15 seconds,

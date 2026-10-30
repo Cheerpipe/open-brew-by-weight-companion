@@ -122,6 +122,7 @@ class Controller:
         self.commitment, self.key_sent, self.revealed, self.reveal_status = None, False, False, 202
         self.sessions = asyncio.Queue()
         self.transports = []
+        self.relay = False  # The relay answers only once the link block asks for it.
 
     async def pair_post(self, request):
         assert request.content_type == "application/json"
@@ -144,6 +145,21 @@ class Controller:
         self.key_sent = True
         state = "pending" if self.pair_state == "approved" and not self.revealed else self.pair_state
         return web.json_response({"state": state, "controllerKey": V["controllerKey"]})
+
+    RELAY_CHALLENGE = bytes(range(16))  # Fixed; the handshake's formulas are covered by test_relay.
+
+    async def relay_get(self, request):
+        if not self.relay:  # Before that, the controller has no relay: the link opens as ever.
+            return web.json_response({"error": "UNAVAILABLE"}, status=503)
+        return web.json_response({"challenge": crypto.b64(self.RELAY_CHALLENGE), "protocol": 1})
+
+    async def relay_post(self, request):
+        body = await request.json()
+        nc = crypto.unb64(body["nonce"], 16)
+        assert crypto.unb64(body["mac"]) == crypto.mac(SECRET, b"R", self.RELAY_CHALLENGE, nc), \
+            "the companion proves the pairing secret"
+        return web.json_response({"mac": crypto.b64(crypto.mac(SECRET, b"Q", self.RELAY_CHALLENGE, nc)),
+                                  "ui": True, "link": True})
 
     async def link(self, request):
         if self.mode == "not_paired":
@@ -235,6 +251,8 @@ async def main():
     app.router.add_post("/api/v1/companion/pair", fake.pair_post)
     app.router.add_get("/api/v1/companion/pair", fake.pair_get)
     app.router.add_get("/api/v1/companion/link", fake.link)
+    app.router.add_get("/api/v1/companion/relay", fake.relay_get)
+    app.router.add_post("/api/v1/companion/relay", fake.relay_post)
     server = TestServer(app, host="127.0.0.1")
     await server.start_server()
     target = ("Cafe Bar", ("127.0.0.1", server.port))
@@ -314,6 +332,18 @@ async def main():
             await session.send(encrypt(3, ACCOUNT))  # The controller resends it after each new session.
             assert (await session.next("creds"))["ok"] is True and upstream.configured[-1][0] == ACCOUNT["email"]
             await session.next("lm")
+
+            # --- Fresh evidence of the controller pokes an open link ----------------
+            # An announcement and a relay handshake each ping at once, so a socket that
+            # died with the controller's restart — a reboot sends no FIN or RST — is
+            # found now, not at the next ping cadence.
+            fake.relay = True
+            companion.set_controller(target)  # The same controller announced itself again.
+            assert (await session.next("ping", skip=()))["up"] is True, "the announcement's poke"
+            await eventually(lambda: companion.relay.mode == "ready")
+            assert (await session.next("ping", skip=()))["up"] is True, "the handshake it spawned"
+            assert await companion.relay.handshake() == "ready"
+            assert (await session.next("ping", skip=()))["up"] is True, "one asked for directly"
 
             # --- Nothing is forwarded while the route is direct --------------------
             upstream.events.pushed(D["pushes"]["standby"], 0)
