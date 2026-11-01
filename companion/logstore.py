@@ -12,8 +12,12 @@ first event after them (a gap the ring overwrote, a cursor the controller
 could not resume), so the history names them; nothing the controller sent is
 deleted except by retention or an erase. Retention prunes by age and then to
 the size budget, other controllers' rows first; freed pages are reused, so
-the file settles near the budget without a vacuum. This is the SQLite
-foundation the archive's record tables will migrate onto.
+the file settles near the budget without a vacuum; the budget counts the
+log's own tables, never the archive's beside them.
+
+This module owns the database: it opens it, migrates it, backs it up, erases
+it and closes it. Schema 3 adds the shot and activation archive's tables,
+whose queries live in archive.py on this same connection and disk thread.
 """
 
 import asyncio
@@ -22,7 +26,7 @@ import time
 
 from .store import offload
 
-SCHEMA = 2
+SCHEMA = 3
 PRUNE_STEP = 500  # Rows per delete round while trimming to the size budget.
 GRANT_DAYS = 90  # A Web UI session the controller accepted stays usable this long unseen.
 FORMAT, EXPORT_VERSION = "openbrewbyweight-companion-log", 2
@@ -64,7 +68,42 @@ V1_TO_V2 = """
     drop table log_events;
     drop table log_marks;
 """
-RENAME = "".join(f"alter table {table}_v2 rename to {table};" for table in ("log_boots", "log_events", "log_marks"))
+LOG_TABLES = ("log_boots", "log_events", "log_marks")
+RENAME = "".join(f"alter table {table}_v2 rename to {table};" for table in LOG_TABLES)
+# Version 3: the archive. Rows are keyed by generation: a restarted
+# controller history (Clear, a factory reset) closes one and opens the next,
+# so nothing it held is ever deleted by inference. Records keep the row the
+# Web UI rebuilds (`body`) and whether the user kept it (`kept`); a trace row
+# without data says the shot has none; `listed` is the last complete index's
+# ids; an exclusion stops a record removed from the archive alone from being
+# copied again while the controller still holds it.
+ARCHIVE = """
+    create table archive_records (device_id text not null, store text not null,
+        generation integer not null, id integer not null, ident text not null, rev integer not null,
+        kind text not null, bad integer not null, kept integer not null, body text not null,
+        unique (device_id, store, generation, id));
+    create table archive_traces (device_id text not null, generation integer not null,
+        id integer not null, boot_id integer not null, ended_ms integer not null, data blob,
+        unique (device_id, generation, id, boot_id, ended_ms));
+    create table archive_sync (device_id text not null, store text not null,
+        generation integer not null, epoch integer not null, oldest integer,
+        listed text not null, restarted real, unique (device_id, store, generation));
+    create table archive_holes (device_id text not null, store text not null,
+        generation integer not null, below integer not null, above integer not null,
+        count integer not null, noted real not null,
+        primary key (device_id, store, generation, below)) without rowid;
+    create table archive_exclusions (device_id text not null, store text not null,
+        generation integer not null, id integer not null,
+        primary key (device_id, store, generation, id)) without rowid;
+"""
+ARCHIVE_TABLES = ("archive_records", "archive_traces", "archive_sync", "archive_holes", "archive_exclusions")
+
+
+def table_bytes(connection, tables):
+    """The pages these tables and their indexes use, whatever else shares the file."""
+    names = list(tables) + [f"sqlite_autoindex_{table}_1" for table in tables]
+    return connection.execute(f"select coalesce(sum(pgsize), 0) from dbstat where aggregate = 1 and name in "
+                              f"({','.join('?' * len(names))})", names).fetchone()[0]
 
 
 def _entry(row):
@@ -92,8 +131,8 @@ class LogStore:
             connection.close()
             raise sqlite3.DatabaseError(f"its schema {version} is newer than this companion's {SCHEMA}")
         if version < SCHEMA:
-            connection.executescript("begin;" + TABLES + (V1_TO_V2 if version == 1 else "") + RENAME +
-                                     f"pragma user_version = {SCHEMA}; commit;")
+            log = TABLES + (V1_TO_V2 if version == 1 else "") + RENAME if version < 2 else ""
+            connection.executescript(f"begin;{log}{ARCHIVE}pragma user_version = {SCHEMA}; commit;")
         self.connection = connection
 
     async def close(self):
@@ -244,9 +283,7 @@ class LogStore:
         return await offload(self._prune, days, megabytes, device)
 
     def _used_bytes(self):
-        count = self.connection.execute("pragma page_count").fetchone()[0]
-        free = self.connection.execute("pragma freelist_count").fetchone()[0]
-        return (count - free) * self.connection.execute("pragma page_size").fetchone()[0]
+        return table_bytes(self.connection, LOG_TABLES)
 
     def _prune(self, days, megabytes, device):
         deleted = 0
@@ -278,12 +315,14 @@ class LogStore:
         return deleted
 
     async def erase(self, history_only=False):
-        """Everything the controller sent and who could read it (Forget), or the history alone (Delete history)."""
+        """Everything the controller sent and who could read it, the archive included (Forget), or the log
+        history alone (Delete history)."""
         await offload(self._erase, history_only)
 
     def _erase(self, history_only):
         with self.connection:
-            for table in ("log_events", "log_marks") + (() if history_only else ("log_boots", "log_access", "meta")):
+            for table in ("log_events", "log_marks") + (() if history_only else (
+                    "log_boots", "log_access", "meta") + ARCHIVE_TABLES):
                 self.connection.execute(f"delete from {table}")
         # Deleted rows linger in free pages until reused: an erase rewrites the file.
         self.connection.execute("vacuum")

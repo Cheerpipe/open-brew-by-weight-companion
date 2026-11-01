@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The log store on its own: migration, paging and markers, export chunks,
-retention, erase, backup and access grants.
+retention, erase, backup and access grants; the archive's tables it migrates
+and erases (their queries are test_archive.py's).
 
 The link-level sync (subscribe after `dev`, resume across a restart, failure
 isolation, access through the controller) is covered by test_link.py; this
@@ -19,7 +20,7 @@ if not __debug__:
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from companion.logstore import FIRST_PAGE, LogStore  # noqa: E402
+from companion.logstore import FIRST_PAGE, RENAME, TABLES, LogStore  # noqa: E402
 from companion.store import offload  # noqa: E402
 
 DEVICE, OTHER = "AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"
@@ -59,6 +60,15 @@ def version_1(path):
     connection.close()
 
 
+def version_2(path):
+    """A store as the persistent-log release left it, with one event."""
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.executescript(TABLES + RENAME + "pragma user_version = 2;")
+    connection.execute("insert into log_boots values (?, 1, 7)", (DEVICE,))
+    connection.execute("insert into log_events values (?, 1, 1, 7, 0, 0, 'i', 'state', 'kept')", (DEVICE,))
+    connection.close()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="openbrewbyweight-logstore-") as temporary:
         data = Path(temporary)
@@ -67,12 +77,24 @@ async def main():
         version_1(data / "companion.db")
         store = LogStore(data)
         await store.open()
-        assert await sql(store, "pragma user_version") == [(2,)]
+        assert await sql(store, "pragma user_version") == [(3,)]
         assert not await sql(store, "select name from sqlite_master where name = 'log_events_page'")
         entries, _, _ = await store.page(DEVICE, FIRST_PAGE, FIRST_PAGE, 10)
         assert kinds(entries) == [8, "gap", 3, 2, 1, "reset"], entries
         await store.erase()
         assert await store.device() is None
+        await store.close()
+
+        # --- Version 2 gains the archive's tables and keeps its log ------------------
+        second = data / "second"
+        second.mkdir()
+        version_2(second / "companion.db")
+        store = LogStore(second)
+        await store.open()
+        assert await sql(store, "pragma user_version") == [(3,)]
+        assert await sql(store, "select message from log_events") == [("kept",)]
+        assert {name for (name,) in await sql(store, "select name from sqlite_master where type = 'table'")} >= {
+            "archive_records", "archive_traces", "archive_sync", "archive_holes", "archive_exclusions"}
         await store.close()
 
         # --- A newer schema is refused, never relabeled -----------------------------
@@ -151,6 +173,14 @@ async def main():
         assert await sql(store, "select count(*) from log_boots where device_id = ?", OTHER) == [(1,)], \
             "an emptied boot goes, except a controller's newest"
 
+        # --- The archive beside it is not the log's: its size never prunes the log --
+        log_rows = (await store.stats(DEVICE))["rows"]
+        await offload(lambda: store.connection.executemany(
+            "insert into archive_records values (?, 'shots', 1, ?, '', 0, 'good', 0, 0, ?)",
+            [(DEVICE, n, "x" * 4000) for n in range(1, 600)]))
+        assert await store.prune(days=3650, megabytes=1, device=DEVICE) == 0
+        assert (await store.stats(DEVICE))["rows"] == log_rows and (await store.stats(DEVICE))["bytes"] <= 1048576
+
         # --- Age retention: dated events go; events without a clock stay ------------
         await store.apply(DEVICE, {"b": 13, "e": [[1, 10, 0, "i", "state", "no clock yet"],
                                                   [2, 20, 1000, "i", "state", "1970"]]})
@@ -177,8 +207,10 @@ async def main():
         await store.erase(history_only=True)
         assert (await store.stats(DEVICE))["rows"] == 0 and await store.device() == DEVICE
         assert "abc" in await store.grants()
+        assert await sql(store, "select count(*) from archive_records") == [(599,)], "Delete history is the log's"
         await store.erase()
         assert await store.device() is None and not await store.grants()
+        assert await sql(store, "select count(*) from archive_records") == [(0,)], "Forget takes the archive too"
         assert not (data / "companion.db.backup").exists()
         await store.close()
     print("Companion log store: migration, markers, export, retention, erase, backup and access OK")

@@ -437,8 +437,9 @@ single disk thread as the secrets).
   schema, read-only volume) disables the history only; the status names why.
 - **Retention.** On start and daily: events older than
   `COMPANION_LOG_RETENTION_DAYS` (events without a clock stay), then the
-  oldest until the used pages fit `COMPANION_LOG_RETENTION_MB` — other
-  controllers' rows first. Freed pages are reused, so the file settles near
+  oldest until the log tables' pages fit `COMPANION_LOG_RETENTION_MB` —
+  other controllers' rows first; the archive's tables in the same file never
+  count (SQLite's `dbstat`). Freed pages are reused, so the log settles near
   the budget without a vacuum. Each round then writes `companion.db.backup`
   with SQLite's online backup, on its own connections and thread.
 - **Access.** `GET /__companion/log` (newest-first pages: `?boot=&before=&limit=`
