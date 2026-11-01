@@ -82,7 +82,7 @@ class Companion:
         self.unknown_frames, self.unknown_kinds = 0, set()
         self.cfg = {"lm": False, "conn": "ws", "observe": True}
         self.logs = LogStore(data)
-        self.log_on, self.log_subscribed, self.log_identified = False, False, False
+        self.log_on, self.log_subscribed, self.log_identified, self.configured = False, False, False, False
         self.log_error, self.log_dropped = None, 0  # Why the store is closed; frames that could not be keyed.
         self.log_grants = {}  # sha256 of a Web UI session -> when the controller last accepted it.
         self.log_denials = {}  # ...and when it last refused one, so a refused page does not keep asking.
@@ -250,7 +250,8 @@ class Companion:
         self.ws, self.outbox = ws, asyncio.Queue()
         self.link, self.link_reason = "open", ""
         self.hold, self.held, self.full_ep, self.reported = False, [], None, None
-        self.log_subscribed = self.log_identified = False  # This session's cfg and dev re-arm the logsub.
+        # This session's cfg and dev re-arm the logsub; the last session's cfg says nothing about this one.
+        self.log_subscribed = self.log_identified = self.configured = False
         self.sync_due, self.clear_at = {}, None
         self.unknown_frames = 0
         self.unknown_kinds.clear()
@@ -374,9 +375,9 @@ class Companion:
             self.cfg = {"lm": frame.get("lm") is True, "conn": "api" if frame.get("conn") == "api" else "ws",
                         "observe": frame.get("observe") is not False}
             await self._apply_account()
-            self.log_on = frame.get("log") is True
+            self.log_on, self.configured = frame.get("log") is True, True
+            self.archive.configure(frame)  # First: it says whether this firmware holds sync during a shot.
             await self._log_subscribe()
-            self.archive.configure(frame)
             self._report(force=True)
         elif kind == "creds":
             await self._on_credentials(frame)
@@ -478,8 +479,10 @@ class Companion:
     async def _log_subscribe(self, resync=False):
         """`logsub` with the stored cursor, once per session after cfg turned the
         stream on and `dev` named the controller (so the cursor is that
-        controller's); `resync` asks again from it after a frame was lost."""
-        if not self.log_on or not self.log_identified or self.outbox is None or not self._log_usable() or (
+        controller's); `resync` asks again from it after a frame was lost.
+        Either leaves right after a frame that shows no hold (S17)."""
+        if not self.log_on or not self.configured or not self.log_identified or self.outbox is None or \
+                not self._log_usable() or (
                 self.log_subscribed and not resync):
             return
         self.log_subscribed = True
@@ -488,7 +491,7 @@ class Companion:
         except sqlite3.Error as error:
             log(f"the log store could not read its cursor ({error}); the log stream waits for the next link")
             return
-        self.post({"t": "logsub", "on": True, "boot": boot, "after": after})
+        self.post_sync({"t": "logsub", "on": True, "boot": boot, "after": after}, "logsub")
 
     async def _on_log(self, frame):
         """One page of the controller's log, stored with the hole it names.

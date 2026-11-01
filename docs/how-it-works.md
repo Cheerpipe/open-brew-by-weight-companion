@@ -419,7 +419,11 @@ single disk thread as the secrets).
   `cfg` turned the stream on and `dev` named the controller's id, with that
   id's newest stored `(boot, sequence)`. The id is kept in the database, so a
   restarted companion resumes from its cursor instead of asking for the whole
-  ring again, and its pages show the history before any link opens.
+  ring again, and its pages show the history before any link opens. With a
+  controller that has the archive (its `cfg` names `archive`), `logsub` and
+  the resync after a failed write leave only right after a frame that shows
+  no hold, like the archive's requests; an older controller gets them as
+  before.
 - **Rows and marks.** Boots are numbered in the order they arrive, and
   events are keyed by `(device id, that number, sequence)`: the controller
   streams only its current boot, so arrival order is time order, and a boot

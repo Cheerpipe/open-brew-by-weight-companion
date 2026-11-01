@@ -330,6 +330,8 @@ class Link:
     def close(self):
         self.task.cancel()
         self.pings.cancel()
+        self.companion.sync_due, self.companion.clear_at = {}, None  # As a new session starts them.
+        self.companion.log_subscribed = self.companion.log_identified = self.companion.configured = False
         self.companion.archive.stop()
         self.companion.outbox = None
 
@@ -730,6 +732,32 @@ async def main():
 
             # --- One history (S9, S12): the controller's filters and orders, ties included --
             await parity(companion, get)
+
+            # --- The log asks only outside a hold too; an older controller as before --
+            link_.close()
+            fake.held = []  # A shot is on when the link opens: no ping is answered.
+            seen = len(fake.requests)
+            await link_.open(log=True)
+            await asyncio.sleep(0.3)
+            assert not [f for f in fake.requests[seen:] if f["t"] == "logsub"], "logsub waits for a clear frame"
+            await fake.release(companion)
+            await asyncio.sleep(0.2)
+            assert [f["t"] for f in fake.requests[seen:]].count("logsub") == 1
+            await companion._on_frame({"t": "hold", "on": False, "sync": True})
+            fake.held = []
+            await companion._log_subscribe(resync=True)  # A write failed: ask again from the stored cursor.
+            await asyncio.sleep(0.2)
+            assert [f["t"] for f in fake.requests[seen:]].count("logsub") == 1, "the resync waits for the hold"
+            await fake.release(companion)
+            await asyncio.sleep(0.2)
+            assert [f["t"] for f in fake.requests[seen:]].count("logsub") == 2
+            link_.close()
+            fake.held = []  # An older controller never answers a ping: its logsub goes as it always did.
+            seen = len(fake.requests)
+            await link_.open(cfg={"t": "cfg", "ui": True, "log": True})
+            await asyncio.sleep(0.1)
+            assert [f["t"] for f in fake.requests[seen:]] == ["logsub"], fake.requests[seen:]
+            fake.held = None
 
             # --- Forget erases it all --------------------------------------------------------
             link_.close()
