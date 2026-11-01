@@ -577,8 +577,8 @@ async def main():
                 page = await reply.json()
             assert page["device"] == "AA:BB:CC:DD:EE:FF"
             assert [entry.get("s") for entry in page["entries"]] == [3, 2]
-            assert page["next"] == {"boot": 7, "before": 2} and page["hasMore"] is True
-            async with http.get(page_url + "/log?boot=7&before=2&limit=10", headers=signed) as reply:
+            assert page["next"] == {"boot": 1, "before": 2} and page["hasMore"] is True  # Opaque: the first boot.
+            async with http.get(page_url + "/log?boot=1&before=2&limit=10", headers=signed) as reply:
                 page = await reply.json()
             assert [entry.get("s") for entry in page["entries"]] == [1] and page["next"] is None
             # A gap names itself between the events it separates.
@@ -621,20 +621,21 @@ async def main():
             await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
             sub = await session.next("logsub", skip=("ping", "lm"))
             assert sub["boot"] == 7 and sub["after"] == 9
-            # A cursor the controller could not resume keeps the rows and marks the spot.
+            # A cursor the controller could not resume (a boot id it reused) is
+            # a new boot: the rows stay and the spot is marked.
             await session.send({"t": "log", "b": 7, "reset": True, "e": [
                 [10, 5000, 1789000020, "i", "state", "the log started over"]]})
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 10))
             async with http.get(page_url + "/log?limit=3", headers=signed) as reply:
                 page = await reply.json()
-            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [10, "reset", 9, 8, "gap"]
+            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [10, "reset", "boot", 9, 8, "gap"]
             async with http.get(page_url + "/log/export", headers=signed) as reply:
                 assert reply.headers["Content-Disposition"] == 'attachment; filename="obbw-log-AA-BB-CC-DD-EE-FF.json"'
                 exported = await reply.json()
             assert exported["format"] == "openbrewbyweight-companion-log" and exported["version"] == 2
             assert exported["device"] == "AA:BB:CC:DD:EE:FF"
             assert [entry.get("s", entry.get("g")) for entry in exported["entries"]] == [
-                1, 2, 3, "gap", 8, 9, "reset", 10]
+                1, 2, 3, "gap", 8, 9, "boot", "reset", 10]
             # A companion restarted with the controller off still shows the
             # history, to the browser the controller accepted before.
             service.LOG_ACCESS_RECHECK_S = 0

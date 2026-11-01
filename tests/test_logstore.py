@@ -98,10 +98,11 @@ async def main():
         entries, following, more = await store.page(DEVICE, FIRST_PAGE, FIRST_PAGE, 10)
         assert kinds(entries) == [2, 1, "boot", 3, 2, 1], entries
         assert entries[2]["boot"] == 9 and following is None and more is False
-        # The marker survives a page boundary: page 2 starts with it.
-        entries, following, more = await store.page(DEVICE, 9, 1, 2)
+        # The marker survives a page boundary: page 2 (after the opaque cursor
+        # of boot 9's oldest event, the second boot to arrive) starts with it.
+        entries, following, more = await store.page(DEVICE, 2, 1, 2)
         assert kinds(entries) == ["boot", 3, 2] and entries[0]["boot"] == 9, entries
-        assert following == (7, 2) and more is True
+        assert following == (1, 2) and more is True
 
         # --- A gap after a reboot shows inside the new boot -------------------------
         await store.apply(DEVICE, {"b": 10, "miss": 7, "e": [event(8), event(9)]})
@@ -109,18 +110,28 @@ async def main():
         assert kinds(entries) == [9, 8, "gap", "boot", 2], entries
         assert entries[2]["count"] == 7 and entries[3]["boot"] == 10
 
-        # --- A reset keeps the stored rows and marks where it happened --------------
-        await store.apply(DEVICE, {"b": 10, "reset": True, "e": [event(10), event(11)]})
+        # --- A reused boot id is a new boot: nothing stored is overwritten ---------
+        # `reset` (the controller could not resume the cursor) only comes from
+        # an id it reused; the rows stay and the boundary is marked.
+        await store.apply(DEVICE, {"b": 10, "reset": True, "e": [event(8, text="reused"), event(11)]})
         entries, _, _ = await store.page(DEVICE, FIRST_PAGE, FIRST_PAGE, 4)
-        assert kinds(entries) == [11, 10, "reset", 9, 8, "gap"], entries
+        assert kinds(entries) == [11, 8, "reset", "boot", 9, 8, "gap"], entries
+        assert entries[1]["m"] == "reused" and entries[5]["m"] == "event 8", "the earlier boot's 8 is kept"
+        assert await store.cursor(DEVICE) == (10, 11)
+        # A boot id that comes back later (a counter a flash erase restarted) is new too.
+        await store.apply(DEVICE, {"b": 7, "e": [event(1, text="again")]})
+        assert await store.cursor(DEVICE) == (7, 1)
+        entries, _, _ = await store.page(DEVICE, FIRST_PAGE, FIRST_PAGE, 2)
+        assert kinds(entries) == [1, "boot", 11] and entries[0]["m"] == "again" and entries[1]["boot"] == 7
 
         # --- The export walks oldest first, every marker before its event -----------
         exported, cursor = [], (0, 0)
         while cursor is not None:
             chunk, cursor = await store.chunk(DEVICE, *cursor, limit=3)
             exported += chunk
-        assert kinds(exported) == [1, 2, 3, "boot", 1, 2, "boot", "gap", 8, 9, "reset", 10, 11], exported
-        assert [entry["boot"] for entry in exported if entry.get("g") == "boot"] == [9, 10]
+        assert kinds(exported) == [1, 2, 3, "boot", 1, 2, "boot", "gap", 8, 9, "boot", "reset", 8, 11,
+                                   "boot", 1], exported
+        assert [entry["boot"] for entry in exported if entry.get("g") == "boot"] == [9, 10, 10, 7]
 
         # --- Size retention: another controller's rows go first, by their own key ---
         filler = "filler " * 30
@@ -135,8 +146,10 @@ async def main():
         assert others == 0 or mine == mine_before, (others, mine, mine_before)
         assert (await store.cursor(DEVICE))[0] == 12, "the newest events survive the trim"
         assert not await sql(store, "select * from log_marks where not exists (select 1 from log_events e "
-                                    "where e.device_id = log_marks.device_id and e.boot_id = log_marks.boot_id "
+                                    "where e.device_id = log_marks.device_id and e.ordinal = log_marks.ordinal "
                                     "and e.sequence = log_marks.sequence)"), "marks go with their events"
+        assert await sql(store, "select count(*) from log_boots where device_id = ?", OTHER) == [(1,)], \
+            "an emptied boot goes, except a controller's newest"
 
         # --- Age retention: dated events go; events without a clock stay ------------
         await store.apply(DEVICE, {"b": 13, "e": [[1, 10, 0, "i", "state", "no clock yet"],

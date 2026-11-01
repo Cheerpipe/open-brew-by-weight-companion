@@ -2,10 +2,14 @@
 
 WAL, `user_version` migrations, and every call on the secrets store's single
 disk thread, so the event loop never waits on the filesystem and writes stay
-ordered. The sync cursor is the newest stored row of the controller's id,
-never separate state. Holes are mark rows anchored to the first event after
-them (a gap the ring overwrote, a cursor the controller could not resume), so
-the history names them instead of hiding them; nothing the controller sent is
+ordered. Boots are numbered here in the order they arrive (`ordinal`), and
+events are keyed by it: the controller streams only its current boot, so
+arrival is chronological, and a boot id it reuses (one it could not save, or
+a counter a full flash erase restarted) becomes a new boot instead of
+overwriting an old one. The sync cursor is the newest boot's id and its last
+stored sequence, never separate state. Holes are mark rows anchored to the
+first event after them (a gap the ring overwrote, a cursor the controller
+could not resume), so the history names them; nothing the controller sent is
 deleted except by retention or an erase. Retention prunes by age and then to
 the size budget, other controllers' rows first; freed pages are reused, so
 the file settles near the budget without a vacuum. This is the SQLite
@@ -22,37 +26,45 @@ SCHEMA = 2
 PRUNE_STEP = 500  # Rows per delete round while trimming to the size budget.
 GRANT_DAYS = 90  # A Web UI session the controller accepted stays usable this long unseen.
 FORMAT, EXPORT_VERSION = "openbrewbyweight-companion-log", 2
-FIRST_PAGE = 2 ** 31  # The page cursor before the newest event: no boot follows it.
+FIRST_PAGE = 2 ** 32  # The page cursor before the newest event: past every ordinal and sequence.
 
-EVENTS = """
-    create table log_events (
-        device_id text not null, boot_id integer not null,
-        sequence integer not null, at_ms integer not null,
-        wall_sec integer not null, level text not null,
-        category text not null, message text not null,
-        primary key (device_id, boot_id, sequence)) without rowid;
-"""
-V2 = """
+TABLES = """
     create table meta (key text primary key, value text not null) without rowid;
     create table log_access (session text primary key, checked real not null) without rowid;
+    create table log_boots_v2 (
+        device_id text not null, ordinal integer not null, boot_id integer not null,
+        primary key (device_id, ordinal)) without rowid;
+    create table log_events_v2 (
+        device_id text not null, ordinal integer not null, sequence integer not null,
+        boot_id integer not null, at_ms integer not null, wall_sec integer not null,
+        level text not null, category text not null, message text not null,
+        primary key (device_id, ordinal, sequence)) without rowid;
     create table log_marks_v2 (
-        device_id text not null, boot_id integer not null, sequence integer not null,
+        device_id text not null, ordinal integer not null, sequence integer not null,
         kind text not null, count integer not null, noted real not null,
-        primary key (device_id, boot_id, sequence, kind)) without rowid;
+        primary key (device_id, ordinal, sequence, kind)) without rowid;
 """
-# Version 1 anchored a gap to the event before it, a reset to sequence 0, and
-# kept an index that repeated the primary key.
+# Version 1 keyed events by boot id, anchored a gap to the event before it and
+# a reset to sequence 0, and kept an index that repeated the primary key. Its
+# boots are ordered by id, the best it recorded.
 V1_TO_V2 = """
+    insert into log_boots_v2 select device_id, row_number() over
+        (partition by device_id order by boot_id), boot_id
+        from (select distinct device_id, boot_id from log_events);
+    insert into log_events_v2 select e.device_id, b.ordinal, e.sequence, e.boot_id, e.at_ms,
+        e.wall_sec, e.level, e.category, e.message
+        from log_events e join log_boots_v2 b on b.device_id = e.device_id and b.boot_id = e.boot_id;
+    insert or ignore into log_marks_v2 select m.device_id, b.ordinal,
+        (select min(e.sequence) from log_events e where e.device_id = m.device_id
+            and e.boot_id = m.boot_id and e.sequence > m.after_sequence), m.kind, m.count, m.noted
+        from log_marks m join log_boots_v2 b on b.device_id = m.device_id and b.boot_id = m.boot_id
+        where exists (select 1 from log_events e where e.device_id = m.device_id
+            and e.boot_id = m.boot_id and e.sequence > m.after_sequence);
     drop index if exists log_events_page;
-    insert or ignore into log_marks_v2
-        select m.device_id, m.boot_id, (select min(e.sequence) from log_events e
-            where e.device_id = m.device_id and e.boot_id = m.boot_id
-            and e.sequence > m.after_sequence), m.kind, m.count, m.noted
-        from log_marks m where exists (select 1 from log_events e
-            where e.device_id = m.device_id and e.boot_id = m.boot_id
-            and e.sequence > m.after_sequence);
+    drop table log_events;
     drop table log_marks;
 """
+RENAME = "".join(f"alter table {table}_v2 rename to {table};" for table in ("log_boots", "log_events", "log_marks"))
 
 
 def _entry(row):
@@ -80,9 +92,8 @@ class LogStore:
             connection.close()
             raise sqlite3.DatabaseError(f"its schema {version} is newer than this companion's {SCHEMA}")
         if version < SCHEMA:
-            connection.executescript(
-                "begin;" + (EVENTS if version == 0 else "") + V2 + (V1_TO_V2 if version == 1 else "") +
-                f"alter table log_marks_v2 rename to log_marks; pragma user_version = {SCHEMA}; commit;")
+            connection.executescript("begin;" + TABLES + (V1_TO_V2 if version == 1 else "") + RENAME +
+                                     f"pragma user_version = {SCHEMA}; commit;")
         self.connection = connection
 
     async def close(self):
@@ -106,95 +117,113 @@ class LogStore:
         await offload(self.connection.execute, "insert or replace into meta values ('device', ?)", (device,))
 
     # --- Sync ----------------------------------------------------------------
+    def _latest(self, device):
+        return self.connection.execute("select ordinal, boot_id from log_boots where device_id = ? "
+                                       "order by ordinal desc limit 1", (device,)).fetchone()
+
     async def apply(self, device, frame):
         """One controller `log` frame: its events, and the hole a `miss` or `reset` names before them."""
         return await offload(self._apply, device, frame)
 
     def _apply(self, device, frame):
         boot, first, now = frame["b"], frame["e"][0][0], time.time()
-        # `reset`: the controller could not resume the cursor. The rows already
-        # stored stay; only the boundary is marked.
-        marks = [("reset", 0)] if frame.get("reset") is True else []
+        reset = frame.get("reset") is True
+        marks = [("reset", 0)] if reset else []
         if frame.get("miss"):
             marks.append(("gap", frame["miss"]))
         with self.connection:
+            latest = self._latest(device)
+            ordinal = latest["ordinal"] if latest else 0
+            # Another boot id, or the same one the controller could not resume
+            # (`reset`: only a reused id does that), is a new boot.
+            if latest is None or latest["boot_id"] != boot or reset:
+                ordinal += 1
+                self.connection.execute("insert into log_boots values (?, ?, ?)", (device, ordinal, boot))
             self.connection.executemany("insert or replace into log_marks values (?, ?, ?, ?, ?, ?)",
-                                        ((device, boot, first, kind, count, now) for kind, count in marks))
-            self.connection.executemany("insert or replace into log_events values (?, ?, ?, ?, ?, ?, ?, ?)",
-                                        ((device, boot, *entry) for entry in frame["e"]))
+                                        ((device, ordinal, first, kind, count, now) for kind, count in marks))
+            self.connection.executemany(
+                "insert or replace into log_events values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ((device, ordinal, entry[0], boot, *entry[1:]) for entry in frame["e"]))
 
     async def cursor(self, device):
-        """The newest stored (boot, sequence): the resume point for `logsub`."""
+        """The newest boot's id and its last stored sequence: the resume point for `logsub`."""
         return await offload(self._cursor, device)
 
     def _cursor(self, device):
-        row = self.connection.execute(
-            "select boot_id, sequence from log_events where device_id = ? "
-            "order by boot_id desc, sequence desc limit 1", (device,)).fetchone()
-        return (row["boot_id"], row["sequence"]) if row else None
+        latest = self._latest(device)
+        if latest is None:
+            return None
+        row = self.connection.execute("select max(sequence) as sequence from log_events "
+                                      "where device_id = ? and ordinal = ?", (device, latest["ordinal"])).fetchone()
+        return (latest["boot_id"], row["sequence"]) if row["sequence"] is not None else None
 
     # --- Reading -------------------------------------------------------------
+    def _boots(self, device):
+        return {row["ordinal"]: row["boot_id"] for row in
+                self.connection.execute("select ordinal, boot_id from log_boots where device_id = ?", (device,))}
+
     def _marks(self, device, rows):
-        """The markers anchored to these rows, keyed by (boot, sequence)."""
+        """The markers anchored to these rows, keyed by (ordinal, sequence)."""
         if not rows:
             return {}
-        keys = [(row["boot_id"], row["sequence"]) for row in rows]
+        keys = [(row["ordinal"], row["sequence"]) for row in rows]
         marks = {}
         for mark in self.connection.execute(
-                "select * from log_marks where device_id = ? and (boot_id, sequence) between (?, ?) and (?, ?) "
+                "select * from log_marks where device_id = ? and (ordinal, sequence) between (?, ?) and (?, ?) "
                 "order by kind", (device, *min(keys), *max(keys))):
-            marks.setdefault((mark["boot_id"], mark["sequence"]), []).append(
+            marks.setdefault((mark["ordinal"], mark["sequence"]), []).append(
                 {"g": "gap", "count": mark["count"]} if mark["kind"] == "gap" else {"g": "reset"})
         return marks
 
-    async def page(self, device, before_boot, before_sequence, limit):
+    async def page(self, device, before_ordinal, before_sequence, limit):
         """One page of the history, newest first, with its markers.
 
-        Returns (entries, next, has_more): `next` is the (boot, sequence) the
-        following page continues from, None at the end. Each marker sits where
-        it belongs in time: a gap or reset right below (older than) the event
-        that follows it, and a restart between two boots, naming the newer.
+        Returns (entries, next, has_more): `next` is the opaque (ordinal,
+        sequence) the following page continues from, None at the end. Each
+        marker sits where it belongs in time: a gap or reset right below
+        (older than) the event that follows it, and a restart between two
+        boots, naming the newer.
         """
-        return await offload(self._page, device, before_boot, before_sequence, limit)
+        return await offload(self._page, device, before_ordinal, before_sequence, limit)
 
-    def _page(self, device, before_boot, before_sequence, limit):
+    def _page(self, device, before_ordinal, before_sequence, limit):
         rows = self.connection.execute(
-            "select * from log_events where device_id = ? and (boot_id, sequence) < (?, ?) "
-            "order by boot_id desc, sequence desc limit ?",
-            (device, before_boot, before_sequence, limit + 1)).fetchall()
+            "select * from log_events where device_id = ? and (ordinal, sequence) < (?, ?) "
+            "order by ordinal desc, sequence desc limit ?",
+            (device, before_ordinal, before_sequence, limit + 1)).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
-        marks = self._marks(device, rows)
-        entries, newer = [], None if before_sequence >= FIRST_PAGE else before_boot
+        marks, boots = self._marks(device, rows), self._boots(device)
+        entries, newer = [], None if before_sequence >= FIRST_PAGE else before_ordinal
         for row in rows:
-            if newer is not None and row["boot_id"] != newer:
-                entries.append({"g": "boot", "boot": newer})
+            if newer is not None and row["ordinal"] != newer:
+                entries.append({"g": "boot", "boot": boots.get(newer)})
             entries.append(_entry(row))
-            entries.extend(marks.get((row["boot_id"], row["sequence"]), ()))
-            newer = row["boot_id"]
-        following = (rows[-1]["boot_id"], rows[-1]["sequence"]) if rows else None
+            entries.extend(marks.get((row["ordinal"], row["sequence"]), ()))
+            newer = row["ordinal"]
+        following = (rows[-1]["ordinal"], rows[-1]["sequence"]) if rows else None
         return entries, (following if has_more else None), has_more
 
-    async def chunk(self, device, after_boot, after_sequence, limit=1000):
+    async def chunk(self, device, after_ordinal, after_sequence, limit=1000):
         """The next oldest-first chunk of a streaming export, markers in place.
 
         Returns (entries, cursor): the cursor continues the next chunk, None at the end.
         """
-        return await offload(self._chunk, device, after_boot, after_sequence, limit)
+        return await offload(self._chunk, device, after_ordinal, after_sequence, limit)
 
-    def _chunk(self, device, after_boot, after_sequence, limit):
+    def _chunk(self, device, after_ordinal, after_sequence, limit):
         rows = self.connection.execute(
-            "select * from log_events where device_id = ? and (boot_id, sequence) > (?, ?) "
-            "order by boot_id asc, sequence asc limit ?",
-            (device, after_boot, after_sequence, limit)).fetchall()
-        marks, entries, older = self._marks(device, rows), [], after_boot if after_sequence else None
+            "select * from log_events where device_id = ? and (ordinal, sequence) > (?, ?) "
+            "order by ordinal asc, sequence asc limit ?",
+            (device, after_ordinal, after_sequence, limit)).fetchall()
+        marks, entries, older = self._marks(device, rows), [], after_ordinal if after_sequence else None
         for row in rows:
-            if older is not None and row["boot_id"] != older:
+            if older is not None and row["ordinal"] != older:
                 entries.append({"g": "boot", "boot": row["boot_id"]})
-            entries.extend(marks.get((row["boot_id"], row["sequence"]), ()))
+            entries.extend(marks.get((row["ordinal"], row["sequence"]), ()))
             entries.append(_entry(row))
-            older = row["boot_id"]
-        return entries, ((rows[-1]["boot_id"], rows[-1]["sequence"]) if rows else None)
+            older = row["ordinal"]
+        return entries, ((rows[-1]["ordinal"], rows[-1]["sequence"]) if rows else None)
 
     # --- Access --------------------------------------------------------------
     async def grants(self):
@@ -227,17 +256,22 @@ class LogStore:
                 (time.time() - days * 86400,)).rowcount
             while self._used_bytes() > megabytes * 1024 * 1024:
                 gone = self.connection.execute(
-                    "delete from log_events where (device_id, boot_id, sequence) in "
-                    "(select device_id, boot_id, sequence from log_events "
-                    "order by device_id = ?, boot_id, sequence limit ?)", (device, PRUNE_STEP)).rowcount
+                    "delete from log_events where (device_id, ordinal, sequence) in "
+                    "(select device_id, ordinal, sequence from log_events "
+                    "order by device_id = ?, ordinal, sequence limit ?)", (device, PRUNE_STEP)).rowcount
                 deleted += gone
                 if gone == 0:
                     break
-            # A mark goes with the event it is anchored to.
+            # A mark goes with the event it is anchored to, and an emptied boot
+            # with its events, except each controller's newest (the cursor's).
             self.connection.execute(
                 "delete from log_marks where not exists (select 1 from log_events e "
-                "where e.device_id = log_marks.device_id and e.boot_id = log_marks.boot_id "
+                "where e.device_id = log_marks.device_id and e.ordinal = log_marks.ordinal "
                 "and e.sequence = log_marks.sequence)")
+            self.connection.execute(
+                "delete from log_boots where not exists (select 1 from log_events e "
+                "where e.device_id = log_boots.device_id and e.ordinal = log_boots.ordinal) "
+                "and ordinal < (select max(b.ordinal) from log_boots b where b.device_id = log_boots.device_id)")
             self.connection.execute("delete from log_access where checked < ?",
                                     (time.time() - GRANT_DAYS * 86400,))
         self.connection.execute("pragma wal_checkpoint(truncate)")
@@ -249,7 +283,7 @@ class LogStore:
 
     def _erase(self, history_only):
         with self.connection:
-            for table in ("log_events", "log_marks") + (() if history_only else ("log_access", "meta")):
+            for table in ("log_events", "log_marks") + (() if history_only else ("log_boots", "log_access", "meta")):
                 self.connection.execute(f"delete from {table}")
         # Deleted rows linger in free pages until reused: an erase rewrites the file.
         self.connection.execute("vacuum")
@@ -279,10 +313,11 @@ class LogStore:
 
     def _stats(self, device):
         events = self.connection.execute(
-            "select count(*) as rows, min(boot_id) as oldest, max(boot_id) as newest "
+            "select count(*) as rows, min(ordinal) as oldest, max(ordinal) as newest "
             "from log_events where device_id = ?", (device,)).fetchone()
+        boots = self._boots(device)
         gaps = self.connection.execute(
             "select count(*) as marks, coalesce(sum(count), 0) as missed "
             "from log_marks where kind = 'gap' and device_id = ?", (device,)).fetchone()
-        return {"rows": events["rows"], "bytes": self._used_bytes(), "oldestBoot": events["oldest"],
-                "newestBoot": events["newest"], "marks": gaps["marks"], "missed": gaps["missed"]}
+        return {"rows": events["rows"], "bytes": self._used_bytes(), "oldestBoot": boots.get(events["oldest"]),
+                "newestBoot": boots.get(events["newest"]), "marks": gaps["marks"], "missed": gaps["missed"]}

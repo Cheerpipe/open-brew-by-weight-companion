@@ -420,10 +420,15 @@ single disk thread as the secrets).
   id's newest stored `(boot, sequence)`. The id is kept in the database, so a
   restarted companion resumes from its cursor instead of asking for the whole
   ring again, and its pages show the history before any link opens.
-- **Rows and marks.** Events are keyed by `(device id, boot, sequence)`.
-  A `miss` (events the controller's ring overwrote) and a `reset` (a cursor
-  the controller could not resume) become mark rows anchored to the first
-  event after them; nothing stored is deleted by either.
+- **Rows and marks.** Boots are numbered in the order they arrive, and
+  events are keyed by `(device id, that number, sequence)`: the controller
+  streams only its current boot, so arrival order is time order, and a boot
+  id it repeats (one it could not save, or a counter a full flash erase
+  restarted) starts a new boot instead of overwriting an old one. The cursor
+  is the newest boot's id with its last stored sequence. A `miss` (events
+  the controller's ring overwrote) and a `reset` (a cursor the controller
+  could not resume, which only a repeated boot id causes) become mark rows
+  anchored to the first event after them; nothing stored is deleted by either.
 - **Failures.** A log frame never closes the link: text past its bounds is
   cut, an unknown level reads as info, a frame without a usable boot or
   sequence is dropped and counted (`log.dropped`), and a frame the database
@@ -436,8 +441,9 @@ single disk thread as the secrets).
   controllers' rows first. Freed pages are reused, so the file settles near
   the budget without a vacuum. Each round then writes `companion.db.backup`
   with SQLite's online backup, on its own connections and thread.
-- **Access.** `GET /__companion/log` (newest-first pages: `?boot=&before=&limit=`,
-  answering `entries`, `next`, `hasMore`), `GET /__companion/log/export` and
+- **Access.** `GET /__companion/log` (newest-first pages: `?boot=&before=&limit=`
+  taken from the previous answer's opaque `next`, answering `entries`, `next`,
+  `hasMore`), `GET /__companion/log/export` and
   `POST /__companion/log/delete` answer only over HTTPS (nginx refuses them
   on plain HTTP with `403 HTTPS_REQUIRED`) and only for a browser the
   controller lets open the Web UI: the companion asks `GET /api/v1/auth`
