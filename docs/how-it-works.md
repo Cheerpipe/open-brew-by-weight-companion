@@ -461,6 +461,97 @@ single disk thread as the secrets).
   (`{"format":"openbrewbyweight-companion-log","version":2,"device":…,"entries":[…]}`,
   oldest first) puts it before.
 
+### The shot and activation archive
+
+With **Shot archive in the companion** on (`cfg` carries `"archive":true`;
+a controller whose `cfg` has no `archive` cannot send records), the companion
+copies both of the controller's record stores into the same database
+(`companion/archive.py`, on the log store's connection and disk thread;
+`docs/COMPANION_LINK.md` in the firmware repository has the frames).
+
+- **Sync.** Once per session, after `cfg` and `dev`, it asks each store's
+  index (`rx` with the epoch it holds), activations first, then shots, then
+  traces. Afterwards the controller's `rs` notice names both epochs, and only
+  a store whose epoch moved is asked again. Missing or changed records come
+  through fetch windows (`rf`, newest first, every shot including bad ones,
+  contiguous positions joined across small gaps), traces through `rt`, once
+  each (`none` is stored, so it is never asked again; `saving` is skipped and
+  `busy` ends the pass, both retried after 60 s). A request unanswered for
+  300 s is sent again. The epoch, the controller's oldest id and the ids it
+  listed are adopted only once every listed record is stored.
+- **Generations.** Rows are keyed `(device, store, generation, id)`. The
+  controller's ids start again only after Clear history or a factory reset;
+  the companion takes that as a restart when the index's newest id is below
+  the last complete sync's oldest, when every id it shares with the archive
+  is another record, or when more than half of the last index's records are
+  missing at or above the new oldest id. A restart deletes nothing: it closes
+  the generation (all its rows become archive-only) and opens the next one,
+  noting when. An empty index changes nothing. Pairing the same controller
+  again reattaches to its rows.
+- **Identity and deletions.** A shot is `bootId:endedAtMs`, an activation
+  every immutable field (`type`, `durationS`, `hasWallTime`, `noWeight`,
+  both end times), so a controller without a clock still tells records
+  apart. Another identity under the same id replaces that record alone. In
+  the open generation, a record missing from the index is deleted when its
+  id is at least the index's oldest, unless it is `kept` (Remove from the
+  controller, keep in the archive) or **Keep records deleted on the
+  controller** is on (`meta` key `archiveKeepDeleted`), which marks it kept
+  instead; below the oldest it stays (rotation, or a deleted oldest record).
+  Removing a record the controller still lists from the archive leaves an
+  exclusion, so it is not copied again; the exclusion goes when the id leaves
+  the index or a new generation opens. A hole row says how many records
+  could not be copied. A refetched row whose curve is empty (the controller
+  recycled it) keeps the stored curve.
+- **Archive-only rows** are those of closed generations, those below the open
+  generation's oldest id, and kept rows the controller no longer lists.
+  `GET /__companion/archive/shots` and `/history` answer them with the
+  controller's own semantics, so the Web UI merges them with the
+  controller's list: `sort=date|rating` (shots), `dir=desc|asc`, `bad=1`,
+  `result=`, `preset=`, `scale=` (the firmware's scale key, CRC-32 without
+  the final xor), `types=` (activations), at most eight values each; rating
+  order puts unrated shots last, then the rating, then the newest first.
+  `cursor` is the opaque `next` of the previous page (a keyset on the sort
+  key). Each row carries `archiveGeneration` (shots also `archiveTrace`);
+  the answer adds `holes`, `generations` (`generation`, `count`,
+  `restartedAt`, `current`) and, for shots, `presets` found among those rows.
+- **Changes.** `POST /__companion/archive/delete` (`store`, `id`, optional
+  `generation`), `/keep`, `/rate` (archive-only shots), `/erase` (everything,
+  or a `store`, a `generation` or `current`, a `from`/`to` range on
+  `endedAtUnixSec`; records without a clock are never in a range; deleting
+  everything copies what the controller keeps again) and `/settings`
+  (`keepDeleted`) need the controller's answer at that moment
+  (`503 CONTROLLER_UNREACHABLE` otherwise). Reads, `GET .../trace` and
+  `GET .../export` (every generation:
+  `{"format":"openbrewbyweight-companion-archive","version":1,"device",
+  "shots","history","traces","holes"}`) follow the log's rules (HTTPS only, a
+  session the controller accepts, remembered while it is off). Forget erases
+  the archive with the log.
+- **Stats over the whole history.** `GET /__companion/archive/stats?window=
+  10|50|100|500|1000&active=<preset of the "This preset" chart>&epoch=<the
+  controller's shot epoch the screen saw>` (and the list's `result`,
+  `preset`, `scale`) answers `{"stats","good","epoch"}`: `stats` is the
+  header the firmware's `formatStatsHeader` builds, over every stored shot
+  of every generation newest first (`companion/stats.py`, a line-for-line
+  port held to the firmware's golden vectors
+  `tests/fixtures/stats-header-v1.vectors.json`, checksum-pinned), and `good`
+  the good shots the filters keep, from which the browser offers the window
+  choices. When the copy is behind `epoch`, the companion syncs the shots at
+  once and waits up to 8 s; it also syncs as soon as the live Stats frames a
+  screen receives show a new shot. Anything else answers
+  `503 STATS_UNAVAILABLE` with the cause in the companion's log, and the
+  browser keeps the controller's header. Headers are cached per window,
+  preset, filters and store state.
+- **No sync traffic during a shot.** The controller answers each companion
+  ping with `{"t":"hold","on":…,"sync":false}` while nothing holds its radio
+  (and sends `"sync":true` on a change where it can). The companion sends
+  `rx`, `rf`, `rt`, a re-ask or a retry only within a second of a frame that
+  shows no hold (that reply, or a `log`, `rs`, `rec` or `trc` frame, which
+  the controller sends only then); anything due otherwise waits, one per
+  kind, for the next such frame.
+- **Tables.** `archive_records`, `archive_traces`, `archive_sync`,
+  `archive_holes`, `archive_exclusions`, schema 3 of `companion.db`; the
+  log's size budget counts only the log's own tables.
+
 ### Status page and JSON
 
 `/__companion/` (and `/__companion/pair`) is the status and pairing page.
@@ -477,7 +568,11 @@ an unexpected error), the La Marzocco `route`, `unknownFrames` (frames of
 an unknown type in this session), `laMarzocco` (`enabled`, `account`,
 `connection`, `subscribed`, `up`) and `log` (`enabled`, `days`, `mb`,
 `dropped`, and the store's `rows`, `bytes`, `oldestBoot`, `newestBoot`,
-`marks`, `missed` for the controller's id, or `error`). `POST /__companion/pair` with a JSON
+`marks`, `missed` for the controller's id, or `error`) and `archive` (`on`,
+`available`, `syncing`, `syncedAt`, `error`, `keepDeleted`, `generations`
+per store, and per store the archive-only count `shots`/`history`,
+`shotsTotal`/`historyTotal` and the first and last end times, plus `traces`,
+`bytes` and `holes`). `POST /__companion/pair` with a JSON
 body sends a new pairing request, and `POST /__companion/erase` erases a
 pairing the controller no longer recognizes (`409` while it works); a page
 on another site cannot send either without asking.
@@ -530,12 +625,14 @@ name). It asks for the controller's address only when nothing answers.
 | `companion/pairing.py`, `companion/link.py`, `companion/crypto.py` | Pairing client, link handshake and frame codec, link cryptography. |
 | `companion/lamarzocco.py`, `companion/dashboard.py` | La Marzocco client, and the dashboard filter. |
 | `companion/store.py` | The files in `data/secrets/`. |
-| `companion/logstore.py` | The controller's log history in `data/companion.db`. |
+| `companion/logstore.py` | The owner of `data/companion.db`: the controller's log history, migrations, backup and erase. |
+| `companion/archive.py` | The shot and activation archive in the same database, and its sync. |
+| `companion/stats.py` | The Stats header over the whole history, ported from the firmware. |
 | `companion/page.html` | Status and pairing page, styled like the setup page. |
 | `companion/ui-off.html` | Notice with the controller's address while the Web UI goes directly to it. |
 | `setup` | Setup and check script, run on the server. |
 | `compose.host.yaml`, `compose.existing-network.yaml` | Network modes, chosen with `COMPOSE_FILE`. |
 | `data/` (volume) | CA and server certificate with their keys (readable only by root), and the last controller found. |
 | `data/secrets/` (volume) | Companion id and pairing key, pairing secret, La Marzocco account and installation key (folder 0700, files 0600). |
-| `data/companion.db`, `data/companion.db.backup` (volume) | The controller's log history and its daily consistent copy. |
+| `data/companion.db`, `data/companion.db.backup` (volume) | The controller's log history and the archive, and their daily consistent copy. |
 | `/run/gateway/` (container) | Rendered nginx configuration, setup pages, `status.json`, the Web UI cache and the service's socket. |

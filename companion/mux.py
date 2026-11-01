@@ -507,6 +507,8 @@ class View:
             epoch = frame.get("epoch")
             if self.epoch is not None and epoch != self.epoch:
                 self._epoch_moved()
+                if self.kind == "stats":  # A new shot while a screen shows Stats: the archive catches up now.
+                    self.mux.companion.archive.refresh("shots", epoch)
             self.epoch = epoch
         for screen in self.members(self.standing):
             record = screen.records[self.kind]

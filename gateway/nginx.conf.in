@@ -66,6 +66,10 @@ http {
       default_type application/json;
       return 403 '{"error":"HTTPS_REQUIRED","message":"Open the companion over HTTPS to read the log"}';
     }
+    location ^~ /__companion/archive {
+      default_type application/json;
+      return 403 '{"error":"HTTPS_REQUIRED","message":"Open the companion over HTTPS to read the archive"}';
+    }
 
     location = /__companion {
       return 301 /__companion/;

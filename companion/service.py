@@ -22,6 +22,8 @@ from aiohttp import web
 from cryptography.exceptions import InvalidTag
 
 from . import VERSION, crypto, dashboard, log
+from . import stats
+from .archive import FETCH_MAX, Archive, Unavailable
 from .lamarzocco import LaMarzocco
 from .link import Erased, LinkClosed, open_link
 from .logstore import EXPORT_VERSION, FIRST_PAGE, FORMAT, LogStore
@@ -33,7 +35,7 @@ from .store import Store, offload
 HERE = Path(__file__).resolve().parent
 BACKOFF_S = (0, 5, 15, 60, 300)  # The first reopen is immediate; then it backs off.
 RETRY_LATER_S = 15  # The controller is busy with its scale: a steady short retry, never a longer one.
-FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd", "dev", "log"})
+FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd", "dev", "log", "rs", "rec", "trc"})
 RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT = 30, 50
 RETENTION_S = 24 * 3600
 LOG_LEVELS = {"c": 0, "e": 1, "w": 2, "i": 3, "d": 4}
@@ -41,6 +43,10 @@ LOG_CATEGORY_MAX, LOG_MESSAGE_MAX = 24, 1024
 LOG_ACCESS_RECHECK_S = 300  # How often a session's right to read the history is asked of the controller.
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
+# Sync requests leave only right after a controller frame that showed no hold (S17): this long after it.
+CLEAR_S = 1.0
+CLEAR_FRAMES = frozenset({"log", "rs", "rec", "trc"})  # The controller sends these only outside a hold.
+STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
 # A sleep that comes back this late means the loop stood still; 20 s is where
 # the controller's 30 s ping contract starts to break.
 STALL_WARN_S = 5
@@ -49,6 +55,10 @@ STALL_BREACH_S = 20
 CONFIRM_S = 5
 FULL_RETRY_S = (1, 2, 5, 10, 30)
 HTTP_TIMEOUT_S = 10
+# The controller's list filters (docs/INTEGRATION_API.md): at most eight values each.
+FILTER_MAX = 8
+RESULTS = frozenset({"on_recipe", "fast", "slow"})
+HISTORY_TYPES = frozenset({"shot", "rinse", "backflush", "power_on", "other", "no_scale_guard_aborted"})
 SERIAL_FORBIDDEN = set("\r\n:\\/")
 
 
@@ -78,6 +88,8 @@ class Companion:
         self.log_denials = {}  # ...and when it last refused one, so a refused page does not keep asking.
         self.log_unreachable = 0.0  # When the controller last could not answer that question.
         self.retention = (RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT)
+        self.archive = Archive(self)  # The shot and activation archive, in the same store.
+        self.sync_due, self.clear_at = {}, None  # Sync requests waiting for a clear controller frame.
         self.creds_gen = None  # Generation whose sign-in result the controller still waits for.
         self.full_ep, self.full_task = None, None
         self.expect, self.confirm_timer = None, None
@@ -150,8 +162,9 @@ class Companion:
         self.device_name = None  # It named the pairing, not this controller.
         self.pairing.state, self.pairing.auto = "unpaired", False
         self.relay.reset()
+        self.archive.stop()
         await self.erase_log()
-        log(f"{why}; its pairing, La Marzocco account, installation key and log history are erased")
+        log(f"{why}; its pairing, La Marzocco account, installation key, log history and archive are erased")
         self.wake.set()
 
     def not_recognized(self):
@@ -238,6 +251,7 @@ class Companion:
         self.link, self.link_reason = "open", ""
         self.hold, self.held, self.full_ep, self.reported = False, [], None, None
         self.log_subscribed = self.log_identified = False  # This session's cfg and dev re-arm the logsub.
+        self.sync_due, self.clear_at = {}, None
         self.unknown_frames = 0
         self.unknown_kinds.clear()
         self.heard_at = 0.0
@@ -261,6 +275,7 @@ class Companion:
         finally:
             writer.cancel()
             pinger.cancel()
+            self.archive.stop()
             self.ws = self.outbox = None
             self._set_route("direct")
             self.hold, self.held = False, []
@@ -282,6 +297,29 @@ class Companion:
             return False
         self.outbox.put_nowait(frame)
         return True
+
+    def post_sync(self, frame, key):
+        """A sync request (S17): sent only right after a controller frame that showed no hold, so none
+        crosses Wi-Fi during a shot; otherwise it waits (one per `key`, the newest) for the next such
+        frame. A controller without the archive (older firmware, whose pings get no reply) is not held."""
+        if self.outbox is None:
+            return False
+        if not self.archive.available or (self.clear_at is not None and time.monotonic() - self.clear_at < CLEAR_S):
+            return self.post(frame)
+        self.sync_due[key] = frame
+        return True
+
+    def _hold_state(self, frame):
+        """The controller's frames tell whether sync may flow: a `hold` with `sync` false (its reply to
+        each ping) and every log or archive frame mean clear; `sync` true blocks until the next clear."""
+        kind = frame.get("t")
+        if kind in CLEAR_FRAMES or (kind == "hold" and frame.get("sync") is False):
+            self.clear_at = time.monotonic()
+            due, self.sync_due = self.sync_due, {}
+            for request in due.values():
+                self.post(request)
+        elif kind == "hold" and frame.get("sync") is True:
+            self.clear_at = None
 
     async def _writer(self, ws, codec, outbox):
         while True:
@@ -325,6 +363,7 @@ class Companion:
 
     async def _on_frame(self, frame):
         self.heard_at = time.monotonic()
+        self._hold_state(frame)
         kind = frame.get("t")
         if not isinstance(kind, str) or kind not in FROM_CONTROLLER:  # A newer controller's: counted, shown.
             self.unknown_frames += 1
@@ -337,6 +376,7 @@ class Companion:
             await self._apply_account()
             self.log_on = frame.get("log") is True
             await self._log_subscribe()
+            self.archive.configure(frame)
             self._report(force=True)
         elif kind == "creds":
             await self._on_credentials(frame)
@@ -349,6 +389,12 @@ class Companion:
             await self._device_id(frame.get("id"))
         elif kind == "log":
             await self._on_log(frame)
+        elif kind == "rs":
+            self.archive.on_rs(frame)
+        elif kind == "rec":
+            self.archive.on_rec(frame)
+        elif kind == "trc":
+            self.archive.on_trc(frame)
         else:  # cmd
             command_id, op, value = frame.get("id"), frame.get("op"), frame.get("v")
             if type(command_id) is not int or command_id < 1:
@@ -400,6 +446,7 @@ class Companion:
                     log(f"the log store could not keep the controller's id ({error})")
         self.log_identified = True
         await self._log_subscribe()
+        self.archive.start()
 
     # --- Diagnostic log ---------------------------------------------------------
     def _log_usable(self):
@@ -465,24 +512,28 @@ class Companion:
             log(f"the log store failed ({error}); asking the controller again from the stored cursor")
             await self._log_subscribe(resync=True)
 
-    async def log_access(self, headers):
-        """Whether this browser may read the stored history: exactly when the
-        controller lets it open the Web UI (`GET /api/v1/auth` through the
+    async def ui_access(self, headers, live=False):
+        """Whether this browser may read the stored log and archive: exactly when
+        the controller lets it open the Web UI (`GET /api/v1/auth` through the
         relay). Each session's answer is kept for LOG_ACCESS_RECHECK_S, and an
         accepted one is remembered on disk, so it keeps reading while the
         controller is off; a controller that did not answer is not asked again
-        for LOG_UNREACHABLE_S, so a page never waits on it twice in a row."""
+        for LOG_UNREACHABLE_S, so a page never waits on it twice in a row.
+        `live` (changing the archive) needs the controller's answer now: None
+        when it cannot give one."""
         session = hashlib.sha256(headers.get("X-WebUI-Session", "").encode()).hexdigest()
         now = time.time()
         for answers, verdict in ((self.log_grants, True), (self.log_denials, False)):
-            if session in answers and now - answers[session] < LOG_ACCESS_RECHECK_S:
+            if not live and session in answers and now - answers[session] < LOG_ACCESS_RECHECK_S:
                 return verdict
         allowed = None
-        if now - self.log_unreachable >= LOG_UNREACHABLE_S:
+        if live or now - self.log_unreachable >= LOG_UNREACHABLE_S:
             allowed = await self._web_ui_allows(headers)
             if allowed is None:
                 self.log_unreachable = now
         if allowed is None:
+            if live:
+                return None
             if session in self.log_grants:
                 self.log_grants[session] = now  # What the controller said last stands until it can answer.
             return session in self.log_grants
@@ -671,6 +722,10 @@ class Companion:
                              else {"error": self.log_error or "not open"})
         except sqlite3.Error as error:
             log_facts["error"] = str(error)
+        try:
+            archive_facts = await self.archive.facts()
+        except sqlite3.Error as error:
+            archive_facts = {"on": self.archive.on, "available": self.archive.available, "error": str(error)}
         return {
             "name": self.name, "version": VERSION, "id": self.id,
             "paired": pairing is not None,
@@ -684,7 +739,7 @@ class Companion:
             "laMarzocco": {"enabled": self.cfg["lm"], "account": credentials is not None,
                            "connection": self.cfg["conn"], "subscribed": self.lm.sub, "up": self.lm.up,
                            "refused": self.lm.refused},
-            "log": log_facts,
+            "log": log_facts, "archive": archive_facts,
             "relay": self.relay.mode, **self.screens.mux.status(),
         }
 
@@ -771,11 +826,16 @@ def web_app(companion):
             return None
         return boot, before, limit
 
-    async def _log_refusal(request):
-        """The history answers with the controller down, but only to a browser it would let in."""
+    async def _log_refusal(request, live=False):
+        """The history answers with the controller down, but only to a browser it would let in;
+        changing the archive (`live`) needs the controller's answer now."""
         if not companion._log_usable():
             return web.json_response({"error": "STORE", "message": companion.log_error or "not open"}, status=503)
-        if not await companion.log_access(request.headers):
+        allowed = await companion.ui_access(request.headers, live)
+        if allowed is None:
+            return web.json_response({"error": "CONTROLLER_UNREACHABLE", "message": "The controller must be on "
+                                      "to confirm your sign-in"}, status=503)
+        if not allowed:
             return web.json_response({"error": "AUTH_REQUIRED", "message": "Sign in to the Web UI through "
                                       "the companion while the controller is on"}, status=401)
         return None
@@ -834,6 +894,197 @@ def web_app(companion):
         log("the log history was deleted on the companion's page")
         return web.json_response({"deleted": True}, headers=no_store)
 
+    # --- The archive ---------------------------------------------------------
+    def _numbers(source, *names, optional=()):
+        """Whole numbers in uint32 range; a name in `optional` may be absent (None)."""
+        try:
+            values = [None if name in optional and source.get(name) is None else int(source[name])
+                      for name in names]
+        except (KeyError, TypeError, ValueError):
+            return None
+        return values if all(value is None or 0 <= value < 2 ** 32 for value in values) else None
+
+    def _invalid():
+        return web.json_response({"error": "INVALID_REQUEST"}, status=400)
+
+    async def _archive_body(request):
+        """(body, refusal): a JSON object from a browser the controller accepts right now."""
+        if request.content_type != "application/json":
+            return None, web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return None, _invalid()
+        return body, await _log_refusal(request, live=True)
+
+    def _archive_query(store, query):
+        """The tail's sort, direction, cursor and filters with the controller's whitelists, or None."""
+        def listed(name, allowed=None):
+            values = [value for value in query.get(name, "").split(",") if value]
+            if allowed is None:
+                values = [int(value) for value in values]
+                if not all(0 <= value < 2 ** 32 for value in values):
+                    raise ValueError()
+            elif not set(values) <= allowed:
+                raise ValueError()
+            if len(values) > FILTER_MAX:
+                raise ValueError()
+            return values
+        try:
+            parsed = {"sort": query.get("sort", "date"), "dir": query.get("dir", "desc"), "bad": query.get("bad") == "1",
+                      "result": listed("result", RESULTS) if store == "shots" else [],
+                      "preset": listed("preset") if store == "shots" else [],
+                      "scale": listed("scale") if store == "shots" else [],
+                      "types": listed("types", HISTORY_TYPES) if store == "history" else [],
+                      "cursor": tuple(int(part) for part in query["cursor"].split(":")) if "cursor" in query else None}
+            limit = int(query.get("limit", 20))
+        except ValueError:
+            return None
+        sorts = ("date", "rating") if store == "shots" else ("date",)
+        if parsed["sort"] not in sorts or parsed["dir"] not in ("desc", "asc") or not 1 <= limit <= FETCH_MAX[store] \
+                or (parsed["cursor"] is not None and len(parsed["cursor"]) != (4 if parsed["sort"] == "rating" else 2)):
+            return None
+        return parsed, limit
+
+    async def archive_rows(request):
+        store = request.match_info["store"]
+        query = _archive_query(store, request.query)
+        if query is None:
+            return _invalid()
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
+        rows, following, holes, generations, presets = await companion.archive.store.tail(
+            companion.device_id, store, *query)
+        answer = {"device": companion.device_id, "rows": rows, "next": following, "holes": holes,
+                  "generations": generations}
+        if presets is not None:
+            answer["presets"] = presets
+        return web.json_response(answer, headers=no_store)
+
+    async def archive_stats(request):
+        """The Stats header over the whole history (S13), or 503 STATS_UNAVAILABLE: the browser then
+        keeps the controller's own header without saying anything."""
+        query = request.query
+        try:
+            window, active, epoch = int(query["window"]), int(query.get("active", 0)), int(query["epoch"])
+            filters = _archive_query("shots", {key: query[key] for key in ("result", "preset", "scale") if key in query})
+        except (KeyError, ValueError):
+            filters = None
+        if filters is None or window not in STATS_WINDOWS or not 0 <= active < 256 or not 0 <= epoch < 2 ** 32:
+            return _invalid()
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
+        parsed = filters[0]
+        chosen = (tuple(stats.VERDICTS[name] for name in parsed["result"]), tuple(parsed["preset"]),
+                  tuple(parsed["scale"]))
+        try:
+            header, good, synced = await companion.archive.header(window, active, epoch, chosen)
+        except (Unavailable, sqlite3.Error) as error:
+            log(f"the Stats header over the whole history is unavailable ({error}); screens show the "
+                "controller's")
+            return web.json_response({"error": "STATS_UNAVAILABLE"}, status=503)
+        return web.json_response({"stats": header, "good": good, "epoch": synced}, headers=no_store)
+
+    async def archive_trace(request):
+        identity = _numbers(request.query, "id", "boot", "end")
+        if identity is None:
+            return _invalid()
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
+        data = await companion.archive.store.trace(companion.device_id, *identity)
+        if data is None:
+            return web.json_response({"error": "NO_SHOT_TRACE"}, status=404)
+        return web.Response(body=data, content_type="application/octet-stream", headers=no_store)
+
+    def _found(done):
+        return web.json_response({"ok": True}, headers=no_store) if done else \
+            web.json_response({"error": "NOT_FOUND"}, status=404)
+
+    async def archive_rate(request):
+        body, refusal = await _archive_body(request)
+        if refusal is not None:
+            return refusal
+        values = _numbers(body, "generation", "id", "rating", optional=("generation",))
+        if values is None or values[2] > 5:
+            return _invalid()
+        return _found(await companion.archive.store.rate(companion.device_id, *values))
+
+    async def archive_delete(request):
+        """One record out of the archive: a tail row, Remove from the archive only, or the archive half of
+        Delete everywhere (the Web UI deletes it on the controller first)."""
+        body, refusal = await _archive_body(request)
+        if refusal is not None:
+            return refusal
+        values = _numbers(body, "generation", "id", optional=("generation",))
+        if values is None or body.get("store") not in FETCH_MAX:
+            return _invalid()
+        return _found(await companion.archive.store.remove(companion.device_id, body["store"], *values))
+
+    async def archive_keep(request):
+        """Remove from the controller, keep in the archive: marked before the Web UI deletes it there."""
+        body, refusal = await _archive_body(request)
+        if refusal is not None:
+            return refusal
+        values = _numbers(body, "id")
+        if values is None or body.get("store") not in FETCH_MAX:
+            return _invalid()
+        return _found(await companion.archive.store.keep(companion.device_id, body["store"], values[0]))
+
+    async def archive_erase(request):
+        """Bulk delete: everything, or one store, one generation (`current`: the open one) or a date range."""
+        body, refusal = await _archive_body(request)
+        if refusal is not None:
+            return refusal
+        scope = _numbers(body, "generation", "from", "to", optional=("generation", "from", "to"))
+        if scope is None or body.get("store", "shots") not in FETCH_MAX or \
+                not isinstance(body.get("current", False), bool):
+            return _invalid()
+        deleted = await companion.archive.store.erase(companion.device_id, body.get("store"), scope[0],
+                                                      body.get("current", False), *scope[1:])
+        log(f"{deleted} archive record(s) were deleted on the companion's page")
+        return web.json_response({"ok": True, "deleted": deleted}, headers=no_store)
+
+    async def archive_settings(request):
+        body, refusal = await _archive_body(request)
+        if refusal is not None:
+            return refusal
+        if set(body) != {"keepDeleted"} or not isinstance(body["keepDeleted"], bool):
+            return _invalid()
+        await companion.archive.store.set_keep_deleted(body["keepDeleted"])
+        return web.json_response({"ok": True}, headers=no_store)
+
+    async def archive_export(request):
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
+        device, store = companion.device_id, companion.archive.store
+        name = "obbw-archive" + ("-" + re.sub(r"[^A-Za-z0-9]", "-", device) if device else "")
+        answer = web.StreamResponse(headers={"Content-Type": "application/json",
+                                             "Content-Disposition": f'attachment; filename="{name}.json"',
+                                             "Cache-Control": "no-store"})
+        await answer.prepare(request)
+        head = {"format": "openbrewbyweight-companion-archive", "version": 1, "device": device}
+        await answer.write(json.dumps(head)[:-1].encode())
+        for key, read in (("shots", lambda after: store.chunk(device, "shots", after)),
+                          ("history", lambda after: store.chunk(device, "history", after)),
+                          ("traces", lambda after: store.trace_chunk(device, after))):
+            await answer.write(f',"{key}":['.encode())
+            after, first = (0, 0), True
+            while after is not None:
+                items, after = await read(after)
+                for item in items:
+                    await answer.write((("" if first else ",") + json.dumps(item)).encode())
+                    first = False
+            await answer.write(b"]")
+        await answer.write(f',"holes":{json.dumps(await store.holes(device))}}}'.encode())
+        await answer.write_eof()
+        return answer
+
     app = web.Application(client_max_size=2 << 20)  # An OTA chunk is 64 KiB; nginx allows 1 MiB.
     app.router.add_get("/__companion/", show)
     app.router.add_get("/__companion/ui-gate", gate)
@@ -844,6 +1095,15 @@ def web_app(companion):
     app.router.add_get("/__companion/log", log_page)
     app.router.add_get("/__companion/log/export", log_export)
     app.router.add_post("/__companion/log/delete", log_delete)
+    app.router.add_get("/__companion/archive/{store:shots|history}", archive_rows)
+    app.router.add_get("/__companion/archive/trace", archive_trace)
+    app.router.add_get("/__companion/archive/stats", archive_stats)
+    app.router.add_get("/__companion/archive/export", archive_export)
+    app.router.add_post("/__companion/archive/rate", archive_rate)
+    app.router.add_post("/__companion/archive/delete", archive_delete)
+    app.router.add_post("/__companion/archive/erase", archive_erase)
+    app.router.add_post("/__companion/archive/keep", archive_keep)
+    app.router.add_post("/__companion/archive/settings", archive_settings)
     app.router.add_post("/__companion/pair", pair)
     app.router.add_post("/__companion/erase", erase)
     return app

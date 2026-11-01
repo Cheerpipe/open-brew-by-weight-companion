@@ -74,6 +74,23 @@
     <button id="log-more" type="button" hidden></button>
     <button id="log-delete" type="button" hidden></button>
   </section>
+
+  <section class="card">
+    <h2 id="archive-title"></h2>
+    <p id="archive-stats" class="muted"></p>
+    <p id="archive-holes" class="status warn" hidden></p>
+    <p id="archive-note" class="status warn" hidden></p>
+    <ul id="archive-restarts" class="muted"></ul>
+    <p><label><input type="checkbox" id="archive-keep"> <span id="archive-keep-label"></span></label><br>
+      <small id="archive-keep-hint" class="muted"></small></p>
+    <p><a id="archive-export" href="#" hidden></a></p>
+    <p id="archive-bulk" hidden>
+      <label for="archive-scope" id="archive-scope-label"></label>
+      <select id="archive-scope"></select>
+      <span id="archive-range" hidden><input type="date" id="archive-from"> – <input type="date" id="archive-to"></span>
+      <button id="archive-delete" type="button"></button>
+    </p>
+  </section>
 </main>
 <footer>
   <div id="version"></div>
@@ -128,7 +145,28 @@
       logOff: "The controller is not sending its log here: Diagnostic log through the companion is off in Admin → Companion.",
       logAuth: "Sign in to the Web UI through this companion to read the log. Once signed in, it stays readable here even while the controller is off.",
       logHttps: "Open this page over HTTPS to read the log.",
-      logStore: "The log history is unavailable: {error}"
+      logStore: "The log history is unavailable: {error}",
+      archiveTitle: "Shot archive", archiveEmpty: "Nothing stored yet",
+      archiveStats: "{shots} shots and {history} activations · {older} of them no longer on the controller · {mb} MB",
+      archiveDates: "From {first} to {last}", archiveSynced: "Last copied {when}",
+      archiveSyncing: "Copying from the controller…",
+      archiveHoles: "Up to {n} records made while the companion was away could not be copied.",
+      archiveOff: "The controller is not sending its records here: Shot archive in the companion is off in Admin → Companion.",
+      archiveOld: "This controller's firmware cannot send its records yet. Update it to keep every shot here.",
+      archiveExport: "Export everything", archiveDelete: "Delete",
+      archiveRestart: "The controller's {store} history restarted on {date}; {n} records kept here.",
+      shot: "shot", activation: "activation",
+      archiveKeep: "Keep records deleted on the controller",
+      archiveKeepHint: "When a shot or activation is deleted in the Web UI opened directly on the controller, this companion keeps its copy.",
+      archiveScope: "Delete from the archive: ", scopeAll: "Everything", scopeShots: "All shots",
+      scopeHistory: "All activations", scopeRange: "Shots and activations from a date range",
+      scopeGeneration: "{store} history {n} · {count} records{current}", scopeCurrent: " (current)",
+      archiveDeleteConfirm: "Delete {what} from this companion? Export everything first if you may want them back: records the controller no longer keeps cannot be recovered.",
+      archiveAllConfirm: "Delete every shot and activation kept on this companion? Export everything first if you may want them back: records the controller no longer keeps cannot be recovered, and the ones it still keeps are copied again.",
+      archiveRangeMissing: "Choose both dates first. Records without a date (made before the controller knew the time) are never part of a range.",
+      archiveAuth: "Sign in to the Web UI through this companion to export or delete the archive.",
+      archiveController: "Turn the controller on so it can confirm your sign-in, then try again.",
+      archiveStore: "The archive is unavailable: {error}"
     }
   };
   var t = T.en;
@@ -179,6 +217,7 @@
       : lm.refused ? t.lmRefused
       : (lm.up ? t.lmConnected : t.lmConnecting) + " · " + (s.route === "companion" ? t.routeCompanion : t.routeDirect);
     renderLogStats(s);
+    renderArchive(s);
     clearTimeout(timer);
     timer = setTimeout(refresh, pending ? 1000 : 5000);
   }
@@ -268,24 +307,119 @@
     }, logRefused);
   }
   $("log-more").addEventListener("click", function () { logPage(false); });
-  $("log-export").addEventListener("click", function (event) {
-    event.preventDefault();
-    logFetch("/__companion/log/export").then(function (r) {
+  // An export: the server names the file.
+  function download(url, fallback, refused) {
+    logFetch(url).then(function (r) {
       var name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "");
       return r.blob().then(function (blob) {
         var link = document.createElement("a");
         link.href = URL.createObjectURL(blob);
-        link.download = name ? name[1] : "obbw-log.json";
+        link.download = name ? name[1] : fallback;
         link.click();
         setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
       });
-    }).catch(logRefused);
+    }).catch(refused);
+  }
+  $("log-export").addEventListener("click", function (event) {
+    event.preventDefault();
+    download("/__companion/log/export", "obbw-log.json", logRefused);
   });
   $("log-delete").addEventListener("click", function () {
     if (!confirm(t.logDeleteConfirm)) return;
     logFetch("/__companion/log/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
       .then(function () { logRows = null; logPage(true); }, logRefused);
   });
+  // The shot archive: what the companion keeps, its export and Delete all.
+  $("archive-title").textContent = t.archiveTitle;
+  $("archive-export").textContent = t.archiveExport;
+  $("archive-delete").textContent = t.archiveDelete;
+  function archiveRefused(body) {
+    var note = body && body.error === "AUTH_REQUIRED" ? t.archiveAuth : body && body.error === "HTTPS_REQUIRED" ? t.logHttps
+      : body && body.error === "CONTROLLER_UNREACHABLE" ? t.archiveController
+      : body && body.error === "STORE" ? fill(t.archiveStore, { error: body.message || "" }) : "";
+    $("archive-note").textContent = note;
+    $("archive-note").hidden = !note;
+  }
+  function day(seconds) { return new Date(seconds * 1000).toLocaleDateString(); }
+  function renderArchive(s) {
+    var a = s.archive || {}, total = (a.shotsTotal || 0) + (a.historyTotal || 0), first = Math.min(
+      a.shotsFirst || Infinity, a.historyFirst || Infinity), last = Math.max(a.shotsLast || 0, a.historyLast || 0);
+    var lines = !s.paired ? [] : a.error && !total ? [fill(t.archiveStore, { error: a.error })]
+      : !total ? [t.archiveEmpty]
+      : [fill(t.archiveStats, { shots: a.shotsTotal, history: a.historyTotal, older: a.shots + a.history,
+        mb: (a.bytes / 1048576).toFixed(1) })];
+    if (total && last) lines.push(fill(t.archiveDates, { first: day(first), last: day(last) }));
+    if (a.syncing) lines.push(t.archiveSyncing);
+    else if (a.syncedAt) lines.push(fill(t.archiveSynced, { when: new Date(a.syncedAt * 1000).toLocaleString() }));
+    if (s.paired && s.link === "open") lines.push(!a.available ? t.archiveOld : !a.on ? t.archiveOff : "");
+    $("archive-stats").textContent = lines.filter(Boolean).join(" · ");
+    $("archive-holes").hidden = !a.holes;
+    $("archive-holes").textContent = fill(t.archiveHoles, { n: a.holes });
+    $("archive-export").hidden = $("archive-bulk").hidden = !total;
+    $("archive-keep").checked = !!a.keepDeleted;
+    $("archive-keep").disabled = !s.paired || a.keepDeleted === undefined;
+    renderBulk(a);
+  }
+  $("archive-export").addEventListener("click", function (event) {
+    event.preventDefault();
+    download("/__companion/archive/export", "obbw-archive.json", archiveRefused);
+  });
+  // The keep setting and the bulk deletes: each confirmed, each suggesting an export first.
+  $("archive-keep-label").textContent = t.archiveKeep;
+  $("archive-keep-hint").textContent = t.archiveKeepHint;
+  $("archive-scope-label").textContent = t.archiveScope;
+  function archivePost(path, body) {
+    return logFetch("/__companion/archive/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) }).then(function () { $("archive-note").hidden = true; refresh(); }, function (body) {
+      archiveRefused(body);
+      refresh();
+    });
+  }
+  $("archive-keep").addEventListener("change", function () {
+    archivePost("settings", { keepDeleted: $("archive-keep").checked });
+  });
+  $("archive-scope").addEventListener("change", function () {
+    $("archive-range").hidden = $("archive-scope").value !== "range";
+  });
+  $("archive-delete").addEventListener("click", function () {
+    var option = $("archive-scope").selectedOptions[0], scope = JSON.parse(option.dataset.body || "{}");
+    if (option.value === "range") {
+      var from = $("archive-from").valueAsDate, to = $("archive-to").valueAsDate;
+      if (!from || !to) return alert(t.archiveRangeMissing);
+      scope.from = Math.floor(from.getTime() / 1000 + from.getTimezoneOffset() * 60);
+      scope.to = Math.floor(to.getTime() / 1000 + to.getTimezoneOffset() * 60) + 86399;
+    }
+    var text = option.value === "all" ? t.archiveAllConfirm : fill(t.archiveDeleteConfirm, { what: option.text.toLowerCase() });
+    if (confirm(text)) archivePost("erase", scope);
+  });
+  function renderBulk(a) {
+    var options = [["all", t.scopeAll, {}], ["shots", t.scopeShots, { store: "shots" }],
+      ["history", t.scopeHistory, { store: "history" }], ["range", t.scopeRange, {}]], restarts = [];
+    ["shots", "history"].forEach(function (store) {
+      var list = (a.generations || {})[store] || [], name = store === "shots" ? t.shot : t.activation;
+      list.forEach(function (g) {
+        var older = list.filter(function (o) { return o.generation === g.generation - 1; })[0];
+        if (g.restartedAt && older) restarts.push(fill(t.archiveRestart, { store: name, date: day(g.restartedAt), n: older.count }));
+        if (list.length > 1 && g.count) options.push(["g" + store + g.generation, fill(t.scopeGeneration, {
+          store: name.charAt(0).toUpperCase() + name.slice(1), n: g.generation, count: g.count,
+          current: g.current ? t.scopeCurrent : "" }), { store: store, generation: g.generation }]);
+      });
+    });
+    $("archive-restarts").textContent = "";
+    restarts.forEach(function (line) {
+      $("archive-restarts").appendChild(document.createElement("li")).textContent = line;
+    });
+    var chosen = $("archive-scope").value, select = $("archive-scope");
+    select.textContent = "";
+    options.forEach(function (o) {
+      var option = select.appendChild(document.createElement("option"));
+      option.value = o[0];
+      option.text = o[1];
+      option.dataset.body = JSON.stringify(o[2]);
+    });
+    if (options.some(function (o) { return o[0] === chosen; })) select.value = chosen;
+    $("archive-range").hidden = select.value !== "range";
+  }
   function renderLogStats(s) {
     var log = s.log || {};
     if (!s.paired) {

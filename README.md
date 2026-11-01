@@ -113,6 +113,46 @@ of every line, so you can look back days or weeks:
   `COMPANION_LOG_RETENTION_DAYS` and `COMPANION_LOG_RETENTION_MB` change both.
   Forgetting the companion in Admin deletes it.
 
+## Every shot you ever pulled
+
+The controller keeps your newest 1,000 shots and 1,000 activations; older
+ones make room for new ones. With **Shot archive in the companion** on
+(Admin → Companion, on by default), the companion keeps a copy of every shot,
+with its curve and trace, and every activation, so nothing is lost when the
+controller's history fills up:
+
+- Shots made while the companion was off are copied when it is back, as long
+  as the controller still has them. If more than 1,000 happened meanwhile,
+  the oldest of them are gone before they could be copied; the companion
+  says how many.
+- In **History** and **Stats** opened through the companion, the controller's
+  records and the older ones the companion keeps form one list: filters,
+  sorting and scrolling cover both. Older shots carry a grey number, since
+  numbers start again after a Clear or a factory reset.
+- **Stats** opened through the companion count your whole history too: the
+  averages, the arrival and consistency charts and the filters cover every
+  shot it keeps, and you can choose 500 shots or all of them besides 10, 50
+  and 100 once you have that many.
+- Ratings and deletions you make on the controller reach the archive too.
+  Through the companion, a shot's menu also offers **Remove from the
+  controller, keep in the archive** and **Remove from the archive only**.
+- **Clear history** and a factory reset never delete the archive: the
+  companion keeps everything it copied and starts a new section for what
+  comes next ("The controller's shot history restarted on …"). Clear history
+  opened through the companion can also delete the companion's copy.
+- **Keep records deleted on the controller** (on the companion's page, off by
+  default) keeps the companion's copy when a shot is deleted in the Web UI
+  opened directly on the controller.
+- The companion's own page shows how much it keeps, with **Export
+  everything** (one JSON file) and deletes for everything, one kind of
+  record, one section or a date range.
+- During a shot nothing about the archive or the log crosses Wi-Fi in
+  either direction: new records are copied after the shot, a couple of
+  minutes later, or at once while a screen shows Stats.
+- Pairing the same controller again, as after a factory reset, finds its
+  archive again. Forgetting the companion in Admin deletes the archive with
+  the log; export it first if you want to keep it.
+
 ## La Marzocco
 
 On a Linea Micra, turn on **La Marzocco** in **Admin → Companion** after
@@ -267,7 +307,7 @@ Everything lives in the `data` folder on your server:
 | `secrets/pairing.json` | The secret it shares with the controller after pairing. |
 | `secrets/credentials.json` | Your La Marzocco email, password and machine serial, only while La Marzocco is on. |
 | `secrets/lamarzocco.json` | The key of the companion's own La Marzocco installation, kept until the companion is unpaired. |
-| `companion.db`, `companion.db.backup` | The controller's diagnostic log history, and a consistent copy of it refreshed daily for your backups. |
+| `companion.db`, `companion.db.backup` | The controller's diagnostic log history and your shot archive, and a consistent copy of both refreshed daily for your backups. |
 | `log/` | The companion's own log. |
 
 The keys the companion uses to sign each screen's requests to the controller
@@ -284,13 +324,15 @@ live only in memory and change every time it starts.
 - The companion's pages show its state and, while a request is open, the
   pairing code. Like the setup page, anyone on your network can open them;
   they never show account details.
-- The log history is the exception: it opens only over HTTPS, and only for a
-  browser the controller lets open the Web UI. With the Web UI password on,
+- The log history and the shot archive are the exception: they open only over
+  HTTPS, and only for a browser the controller lets open the Web UI.
+  Changing the archive (rating, deleting, its setting) also needs the
+  controller on, so it can confirm the sign-in at that moment. With the Web UI password on,
   that means a browser signed in through the companion; a browser it accepted
   keeps reading while the controller is off, and a change of the password
   setting applies within five minutes of the controller being back.
 - Keep the `data` folder on the server's own disk, not a network share: the
-  log history's database can be damaged there. To back it up, copy the folder;
+  database with the log history and the archive can be damaged there. To back it up, copy the folder;
   `companion.db.backup` is always a complete copy, even while it runs.
 
 ## Good to know
@@ -354,7 +396,7 @@ controller (`tests/fake_controller.py` for the relay and the screens) and a
 fake La Marzocco cloud:
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
+docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore archive stats; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
 ```
 
 `./setup`'s test runs the script against a fake Docker (about 20 seconds,

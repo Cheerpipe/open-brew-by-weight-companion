@@ -12,6 +12,10 @@ import aiohttp
 from . import PROTOCOL, clip, crypto
 
 MAX_FRAME = 4096
+# The controller's record frames (the archive's index, pages and traces) may
+# be larger, and only in answer to this companion's request.
+MAX_FROM_CONTROLLER = 28672
+LIMIT = {b"c": MAX_FRAME, b"f": MAX_FROM_CONTROLLER}  # By direction byte.
 STEP_TIMEOUT_S = 10
 # A ping the controller has not acknowledged within this time closes the link: the controller sends
 # nothing on its own, so this finds a half-open link at the next ping without any extra traffic.
@@ -43,14 +47,14 @@ class FrameCodec:
     def encode(self, frame):
         body = json.dumps({"q": self.sent + 1, **frame}, separators=(",", ":"))
         text = f"{self._tag(self.send_dir, body)}.{body}"
-        if len(text) > MAX_FRAME:
-            raise ValueError(f"{frame.get('t')} frame of {len(text)} bytes exceeds {MAX_FRAME}")
+        if len(text) > LIMIT[self.send_dir]:
+            raise ValueError(f"{frame.get('t')} frame of {len(text)} bytes exceeds {LIMIT[self.send_dir]}")
         self.sent += 1
         return text
 
     def decode(self, text):
         tag, dot, body = text.partition(".")
-        if len(text.encode()) > MAX_FRAME or not dot or not hmac.compare_digest(tag, self._tag(self.receive_dir, body)):
+        if len(text.encode()) > LIMIT[self.receive_dir] or not dot or not hmac.compare_digest(tag, self._tag(self.receive_dir, body)):
             raise LinkClosed("PROTOCOL", "frame failed its MAC check")
         try:
             frame = json.loads(body)
@@ -78,7 +82,7 @@ async def _receive(ws):
 async def open_link(http, url, hello, secret):
     """Open and authenticate the link; returns (websocket, codec), or raises LinkClosed or Erased."""
     try:
-        ws = await http.ws_connect(url, autoping=True, max_msg_size=MAX_FRAME,
+        ws = await http.ws_connect(url, autoping=True, max_msg_size=MAX_FROM_CONTROLLER,
                                    timeout=aiohttp.ClientWSTimeout(ws_close=STEP_TIMEOUT_S))
     except aiohttp.WSServerHandshakeError as error:
         raise LinkClosed("NOT_PAIRED" if error.status == 404 else f"HTTP_{error.status}") from None

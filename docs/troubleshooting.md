@@ -233,6 +233,31 @@ page:
   companion's log. Everything else keeps working; a damaged file can be
   replaced by `data/companion.db.backup` with the companion stopped.
 
+## The archive does not show older shots
+
+- **No grey-numbered shots in the list:** the companion adds only records the
+  controller no longer keeps. Until the controller has made more than 1,000
+  shots (or 1,000 activations) since the companion joined, or its history
+  restarted, everything is still on the controller itself.
+- **"This controller's firmware cannot send its records yet":** update the
+  controller; the archive needs a firmware that has **Shot archive in the
+  companion** in Admin → Companion.
+- **"Shot archive in the companion is off":** turn it on in Admin →
+  Companion. The companion catches up with everything the controller still
+  keeps.
+- **"Up to N records … could not be copied":** the companion was away while
+  more records than the controller keeps were made; those never reached it.
+- **"The controller's history restarted":** Clear history or a factory reset
+  started the controller's numbering again. Nothing was deleted; the earlier
+  records are listed with grey numbers and can be deleted on the companion's
+  page, one section at a time.
+- **A deleted shot is still listed:** **Keep records deleted on the
+  controller** is on, or the shot was removed with **keep in the archive**.
+  Delete it from the companion's copy in its menu.
+- **Changing the archive says to turn the controller on:** changes need the
+  controller to confirm your sign-in at that moment. Reading and exporting
+  work with it off.
+
 ## Start the pairing over
 
 Choose **Forget** in Admin → Companion first. The next time the companion
