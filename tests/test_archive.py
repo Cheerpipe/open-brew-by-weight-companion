@@ -26,8 +26,9 @@ sys.path.insert(0, str(ROOT))
 import aiohttp  # noqa: E402
 from aiohttp.test_utils import TestServer  # noqa: E402
 
-from companion import archive, link, service, stats  # noqa: E402
+from companion import archive, index_mirror, link, service, stats  # noqa: E402
 from companion.service import Companion, web_app  # noqa: E402
+from fake_controller import index_answer  # noqa: E402
 
 DEVICE = "AA:BB:CC:DD:EE:FF"
 COLS = ["id", "bootId", "endedAtMs", "hasWallTime", "endedAtUnixSec", "endedAtLocalSec", "rating", "badReason",
@@ -87,6 +88,9 @@ class Controller:
         self.held = None  # A list while a hold keeps the requests back (and the pings unanswered).
         self.hold_next = False  # A hold starts right after the next index answer.
         self.hold_page = False  # ...or right after the next page.
+        # A firmware with index deltas (`sum`, `d`): the link session's baselines, and the field the
+        # next delta answer corrupts.
+        self.deltas, self.baselines, self.tamper = False, {}, None
 
     def moved(self, store):
         self.epochs[store] += 1
@@ -181,8 +185,14 @@ class Controller:
                                     "epoch": self.epochs[frame["s"]]}
             if self.counters:
                 f.update(gen=self.gen[store], next=self.next[store])
-            if frame["ep"] != self.epochs[store]:
-                f["rows"] = [value for rid in self.newest_first(store) for value in (rid, self.rev(store, rid))]
+            rows = [value for rid in self.newest_first(store) for value in (rid, self.rev(store, rid))]
+            if self.deltas:
+                f.update(index_answer(self.baselines, store, frame["ep"], frame.get("d"), f["epoch"], rows))
+                if "base" in f and self.tamper:
+                    f[self.tamper] ^= 1
+                    self.tamper = None
+            elif frame["ep"] != self.epochs[store]:
+                f["rows"] = rows
             await companion._on_frame({"t": "rec", "f": f})
             if self.hold_next:  # A scaled shot starts: the controller tells the companion at once.
                 self.hold_next, self.held = False, []
@@ -396,6 +406,7 @@ class Link:
         self.companion, self.fake = companion, fake
 
     async def open(self, archive_on=True, log=False, cfg=None):
+        self.fake.baselines = {}  # A new link session: the controller's baselines start again.
         self.outbox = asyncio.Queue()
         self.companion.outbox = self.outbox
         self.task = asyncio.create_task(self.fake.serve(self.companion, self.outbox))
@@ -1010,6 +1021,66 @@ async def main():
             await settled(companion)
             assert not await ids(companion, "shots", opened)
             assert await ids(companion, "shots", opened + 1) == {1, 2, 3}, "the reused ids are copied"
+
+            # --- Index deltas: `d` only after a `sum` in this link session, every answer checked ---------
+            assert not any("d" in frame for frame in fake.requests), "a firmware without `sum` never sees `d`"
+            link_.close()
+            fake.deltas = True
+            await link_.open()
+            await settled(companion)
+
+            async def change(*kinds):
+                """Shots change; the index the notice brings in, as the requests and answers went."""
+                answers, requests = [], len(fake.requests)
+                original = companion.archive.on_rec
+
+                def seen(frame):
+                    if frame["f"].get("type") == "records":
+                        answers.append("delta" if "base" in frame["f"] else "rows" if "rows" in frame["f"] else "same")
+                    original(frame)
+                companion.archive.on_rec = seen
+                for kind in kinds:
+                    if kind == "new":
+                        fake.add_shot()
+                    elif kind == "rating":
+                        record = fake.stores["shots"][sorted(fake.stores["shots"])[-3]][0]
+                        record["rating"] = (record["rating"] + 1) % 6
+                    else:
+                        del fake.stores["shots"][sorted(fake.stores["shots"])[-2]]
+                fake.moved("shots")
+                await fake.notice(companion)
+                await settled(companion)
+                companion.archive.on_rec = original
+                expected = {rid: fake.rev("shots", rid) for rid in fake.stores["shots"]}
+                assert dict(companion.archive.mirrors["shots"].pairs) == expected
+                for rid, (record, _) in fake.stores["shots"].items():
+                    assert (await row(companion, "shots", rid, generation))["rating"] == record["rating"], rid
+                asked = [(frame["ep"], frame.get("d")) for frame in fake.requests[requests:] if frame["t"] == "rx"]
+                return asked, answers
+            generation = (await companion.archive.store.sync_state(DEVICE, "shots"))[0]
+            before = fake.epochs["shots"]
+            assert await change("new") == ([(before, None)], ["rows"]), "the session's first index is whole"
+            before = fake.epochs["shots"]
+            assert await change("new", "rating", "gone") == ([(before, 1)], ["delta"])
+            gone, before = sorted(fake.stores["shots"])[-2], fake.epochs["shots"]
+            assert await change("gone") == ([(before, 1)], ["delta"])
+            assert gone not in await ids(companion, "shots")
+            for field in ("sum", "base"):  # Rebuilt wrong, or against another index: the whole index, once.
+                fake.tamper = field
+                before = fake.epochs["shots"]
+                assert await change("rating") == ([(before, 1), (0, None)], ["delta", "rows"]), field
+            assert said("archive's shots index did not match") == 2
+            link_.close()  # A new link session, then a companion restart (its copy is memory only).
+            await link_.open()
+            await settled(companion)
+            before = fake.epochs["shots"]
+            assert await change("new") == ([(before, None)], ["rows"])
+            companion.archive.mirrors["shots"] = index_mirror.IndexMirror("archive's shots index")
+            before = fake.epochs["shots"]
+            assert await change("new") == ([(before, None)], ["rows"])
+            before = fake.epochs["shots"]
+            assert await change("rating") == ([(before, 1)], ["delta"])
+            fake.deltas = False
 
             # --- The page's erase keeps the log history and the archive (review C2) -------
             kept = await sql(companion, "select count(*) from archive_records")

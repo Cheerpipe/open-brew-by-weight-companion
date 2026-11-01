@@ -13,6 +13,7 @@ import collections
 import json
 
 from . import log
+from .index_mirror import IndexMirror
 from .upstream import Upstream, dumps
 
 U32 = 0xFFFFFFFF
@@ -557,8 +558,8 @@ class Mux:
         self.upstream = Upstream(companion, relay, self)
         self.views = {"history": View(self, "history"), "stats": View(self, "stats")}
         self.home, self.settings, self.diagnostic = Merged(), Merged(), Merged()
-        self.stores = {"shots": {"epoch": None, "rows": None, "at": None, "waiters": []},
-                       "history": {"epoch": None, "rows": None, "at": None, "waiters": []}}
+        self.stores = {name: {"index": IndexMirror(f"screens' {name} index"), "at": None, "waiters": []}
+                       for name in ("shots", "history")}
         self.idle = self.linger = None
         self.changed = asyncio.Event()
         self.attributed = collections.deque(maxlen=64)  # (time, screen) of ops sent upstream for a screen
@@ -577,6 +578,7 @@ class Mux:
             view.clear()
         for store in self.stores.values():
             store["at"], store["waiters"] = None, []
+            store["index"].session()
 
     def bound(self):
         return [screen for screen in self.screens if screen.bound and not screen.closed]
@@ -1057,30 +1059,39 @@ class Mux:
         self._ask_records()
 
     def _ask_records(self):
-        """One upstream ask per store with the cached epoch, shared by every screen waiting."""
+        """One upstream ask per store from its mirror's epoch, shared by every screen waiting; a delta
+        only when every store asked may have one."""
         now, ask = _now(), {}
         for name, store in self.stores.items():
             if store["waiters"] and (store["at"] is None or now - store["at"] > RECORDS_TIMEOUT_S):
-                ask[name] = store["epoch"] or 0
-        if ask and self.up({"op": "records", **ask}):
+                ask[name] = store["index"].epoch
+        delta = all(self.stores[name]["index"].delta(epoch) for name, epoch in ask.items())
+        if ask and self.up({"op": "records", **ask, **({"delta": True} if delta else {})}):
             for name in ask:
                 self.stores[name]["at"] = now
 
     def _on_records(self, frame):
+        """Screens get the whole index, rebuilt and verified from this upstream answer, never a delta."""
         name, epoch = frame.get("store"), frame.get("epoch")
         if name not in self.stores or not isinstance(epoch, int):
             return
         store = self.stores[name]
-        if isinstance(frame.get("rows"), list):
-            store["rows"] = frame["rows"]
-        elif store["epoch"] != epoch or store["rows"] is None:
-            store["rows"] = []
-        store["epoch"], store["at"] = epoch, None
+        store["at"] = None
+        index = store["index"]
+        listed = index.apply(frame)
+        if listed is not None and "rows" not in listed and epoch != index.epoch:
+            index.clear("another epoch")
+            listed = None
+        if listed is None:
+            if "rows" not in frame:  # A delta or an unchanged answer this mirror cannot serve: ask whole now.
+                self._ask_records()
+            return
+        rows = listed["rows"] if "rows" in listed else index.rows()
         waiters, store["waiters"] = store["waiters"], []
         for screen, held in waiters:
             answer = {"v": 1, "type": "records", "boot": frame.get("boot"), "store": name, "epoch": epoch}
             if held != epoch:
-                answer["rows"] = store["rows"]
+                answer["rows"] = rows
             screen.send(dumps(answer))
 
     # --- Upstream frames ------------------------------------------------------------------

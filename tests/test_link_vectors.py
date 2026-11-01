@@ -24,11 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import aiohttp  # noqa: E402
 
-from companion import service  # noqa: E402
+from companion import index_mirror, service  # noqa: E402
 from companion.service import Companion  # noqa: E402
 
 VECTORS = ROOT / "tests/fixtures/companion-records-v1.vectors.json"
-SHA256 = "57d33548e81a1f285f88d14120778370d68a58ef37948254c0a3ca734d21f64b"
+SHA256 = "a285700c7ecc4e33b664d05e21186fc62a76e546baf472fed9c5579c9493a63c"
 DEVICE = "AA:BB:CC:DD:EE:FF"
 
 
@@ -52,10 +52,12 @@ class Upstream:
 
 
 class Controller:
-    """Answers each request with its case's frames, parsed from their exact text, `q` left out."""
+    """Answers each request with its case's frames, parsed from their exact text, `q` left out. Until
+    the store `moved`, an index request's `d` changes nothing (a store at the epoch asked is unchanged
+    either way); afterwards only the moved store's cases answer."""
 
     def __init__(self, cases):
-        self.cases, self.used, self.requests = cases, set(), []
+        self.cases, self.used, self.requests, self.moved = cases, set(), [], False
 
     def frames(self, name):
         return [{key: value for key, value in json.loads(text).items() if key != "q"}
@@ -68,8 +70,9 @@ class Controller:
                 continue
             self.requests.append(sent)
             name = next(name for name, case in self.cases.items() if case["request"] and
+                        ("moved" in name or name.endswith("_delta")) == self.moved and
                         {k: v for k, v in case["request"].items() if k != "r"} ==
-                        {k: v for k, v in sent.items() if k != "r"})
+                        {k: v for k, v in sent.items() if k != "r" and (self.moved or k != "d")})
             self.used.add(name)
             for frame in self.frames(name):
                 if sent["t"] == "rf":
@@ -121,6 +124,7 @@ async def main():
             await settled(companion)
             assert controller.used == {"index_history", "fetch_history", "index_shots", "fetch_shots",
                                        "trace_none", "trace_ok"}, controller.used
+            assert not any("d" in sent for sent in controller.requests), "no delta before a sum in this session"
 
             shots = await sql(companion, "select generation, id, ident, bad, kind, body from archive_records "
                                          "where store = 'shots' order by id")
@@ -158,6 +162,30 @@ async def main():
             assert "trace_busy" in controller.used and companion.archive.busy_until > 0
             assert not await sql(companion, "select 1 from archive_traces where id = 3")
             assert sum(sent["t"] == "rt" and sent["id"] == 3 for sent in controller.requests) == 1
+
+            # The store moved (shot 13 new, 9 rated again, 6 deleted): the index arrives as a delta
+            # against the one this session received, and the archive follows it like a whole index.
+            await service.offload(lambda: companion.logs.connection.execute(
+                "insert into archive_traces values (?, 1, 13, 43, 613000, null)", (DEVICE,)))
+            controller.moved = True
+            companion.archive.refresh("shots", 7003)
+            await settled(companion)
+            assert {"index_shots_delta", "fetch_shot_9_moved", "fetch_shot_13_moved"} <= controller.used
+            assert controller.requests[-3]["d"] == 1
+            shots = dict(await sql(companion, "select id, json_extract(body, '$.rating') from archive_records "
+                                              "where store = 'shots'"))
+            assert sorted(shots) == [rid for rid in range(1, 14) if rid != 6] and shots[9] == 5, shots
+            state = await companion.archive.store.sync_state(DEVICE, "shots")
+            assert state[1] == 7003 and state[4] == [2400, 14], state
+            # The same delta against another copy, or with another sum, rebuilds nothing.
+            full, delta = (controller.frames(name)[0]["f"] for name in ("index_shots", "index_shots_delta"))
+            mirror = index_mirror.IndexMirror("test index")
+            assert mirror.apply(full)["rows"] == full["rows"] and mirror.supported
+            assert mirror.apply({**delta, "sum": delta["sum"] ^ 1}) is None and mirror.pairs is None
+            mirror.apply(full)
+            assert mirror.apply({**delta, "base": 7000}) is None and not mirror.delta(7001)
+            mirror.apply(full)
+            assert index_mirror.checksum(mirror.apply(delta)["rows"]) == delta["sum"] and mirror.epoch == 7003
             serving.cancel()
             companion.archive.stop()
             await companion.logs.close()

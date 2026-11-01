@@ -349,6 +349,29 @@ async def main():
             answers = {frame["store"]: frame for frame in (await b.next("records"), await b.next("records"))}
             assert answers["shots"]["rows"] == [3, 111, 2, 222], "rows from the companion's copy"
 
+            # --- Records from a firmware with deltas: `delta` only after a `sum` in this session; the --
+            # screens always get the whole index, rebuilt and checked by the companion
+            assert not any("delta" in op for op in session.ops), "a firmware without `sum` never sees `delta`"
+
+            async def records(epoch, rows, held, asked):
+                fake.indexes = {"shots": (epoch, rows), "history": (40, [])}
+                count = len(session.ops)
+                await a.send({"op": "records", "shots": held})
+                assert (await ops_after(session, count + len(asked)))[count:] == asked
+                answer = await a.next("records")
+                assert answer == {"v": 1, "type": "records", "boot": 7, "store": "shots", "epoch": epoch,
+                                  "rows": rows}, answer
+            await records(41, [4, 444, 3, 111, 2, 222], 40, [{"op": "records", "shots": 40}])
+            # A new shot, a rating and a deletion travel as a delta.
+            await records(42, [5, 555, 4, 444, 3, 112], 41, [{"op": "records", "shots": 41, "delta": True}])
+            # A delta that does not check out, or applies to another epoch: the whole index at once.
+            for field, epoch, rows in (("sum", 43, [6, 666, 5, 555, 4, 444, 3, 112]),
+                                       ("base", 44, [7, 777, 6, 666, 5, 555, 4, 444])):
+                fake.tamper = field
+                await records(epoch, rows, epoch - 1,
+                              [{"op": "records", "shots": epoch - 1, "delta": True}, {"op": "records", "shots": 0}])
+            await records(45, [8, 888, 7, 777, 6, 666, 5, 555], 44, [{"op": "records", "shots": 44, "delta": True}])
+
             # --- Commands: the next mutation waits for the controller's lastCommand ------------------------
             async def command(index):
                 async with web.post(base + "/api/v1/config", json={"patch": {}},
@@ -397,6 +420,15 @@ async def main():
             b = await screen(1).open()
             await a.next("home")
             await b.next("home")
+            # A new upstream session: no `delta` until one of its own answers carried `sum`.
+            fake.indexes["shots"] = (46, [9, 999, 8, 888])
+            count = len(session.ops)
+            await b.send({"op": "records", "shots": 45})
+            assert (await ops_after(session, count + 1))[count:] == [{"op": "records", "shots": 45}]
+            while (answer := await b.next()).get("type") != "records":
+                pass
+            assert answer["rows"] == [9, 999, 8, 888]
+            fake.indexes = None
             async with web.post(f"http://127.0.0.1:{server.port}/api/v1/ui/claim", json={},
                                 headers={"X-WebUI-Client": DIRECT}) as reply:
                 assert reply.status == 200

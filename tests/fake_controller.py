@@ -11,6 +11,8 @@ import hmac
 import json
 import os
 import re
+import struct
+import zlib
 
 import aiohttp
 from aiohttp import web
@@ -62,6 +64,25 @@ def dumps(value):
     return json.dumps(value, separators=(",", ":"))
 
 
+def index_answer(baselines, store, held, delta, epoch, rows):
+    """A firmware with deltas: the fields an index answer adds to `epoch` for the flat newest-first
+    `rows`, asked from `held`. Listed, it carries `sum` and becomes the session's baseline (in
+    `baselines`); asked with the delta flag from the baseline's epoch, it lists only the difference
+    when that is smaller."""
+    if held == epoch:
+        return {}
+    fields, base = {"rows": rows}, baselines.get(store)
+    if delta and base and base[0] == held:
+        old, now = dict(zip(base[1][0::2], base[1][1::2])), dict(zip(rows[0::2], rows[1::2]))
+        up = [value for rid, rev in now.items() if old.get(rid) != rev for value in (rid, rev)]
+        gone = [rid for rid in old if rid not in now]
+        if len(up) + len(gone) < len(rows):
+            fields = {"base": held, "up": up, "del": gone}
+    baselines[store] = (epoch, rows)
+    fields["sum"] = zlib.crc32(struct.pack(f"<{len(rows)}I", *rows))
+    return fields
+
+
 class Controller:
     def __init__(self, secret, companion_id):
         self.secret, self.companion_id = secret, companion_id
@@ -79,6 +100,9 @@ class Controller:
         self.sessions = asyncio.Queue()
         self.require_relay_stream = True
         self.epoch = 5  # The record stores' epoch in the answers below.
+        # The offline-copy index: None answers as a firmware without deltas (a fixed index at 40);
+        # {store: (epoch, flat rows)} as one with them. `tamper` corrupts that field of the next delta.
+        self.indexes, self.tamper = None, None
         self.handler = None  # Optional override per test: async (session, op) -> handled?
 
     # --- Relay routes -------------------------------------------------------------
@@ -265,6 +289,7 @@ class Session:
         self.closed = asyncio.get_running_loop().create_future()
         self.history = self.stats = None
         self.seq = 0
+        self.baselines = {}  # The index this session last received, per store.
 
     async def send(self, frame):
         await self.ws.send_str(dumps(frame))
@@ -305,11 +330,18 @@ class Session:
             for frame in stats_page(self, op, snapshot=not op.get("fetch"), epoch=self.controller.epoch):
                 await self.send(frame)
         elif name == "records":
+            indexes = self.controller.indexes
             for store in ("shots", "history"):
                 if store in op:
-                    frame = {"v": 1, "type": "records", "boot": 7, "store": store, "epoch": 40}
-                    if op[store] != 40:
-                        frame["rows"] = [3, 111, 2, 222]
+                    epoch, rows = indexes[store] if indexes else (40, [3, 111, 2, 222])
+                    frame = {"v": 1, "type": "records", "boot": 7, "store": store, "epoch": epoch}
+                    if indexes:
+                        frame.update(index_answer(self.baselines, store, op[store], op.get("delta"), epoch, rows))
+                        if "base" in frame and self.controller.tamper:
+                            frame[self.controller.tamper] ^= 1
+                            self.controller.tamper = None
+                    elif op[store] != 40:
+                        frame["rows"] = rows
                     await self.send(frame)
         elif name == "resync":
             await self.send(home_snapshot())

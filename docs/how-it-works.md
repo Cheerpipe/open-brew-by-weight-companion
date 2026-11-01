@@ -385,7 +385,15 @@ every op itself:
   group's last screen leaves, the most recently active other group takes
   the window.
 - The offline copy's record index is cached per store; screens asking at
-  the same time share one request.
+  the same time share one request, and every ask still goes to the
+  controller. With a controller that sends deltas (its index answers carry
+  `sum`, the CRC-32 of the whole index), the companion asks for a delta
+  against the index it holds once an answer in the current shared session
+  carried `sum`, rebuilds the whole index from it (`companion/index_mirror.py`)
+  and checks it against `sum` before any screen sees it; screens always get
+  the whole index, as from the controller directly. A delta that does not
+  check out, or applies to another epoch, is logged and the whole index is
+  asked at once; an older controller never gets the delta flag.
 - `activity` is aggregated: the controller hears the longest power window of
   the visible screens, and `hidden` only when every screen is hidden.
   Screens get `alive` from the service while the controller was heard in
@@ -491,6 +499,16 @@ copies both of the controller's record stores into the same database
   `busy` ends the pass, both retried after 60 s). A request unanswered for
   300 s is sent again. The epoch, the controller's oldest id and the ids it
   listed are adopted only once every listed record is stored.
+- **Index deltas.** The archive keeps its own in-memory copy of each store's
+  index (every shot, bad ones included, unlike the screens'). Once an index
+  answer in the current link session carried `sum`, an `rx` from the epoch
+  that copy holds adds `d:1`, and the controller may answer with only the
+  difference; the copy rebuilds the whole index, checks it against `sum` and
+  the sync runs on it exactly as on a whole index. A difference that does
+  not check out is logged and the whole index is asked once (`ep` 0, no `d`);
+  a whole index that still does not check out stops that pass until the next
+  notice. A new link session or a companion restart starts again from a
+  whole index, and an older controller never gets `d`.
 - **Generations.** Rows are keyed `(device, store, generation, id)`. The
   index names the store's write counter and next record id (`gen`, `next`);
   both only grow, and fall back only on Clear history or a factory reset, so
@@ -659,6 +677,7 @@ name). It asks for the controller's address only when nothing answers.
 | `companion/store.py` | The files in `data/secrets/`. |
 | `companion/logstore.py` | The owner of `data/companion.db`: the controller's log history, migrations, backup and erase. |
 | `companion/archive.py` | The shot and activation archive in the same database, and its sync. |
+| `companion/index_mirror.py` | The controller's record index as the screens or the archive last received it, rebuilt from deltas and checked by `sum`. |
 | `companion/stats.py` | The Stats header over the whole history, ported from the firmware. |
 | `companion/page.html` | Status and pairing page, styled like the setup page. |
 | `companion/ui-off.html` | Notice with the controller's address while the Web UI goes directly to it. |

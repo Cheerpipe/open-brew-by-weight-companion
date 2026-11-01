@@ -39,6 +39,7 @@ import sqlite3
 import time
 
 from . import log, stats
+from .index_mirror import IndexMirror
 from .logstore import ARCHIVE_TABLES, table_bytes
 from .store import offload
 
@@ -537,6 +538,7 @@ class Archive:
         self.on = False  # ...and the switch is on.
         self.notified = {}  # The epochs of the controller's last `rs`, per store.
         self.subscribed = False  # This session's rx went out.
+        self.mirrors = {store: IndexMirror(f"archive's {store} index") for store in STORES}
         self.wanted = set()
         self.wake = asyncio.Event()
         self.task = self.retry = None
@@ -569,6 +571,8 @@ class Archive:
             return
         self.subscribed, self.notified = True, {}
         self.wanted = set(STORES)
+        for mirror in self.mirrors.values():
+            mirror.session()
         if self.task is None or self.task.done():
             self.task = self.companion.spawn(self._run())
         self.wake.set()
@@ -717,12 +721,18 @@ class Archive:
         generation, epoch, oldest, previous, counters = await self.store.sync_state(device, store)
         if epoch and self.notified.get(store) == epoch:
             return  # The notice names the epoch this archive already holds.
-        index = await self._ask({"t": "rx", "s": store, "ep": epoch or 0}, ("records", store))
+        # A delta only against the index this mirror holds for that same epoch; one it cannot rebuild
+        # asks the whole index once.
+        mirror, ask = self.mirrors[store], {"t": "rx", "s": store, "ep": epoch or 0}
+        delta = mirror.delta(ask["ep"])
+        index = mirror.apply(await self._ask({**ask, "d": 1} if delta else ask, ("records", store)))
+        if index is None and delta:
+            index = mirror.apply(await self._ask({**ask, "ep": 0}, ("records", store)))
+        if index is None:
+            raise ValueError("a malformed record index")
         rows, new_epoch = index.get("rows"), index.get("epoch")
         if rows is None or type(new_epoch) is not int:
             return  # Unchanged since the epoch this archive holds.
-        if len(rows) % 2 or not all(type(value) is int for value in rows):
-            raise ValueError("a malformed record index")
         named = [index.get("gen"), index.get("next")]
         named = named if all(type(value) is int for value in named) else None
         listed, order = dict(zip(rows[0::2], rows[1::2])), rows[0::2]
