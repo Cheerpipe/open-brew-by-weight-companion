@@ -103,6 +103,8 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     plain = conf.split("ssl default_server", 1)[0]
     assert "location ^~ /__companion/log {" in plain and "HTTPS_REQUIRED" in plain, "the stored log never goes in clear"
     assert conf.count("location ^~ /__companion/log {") == 1
+    assert "location = /__companion/erase {" in plain and conf.count("location = /__companion/erase {") == 1, \
+        "erasing the pairing never goes in clear"
     assert "location ^~ /__companion/archive {" in plain and conf.count("location ^~ /__companion/archive {") == 1, \
         "the archive never goes in clear either"
     assert conf.count("return 301 /__companion/gateway;") == 2, "the gateway's earlier status address redirects"

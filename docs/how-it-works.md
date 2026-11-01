@@ -605,8 +605,9 @@ per store, and per store the archive-only count `shots`/`history`,
 `shotsTotal`/`historyTotal` and the first and last end times, plus `traces`,
 `bytes` and `holes`). `POST /__companion/pair` with a JSON
 body sends a new pairing request, and `POST /__companion/erase` erases a
-pairing the controller no longer recognizes (`409` while it works); a page
-on another site cannot send either without asking.
+pairing the controller no longer recognizes (`409` while it works; only over
+HTTPS, nginx answers `403 HTTPS_REQUIRED` on plain HTTP, since it deletes
+secrets); a page on another site cannot send either without asking.
 
 ## Status and health checks
 

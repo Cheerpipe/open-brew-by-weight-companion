@@ -182,7 +182,8 @@ the controller. Then choose on the companion's page:
   the pairing, your La Marzocco account and the companion's La Marzocco
   installation key. The archive of your shots and activations and the log
   history stay; pairing the same controller again brings them back, and the
-  companion's page can delete them.
+  companion's page can delete them. Open the page over HTTPS for this;
+  over plain HTTP it asks you to.
 
 Until you choose one, your La Marzocco account stays on the companion.
 

@@ -119,7 +119,7 @@
       rate_limited: "The controller received another request a moment ago. Try again in a few seconds.",
       unreachable: "The controller did not answer. Is it on?",
       not_recognized: "The controller no longer recognizes this companion, for example after a factory reset, so the companion stopped using your La Marzocco account. It still keeps the account until you pair again or erase this pairing.",
-      erase: "Erase this pairing", eraseConfirm: "Erase this pairing, the La Marzocco account and the companion's La Marzocco installation from this companion? Its copy of your shot history and the controller's log stay here, and come back if you pair this controller again.",
+      erase: "Erase this pairing", eraseHttps: "Open this page over HTTPS to erase the pairing.", eraseConfirm: "Erase this pairing, the La Marzocco account and the companion's La Marzocco installation from this companion? Its copy of your shot history and the controller's log stay here, and come back if you pair this controller again.",
       version: "The controller and this companion use different versions of their connection. Update both to their latest release.",
       unknown: "The controller sent messages this companion does not understand. Update the companion.",
       error: "Pairing did not work. The companion's log says why.",
@@ -240,6 +240,7 @@
   });
   $("erase").textContent = t.erase;
   $("erase").addEventListener("click", function () {
+    if (location.protocol !== "https:") { alert(t.eraseHttps); return; }
     if (!confirm(t.eraseConfirm)) return;
     $("erase").hidden = true;
     fetch("/__companion/erase", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
