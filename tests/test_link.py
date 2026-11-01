@@ -125,6 +125,7 @@ class Controller:
         self.transports = []
         self.relay = False  # The relay answers only once the link block asks for it.
         self.login, self.auth_up = True, True  # GET /api/v1/auth: password on; the controller answers.
+        self.silent = False  # True: the relay drops the connection unanswered, as when the controller is off.
 
     async def pair_post(self, request):
         assert request.content_type == "application/json"
@@ -151,6 +152,9 @@ class Controller:
     RELAY_CHALLENGE = bytes(range(16))  # Fixed; the handshake's formulas are covered by test_relay.
 
     async def relay_get(self, request):
+        if self.silent:
+            request.transport.abort()
+            return web.Response()
         if not self.relay:  # Before that, the controller has no relay: the link opens as ever.
             return web.json_response({"error": "UNAVAILABLE"}, status=503)
         return web.json_response({"challenge": crypto.b64(self.RELAY_CHALLENGE), "protocol": 1})
@@ -544,6 +548,21 @@ async def main():
             session = await asyncio.wait_for(fake.sessions.get(), 2)
             await eventually(lambda: companion.link == "open")
             service.RETRY_LATER_S = 0.2
+
+            # --- Started with the controller off: the relay handshake is asked again --
+            # A manual address hears no announcement, so an unanswered handshake must
+            # not leave the link waiting for one; no new announcement is made here.
+            service.BACKOFF_S = (0.2,) * 5
+            fake.silent = True
+            companion.relay.reset(None)  # As at start: the controller has not answered yet.
+            await session.ws.close()
+            await eventually(lambda: companion.link_reason == "UNREACHABLE")
+            assert companion.relay.link is None and fake.sessions.empty()
+            fake.silent = False
+            session = await asyncio.wait_for(fake.sessions.get(), 3)
+            await eventually(lambda: companion.link == "open")
+            assert companion.relay.mode == "ready"
+            service.BACKOFF_S = (0.2, 30, 30, 30, 30)
 
             # --- Erasing the account keeps the installation -------------------------
             (secrets / "lamarzocco.json").write_text("{}")

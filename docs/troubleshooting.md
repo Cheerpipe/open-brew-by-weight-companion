@@ -134,7 +134,9 @@ set by hand the companion does not look for it any more.
 The companion is fine but cannot reach the controller. The machine may be off,
 or its address changed. The companion follows address changes that the
 controller announces; with `OBBW_CONTROLLER_URL` set to an IP address it does
-not, so update the setting.
+not, so update the setting. When the machine was simply off, nothing is
+needed: the companion keeps trying (after 5, 15 and 60 seconds, then every
+5 minutes) and connects once the controller answers.
 
 ## Ports 80 or 443 are busy
 

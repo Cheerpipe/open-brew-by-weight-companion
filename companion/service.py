@@ -221,6 +221,13 @@ class Companion:
     async def _link(self):
         """One link attempt and its session: why it ended, or None to look again at once."""
         pairing = await offload(self.store.pairing)
+        if self.controller is not None and pairing is not None and self.relay.link is None:
+            # Nobody answered the relay handshake yet (the controller was off when this companion
+            # started): ask again on the link's backoff, since a manual address hears no announcement.
+            await self.relay.handshake()
+            if self.relay.link is None:
+                log("the controller did not answer the relay handshake")
+                return "UNREACHABLE"
         if self.controller is None or pairing is None or self.relay.link is not True:
             self.link, self.link_reason = "down", ""
             self.wake.clear()
