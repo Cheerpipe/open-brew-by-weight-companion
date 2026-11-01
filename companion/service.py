@@ -7,8 +7,10 @@ updates, through a Unix socket.
 """
 
 import asyncio
+import hashlib
 import html
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -22,9 +24,9 @@ from cryptography.exceptions import InvalidTag
 from . import VERSION, crypto, dashboard, log
 from .lamarzocco import LaMarzocco
 from .link import Erased, LinkClosed, open_link
-from .logstore import LogStore
+from .logstore import EXPORT_VERSION, FIRST_PAGE, FORMAT, LogStore
 from .pairing import Pairing
-from .relay import Relay
+from .relay import Relay, address
 from .screens import Screens
 from .store import Store, offload
 
@@ -36,6 +38,8 @@ RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT = 30, 50
 RETENTION_S = 24 * 3600
 LOG_LEVELS = {"c": 0, "e": 1, "w": 2, "i": 3, "d": 4}
 LOG_CATEGORY_MAX, LOG_MESSAGE_MAX = 24, 1024
+LOG_ACCESS_RECHECK_S = 300  # How often a session's right to read the history is asked of the controller.
+LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
 # A sleep that comes back this late means the loop stood still; 20 s is where
 # the controller's 30 s ping contract starts to break.
@@ -56,7 +60,7 @@ class Companion:
         self.public = crypto.public_point(self.key)
         self.controller = None  # (name, (ip, port)) from the supervisor
         self.device_name = None  # The controller's own name, from its `dev` frame.
-        self.device_id = None  # Its stable id (the webhook's deviceId), the log store's key.
+        self.device_id = None  # Its stable id (the webhook's deviceId), the log store's key, kept there.
         self.tasks = set()
         self.wake = asyncio.Event()
         self.pairing = Pairing(self)
@@ -68,7 +72,11 @@ class Companion:
         self.unknown_frames, self.unknown_kinds = 0, set()
         self.cfg = {"lm": False, "conn": "ws", "observe": True}
         self.logs = LogStore(data)
-        self.log_on, self.log_subscribed = False, False
+        self.log_on, self.log_subscribed, self.log_identified = False, False, False
+        self.log_error, self.log_dropped = None, 0  # Why the store is closed; frames that could not be keyed.
+        self.log_grants = {}  # sha256 of a Web UI session -> when the controller last accepted it.
+        self.log_denials = {}  # ...and when it last refused one, so a refused page does not keep asking.
+        self.log_unreachable = 0.0  # When the controller last could not answer that question.
         self.retention = (RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT)
         self.creds_gen = None  # Generation whose sign-in result the controller still waits for.
         self.full_ep, self.full_task = None, None
@@ -142,7 +150,8 @@ class Companion:
         self.device_name = None  # It named the pairing, not this controller.
         self.pairing.state, self.pairing.auto = "unpaired", False
         self.relay.reset()
-        log(f"{why}; its pairing, La Marzocco account and installation key are erased")
+        await self.erase_log()
+        log(f"{why}; its pairing, La Marzocco account, installation key and log history are erased")
         self.wake.set()
 
     def not_recognized(self):
@@ -228,7 +237,7 @@ class Companion:
         self.ws, self.outbox = ws, asyncio.Queue()
         self.link, self.link_reason = "open", ""
         self.hold, self.held, self.full_ep, self.reported = False, [], None, None
-        self.log_subscribed = False  # The new session's cfg re-arms the logsub.
+        self.log_subscribed = self.log_identified = False  # This session's cfg and dev re-arm the logsub.
         self.unknown_frames = 0
         self.unknown_kinds.clear()
         self.heard_at = 0.0
@@ -326,7 +335,8 @@ class Companion:
             self.cfg = {"lm": frame.get("lm") is True, "conn": "api" if frame.get("conn") == "api" else "ws",
                         "observe": frame.get("observe") is not False}
             await self._apply_account()
-            await self._log_configure(frame.get("log") is True)
+            self.log_on = frame.get("log") is True
+            await self._log_subscribe()
             self._report(force=True)
         elif kind == "creds":
             await self._on_credentials(frame)
@@ -378,57 +388,135 @@ class Companion:
                 self.device_name = name
 
     async def _device_id(self, value):
-        """The controller's stable id (its MAC text), the log store's key."""
+        """The controller's stable id (its MAC text): the log store's key, kept across restarts."""
         if not isinstance(value, str) or not value.isprintable() or not 0 < len(value) <= 24:
             return
-        if value == self.device_id:
-            return
-        self.device_id = value
-        # Frames that arrived before the id (the fallback key) are its now.
-        await self.logs.adopt(value)
+        if value != self.device_id:
+            self.device_id = value
+            if self._log_usable():
+                try:
+                    await self.logs.set_device(value)
+                except sqlite3.Error as error:
+                    log(f"the log store could not keep the controller's id ({error})")
+        self.log_identified = True
+        await self._log_subscribe()
 
     # --- Diagnostic log ---------------------------------------------------------
-    def _log_device(self):
-        return self.device_id or "controller"
-
     def _log_usable(self):
         """A store that opened: a companion whose log store failed keeps every
         other feature (the relay, La Marzocco) and simply stores no history."""
         return self.logs.connection is not None
 
-    async def _log_configure(self, on):
-        """cfg's log switch: subscribe once per session with the store's cursor."""
-        self.log_on = on
-        if not on or self.log_subscribed or self.outbox is None or not self._log_usable():
+    async def open_log(self):
+        """The log store and what it remembers: the controller's id and the sessions it accepted."""
+        try:
+            await self.logs.open()
+            self.device_id = await self.logs.device()
+            self.log_grants = await self.logs.grants()
+        except (sqlite3.Error, OSError) as error:
+            # A store that cannot open disables only the log history: the
+            # relay, the screens and La Marzocco keep working.
+            await self.logs.close()
+            self.log_error = str(error)
+            log(f"the log store could not open ({error}); the log history is disabled")
+
+    async def erase_log(self):
+        if self._log_usable():
+            try:
+                await self.logs.erase()
+            except sqlite3.Error as error:
+                log(f"the log history could not be erased ({error})")
+        self.device_id, self.log_grants, self.log_denials = None, {}, {}
+
+    async def _log_subscribe(self, resync=False):
+        """`logsub` with the stored cursor, once per session after cfg turned the
+        stream on and `dev` named the controller (so the cursor is that
+        controller's); `resync` asks again from it after a frame was lost."""
+        if not self.log_on or not self.log_identified or self.outbox is None or not self._log_usable() or (
+                self.log_subscribed and not resync):
             return
         self.log_subscribed = True
-        cursor = await self.logs.cursor(self._log_device())
-        boot, after = cursor if cursor is not None else (0, 0)
+        try:
+            boot, after = await self.logs.cursor(self.device_id) or (0, 0)
+        except sqlite3.Error as error:
+            log(f"the log store could not read its cursor ({error}); the log stream waits for the next link")
+            return
         self.post({"t": "logsub", "on": True, "boot": boot, "after": after})
 
     async def _on_log(self, frame):
-        """One page of the controller's log: store it, naming any gap or reset."""
-        if not self._log_usable():
-            return  # The store never opened; its failure is logged once.
-        boot, events = frame.get("b"), frame.get("e")
-        if type(boot) is not int or boot < 0 or not isinstance(events, list) or not events:
-            raise LinkClosed("PROTOCOL", "log frame without a boot or events")
-        miss = frame.get("miss", 0)
-        if type(miss) is not int or miss < 0:
-            raise LinkClosed("PROTOCOL", "log miss is not a count")
-        for entry in events:
-            if not isinstance(entry, list) or len(entry) != 6:
-                raise LinkClosed("PROTOCOL", "log event is not a six-field row")
-            sequence, at_ms, wall_sec, level, category, message = entry
-            if type(sequence) is not int or sequence < 1 or type(at_ms) is not int or at_ms < 0 \
-                    or type(wall_sec) is not int or wall_sec < 0 or level not in LOG_LEVELS \
-                    or not isinstance(category, str) or len(category) > LOG_CATEGORY_MAX \
-                    or not isinstance(message, str) or len(message) > LOG_MESSAGE_MAX:
-                raise LinkClosed("PROTOCOL", "log event field out of range")
+        """One page of the controller's log, stored with the hole it names.
+
+        A log frame never closes the link: text out of bounds is cut, a frame
+        whose events cannot be keyed is dropped and counted, and a frame the
+        store could not write is asked for again from the stored cursor, so
+        it leaves no hole behind.
+        """
+        if not self._log_usable() or self.device_id is None:
+            return  # A closed store logged why once; no id means no subscription either.
+        rows = _log_rows(frame)
+        if rows is None:
+            self.log_dropped += len(frame["e"]) if isinstance(frame.get("e"), list) else 1
+            log("dropped a log frame whose events have no usable boot or sequence")
+            return
         try:
-            await self.logs.apply(self._log_device(), frame)
+            await self.logs.apply(self.device_id, {"b": frame["b"], "e": rows, "miss": frame.get("miss", 0),
+                                                   "reset": frame.get("reset") is True})
         except sqlite3.Error as error:
-            log(f"the log store failed ({error}); this frame's events are lost")
+            log(f"the log store failed ({error}); asking the controller again from the stored cursor")
+            await self._log_subscribe(resync=True)
+
+    async def log_access(self, headers):
+        """Whether this browser may read the stored history: exactly when the
+        controller lets it open the Web UI (`GET /api/v1/auth` through the
+        relay). Each session's answer is kept for LOG_ACCESS_RECHECK_S, and an
+        accepted one is remembered on disk, so it keeps reading while the
+        controller is off; a controller that did not answer is not asked again
+        for LOG_UNREACHABLE_S, so a page never waits on it twice in a row."""
+        session = hashlib.sha256(headers.get("X-WebUI-Session", "").encode()).hexdigest()
+        now = time.time()
+        for answers, verdict in ((self.log_grants, True), (self.log_denials, False)):
+            if session in answers and now - answers[session] < LOG_ACCESS_RECHECK_S:
+                return verdict
+        allowed = None
+        if now - self.log_unreachable >= LOG_UNREACHABLE_S:
+            allowed = await self._web_ui_allows(headers)
+            if allowed is None:
+                self.log_unreachable = now
+        if allowed is None:
+            if session in self.log_grants:
+                self.log_grants[session] = now  # What the controller said last stands until it can answer.
+            return session in self.log_grants
+        answers, other = (self.log_grants, self.log_denials) if allowed else (self.log_denials, self.log_grants)
+        other.pop(session, None)
+        answers[session] = now
+        if not allowed:  # Kept in memory only, and only while it counts.
+            self.log_denials = {key: at for key, at in self.log_denials.items() if now - at < LOG_ACCESS_RECHECK_S}
+        try:
+            await self.logs.grant(session, allowed)
+        except sqlite3.Error as error:
+            log(f"the log store could not keep a Web UI session's access ({error})")
+        return allowed
+
+    async def _web_ui_allows(self, headers):
+        """The controller's answer for this browser's session; None when it cannot answer."""
+        if self.controller is None:
+            return None
+        try:
+            reply = None
+            if self.relay.mode != "disabled":
+                reply = await self.relay.request("GET", "/api/v1/auth", headers, b"",
+                                                 address(headers.get("X-Real-IP")), self.relay.client_id, False)
+            if reply is None:  # No relay session: the session would cross the LAN in clear, so ask as nobody.
+                reply = await self.relay.passthrough("GET", "/api/v1/auth", {}, b"")
+            try:
+                answer = json.loads(reply.data) if reply.status == 200 and reply.data else None
+            finally:
+                reply.release()
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError):
+            return None
+        if not isinstance(answer, dict):
+            return None
+        return answer.get("loginRequired") is False or answer.get("signedIn") is True
 
     # --- La Marzocco account ---------------------------------------------------
     async def _apply_account(self):
@@ -576,14 +664,13 @@ class Companion:
     async def status(self):
         pairing = await offload(self.store.pairing)
         credentials = await offload(self.store.credentials)
-        if self.logs.connection is None:  # Built by hand (tests): not opened.
-            log_facts = {"enabled": self.log_on, "days": self.retention[0], "error": "closed"}
-        else:
-            try:
-                log_facts = {"enabled": self.log_on, "days": self.retention[0],
-                             **(await self.logs.stats())}
-            except sqlite3.Error:
-                log_facts = {"enabled": self.log_on, "days": self.retention[0], "error": "store"}
+        log_facts = {"enabled": self.log_on, "days": self.retention[0], "mb": self.retention[1],
+                     "dropped": self.log_dropped}
+        try:
+            log_facts.update(await self.logs.stats(self.device_id) if self._log_usable()
+                             else {"error": self.log_error or "not open"})
+        except sqlite3.Error as error:
+            log_facts["error"] = str(error)
         return {
             "name": self.name, "version": VERSION, "id": self.id,
             "paired": pairing is not None,
@@ -600,6 +687,28 @@ class Companion:
             "log": log_facts,
             "relay": self.relay.mode, **self.screens.mux.status(),
         }
+
+
+def _log_rows(frame):
+    """A `log` frame's events made storable, or None when one cannot be keyed
+    (no boot, no positive sequence): an unknown level reads as info and text
+    past its bounds is cut, so the content never costs an event."""
+    boot, events, miss = frame.get("b"), frame.get("e"), frame.get("miss", 0)
+    if not _uint32(boot) or not isinstance(events, list) or not events or not _uint32(miss):
+        return None
+    rows = []
+    for entry in events:
+        if not isinstance(entry, list) or len(entry) != 6 or not _uint32(entry[0]) or entry[0] == 0:
+            return None
+        sequence, at_ms, wall_sec, level, category, message = entry
+        rows.append([sequence, at_ms if _uint32(at_ms) else 0, wall_sec if _uint32(wall_sec) else 0,
+                     level if level in LOG_LEVELS else "i", str(category)[:LOG_CATEGORY_MAX],
+                     str(message)[:LOG_MESSAGE_MAX]])
+    return rows
+
+
+def _uint32(value):
+    return type(value) is int and 0 <= value < 2 ** 32
 
 
 def render_page(name="page.html"):
@@ -653,8 +762,8 @@ def web_app(companion):
     def _log_query(request):
         """The page's keyset cursor: (boot, before), the whole history when absent."""
         try:
-            boot = int(request.query.get("boot", 2 ** 31))
-            before = int(request.query.get("before", 2 ** 31))
+            boot = int(request.query.get("boot", FIRST_PAGE))
+            before = int(request.query.get("before", FIRST_PAGE))
             limit = min(max(int(request.query.get("limit", 100)), 1), 500)
         except ValueError:
             return None
@@ -662,52 +771,68 @@ def web_app(companion):
             return None
         return boot, before, limit
 
+    async def _log_refusal(request):
+        """The history answers with the controller down, but only to a browser it would let in."""
+        if not companion._log_usable():
+            return web.json_response({"error": "STORE", "message": companion.log_error or "not open"}, status=503)
+        if not await companion.log_access(request.headers):
+            return web.json_response({"error": "AUTH_REQUIRED", "message": "Sign in to the Web UI through "
+                                      "the companion while the controller is on"}, status=401)
+        return None
+
     async def log_page(request):
-        # The store only: this answers with the controller down (plan 2B).
         query = _log_query(request)
         if query is None:
             return web.json_response({"error": "INVALID_REQUEST"}, status=400)
-        if companion.logs.connection is None:
-            return web.json_response({"error": "STORE", "message": "not open"}, status=503)
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
         try:
-            entries, following, has_more = await companion.logs.page(
-                companion._log_device(), *query)
+            entries, following, has_more = await companion.logs.page(companion.device_id, *query)
         except sqlite3.Error as error:
             return web.json_response({"error": "STORE", "message": str(error)}, status=500)
         return web.json_response({
-            "device": companion._log_device(), "entries": entries,
+            "device": companion.device_id, "entries": entries,
             "next": {"boot": following[0], "before": following[1]} if following else None,
             "hasMore": has_more}, headers=no_store)
 
     async def log_export(request):
-        device = companion._log_device()
-        if companion.logs.connection is None:
-            return web.json_response({"error": "STORE", "message": "not open"}, status=503)
-        # Colons are not welcome in every filesystem: the id keeps its shape.
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
+        device = companion.device_id
+        name = "obbw-log" + ("-" + re.sub(r"[^A-Za-z0-9]", "-", device) if device else "")
         answer = web.StreamResponse(headers={"Content-Type": "application/json",
-                                             "Content-Disposition":
-                                                 'attachment; filename="obbw-log-{}.json"'.format(
-                                                     device.replace(":", "-")),
+                                             "Content-Disposition": f'attachment; filename="{name}.json"',
                                              "Cache-Control": "no-store"})
         await answer.prepare(request)
-        await answer.write(b'{"device":')
-        await answer.write(json.dumps(device).encode())
-        await answer.write(b',"events":[')
+        head = {"format": FORMAT, "version": EXPORT_VERSION, "device": device}
+        await answer.write(json.dumps(head)[:-1].encode() + b',"entries":[')
         cursor, first = (0, 0), True
         try:
-            while True:
-                rows = await companion.logs.chunk(device, *cursor)
-                if not rows:
-                    break
-                cursor = (rows[-1]["b"], rows[-1]["s"])
-                for row in rows:
-                    await answer.write((("" if first else ",") + json.dumps(row)).encode())
+            while cursor is not None:
+                entries, cursor = await companion.logs.chunk(device, *cursor)
+                for entry in entries:
+                    await answer.write((("" if first else ",") + json.dumps(entry)).encode())
                     first = False
         except sqlite3.Error as error:
             await answer.write((("" if first else ",") + json.dumps({"error": str(error)})).encode())
         await answer.write(b"]}")
         await answer.write_eof()
         return answer
+
+    async def log_delete(request):
+        if request.content_type != "application/json":
+            return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
+        try:
+            await companion.logs.erase(history_only=True)
+        except sqlite3.Error as error:
+            return web.json_response({"error": "STORE", "message": str(error)}, status=500)
+        log("the log history was deleted on the companion's page")
+        return web.json_response({"deleted": True}, headers=no_store)
 
     app = web.Application(client_max_size=2 << 20)  # An OTA chunk is 64 KiB; nginx allows 1 MiB.
     app.router.add_get("/__companion/", show)
@@ -718,6 +843,7 @@ def web_app(companion):
     app.router.add_get("/__companion/status", status)
     app.router.add_get("/__companion/log", log_page)
     app.router.add_get("/__companion/log/export", log_export)
+    app.router.add_post("/__companion/log/delete", log_delete)
     app.router.add_post("/__companion/pair", pair)
     app.router.add_post("/__companion/erase", erase)
     return app
@@ -738,15 +864,17 @@ class Handle:
 
 
 async def _retention(companion):
-    """Prune the log store on start and daily: by age, then to the size budget."""
+    """On start and daily: prune the log store by age, then to the size budget,
+    and refresh its consistent copy for backups of the data folder."""
     while True:
-        if companion.logs.connection is not None:
+        if companion._log_usable():
             try:
                 days, megabytes = companion.retention
-                deleted = await companion.logs.prune(days, megabytes)
+                deleted = await companion.logs.prune(days, megabytes, companion.device_id)
                 if deleted:
                     log(f"log retention pruned {deleted} event(s)")
-            except sqlite3.Error as error:
+                await companion.logs.backup()
+            except (sqlite3.Error, OSError) as error:
                 log(f"log retention failed ({error})")
         await asyncio.sleep(RETENTION_S)
 
@@ -759,12 +887,7 @@ async def _serve(cfg, data, socket_path, handle, ready):
                               lambda store, events: LaMarzocco(store, cloud, events))
         companion.retention = (cfg.get("log_retention_days", RETENTION_DAYS_DEFAULT),
                                cfg.get("log_retention_mb", RETENTION_MB_DEFAULT))
-        try:
-            await companion.logs.open()
-        except (sqlite3.Error, OSError) as error:
-            # A store that cannot open disables only the log history: the
-            # relay, the screens and La Marzocco keep working.
-            log(f"the log store could not open ({error}); the log history is disabled")
+        await companion.open_log()
         runner = web.AppRunner(web_app(companion), access_log=None)
         await runner.setup()
         socket_path.unlink(missing_ok=True)

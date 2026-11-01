@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import sys
 import tempfile
 import time
@@ -123,6 +124,7 @@ class Controller:
         self.sessions = asyncio.Queue()
         self.transports = []
         self.relay = False  # The relay answers only once the link block asks for it.
+        self.login, self.auth_up = True, True  # GET /api/v1/auth: password on; the controller answers.
 
     async def pair_post(self, request):
         assert request.content_type == "application/json"
@@ -160,6 +162,13 @@ class Controller:
             "the companion proves the pairing secret"
         return web.json_response({"mac": crypto.b64(crypto.mac(SECRET, b"Q", self.RELAY_CHALLENGE, nc)),
                                   "ui": True, "link": True})
+
+    async def auth(self, request):
+        """Signed in whenever the browser sent a session (sealed through the relay, so any value)."""
+        if not self.auth_up:
+            return web.json_response({"error": "UNAVAILABLE"}, status=503)
+        return web.json_response({"loginRequired": self.login,
+                                  "signedIn": bool(request.headers.get("X-WebUI-Session"))})
 
     async def link(self, request):
         if self.mode == "not_paired":
@@ -262,6 +271,7 @@ async def main():
     app.router.add_get("/api/v1/companion/link", fake.link)
     app.router.add_get("/api/v1/companion/relay", fake.relay_get)
     app.router.add_post("/api/v1/companion/relay", fake.relay_post)
+    app.router.add_get("/api/v1/auth", fake.auth)
     server = TestServer(app, host="127.0.0.1")
     await server.start_server()
     target = ("Cafe Bar", ("127.0.0.1", server.port))
@@ -272,7 +282,7 @@ async def main():
             seed = service.Store(data)
             seed.write("identity", {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "key": V["companionPrivate"]})
             companion = Companion("Kitchen server", data, http, Upstream)
-            await companion.logs.open()  # _serve opens it; the test builds the service by hand.
+            await companion.open_log()  # _serve opens it; the test builds the service by hand.
             upstream = companion.lm
             pages = TestServer(web_app(companion), host="127.0.0.1")
             await pages.start_server()
@@ -544,60 +554,122 @@ async def main():
             assert (await session.next("creds", skip=("ping", "lm")))["ok"] is True
 
             # --- Diagnostic log: subscribe, pages, gaps, resume, reset ------------
-            # The switch arrives in cfg before the id names the controller, so the
-            # first rows land under the fallback key and the id adopts them.
+            # cfg turns the stream on, but the subscription waits for `dev` to
+            # name the controller, so its cursor is that controller's.
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
+            await session.quiet(0.2, skip=("ping", "lm"))
+            await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
             sub = await session.next("logsub", skip=("ping", "lm"))
             assert sub["on"] is True and sub["boot"] == 0 and sub["after"] == 0
+            assert await companion.logs.device() == "AA:BB:CC:DD:EE:FF", "the id is kept for a restart"
             await session.send({"t": "log", "b": 7, "e": [
                 [1, 100, 1789000000, "i", "state", "Open Brew by Weight 1.1.0 (bootId=7)"],
                 [2, 200, 1789000000, "w", "scale", "the scale link was lost"]]})
-            await settles(lambda: companion.logs.cursor("controller"), (7, 2))
-            await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
-            await eventually(lambda: companion.device_id == "AA:BB:CC:DD:EE:FF")
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 2))
-            assert await companion.logs.cursor("controller") is None, "the id adopted the rows"
-            # One more page, then the paged history: newest first, older on demand.
             await session.send({"t": "log", "b": 7, "e": [[3, 300, 1789000001, "i", "state", "shot done"]]})
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 3))
+            # Only a browser the controller would let open the Web UI reads it.
+            signed = {"X-WebUI-Session": "letmein"}
             async with http.get(page_url + "/log?limit=2") as reply:
+                assert reply.status == 401 and (await reply.json())["error"] == "AUTH_REQUIRED"
+            async with http.get(page_url + "/log?limit=2", headers=signed) as reply:
                 assert reply.status == 200
                 page = await reply.json()
             assert page["device"] == "AA:BB:CC:DD:EE:FF"
             assert [entry.get("s") for entry in page["entries"]] == [3, 2]
             assert page["next"] == {"boot": 7, "before": 2} and page["hasMore"] is True
-            async with http.get(page_url + "/log?boot=7&before=2&limit=10") as reply:
+            async with http.get(page_url + "/log?boot=7&before=2&limit=10", headers=signed) as reply:
                 page = await reply.json()
             assert [entry.get("s") for entry in page["entries"]] == [1] and page["next"] is None
             # A gap names itself between the events it separates.
             await session.send({"t": "log", "b": 7, "miss": 4, "e": [
                 [8, 900, 1789000010, "e", "network", "the Web UI socket was lost"]]})
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 8))
-            async with http.get(page_url + "/log?limit=3") as reply:
+            async with http.get(page_url + "/log?limit=3", headers=signed) as reply:
                 page = await reply.json()
             assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [8, "gap", 3, 2]
-            assert page["entries"][1]["count"] == 4 and page["entries"][1]["after"] == 3
+            assert page["entries"][1]["count"] == 4
             status = await companion.status()
             assert status["log"]["enabled"] and status["log"]["rows"] == 4 and status["log"]["missed"] == 4
-            # A reconnect resumes from the stored cursor.
+            assert status["log"]["mb"] == 50 and status["log"]["dropped"] == 0
+            # A log frame never closes the link: out-of-bounds text is cut, an
+            # unknown level reads as info, an unkeyed frame is counted.
+            await session.send({"t": "log", "b": 7, "e": [[9, 1000, 1789000011, "?", "x" * 40, "m" * 2000]]})
+            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 9))
+            await session.send({"t": "log", "b": 7, "e": [["nine", 0, 0, "i", "state", "no sequence"]]})
+            await eventually(lambda: companion.log_dropped == 1)
+            assert companion.link == "open"
+            async with http.get(page_url + "/log?limit=1", headers=signed) as reply:
+                newest = (await reply.json())["entries"][0]
+            assert newest["l"] == "i" and len(newest["c"]) == 24 and len(newest["m"]) == 1024
+            # A frame the store could not write is asked for again from the cursor.
+            failing = companion.logs.apply
+
+            async def broken(*_):
+                raise sqlite3.OperationalError("disk I/O error")
+            companion.logs.apply = broken
+            await session.send({"t": "log", "b": 7, "e": [[10, 1100, 1789000012, "i", "state", "lost?"]]})
+            resync = await session.next("logsub", skip=("ping", "lm"))
+            assert resync["boot"] == 7 and resync["after"] == 9
+            companion.logs.apply = failing
+            # A reconnect resumes from the stored cursor once `dev` named the controller again.
             await session.ws.close()
             session = await asyncio.wait_for(fake.sessions.get(), 3)
             await eventually(lambda: companion.link == "open")
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
+            await session.quiet(0.2, skip=("ping", "lm"))
+            await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
             sub = await session.next("logsub", skip=("ping", "lm"))
-            assert sub["boot"] == 7 and sub["after"] == 8
-            # A cleared ring replaces that boot's rows, and the export shows it.
+            assert sub["boot"] == 7 and sub["after"] == 9
+            # A cursor the controller could not resume keeps the rows and marks the spot.
             await session.send({"t": "log", "b": 7, "reset": True, "e": [
-                [1, 5000, 1789000020, "i", "state", "the log was cleared"]]})
-            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 1))
-            async with http.get(page_url + "/log?limit=10") as reply:
+                [10, 5000, 1789000020, "i", "state", "the log started over"]]})
+            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 10))
+            async with http.get(page_url + "/log?limit=3", headers=signed) as reply:
                 page = await reply.json()
-            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == ["reset", 1]
-            async with http.get(page_url + "/log/export") as reply:
-                assert reply.headers["Content-Disposition"].startswith("attachment")
+            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [10, "reset", 9, 8, "gap"]
+            async with http.get(page_url + "/log/export", headers=signed) as reply:
+                assert reply.headers["Content-Disposition"] == 'attachment; filename="obbw-log-AA-BB-CC-DD-EE-FF.json"'
                 exported = await reply.json()
+            assert exported["format"] == "openbrewbyweight-companion-log" and exported["version"] == 2
             assert exported["device"] == "AA:BB:CC:DD:EE:FF"
-            assert [row["s"] for row in exported["events"]] == [1]
+            assert [entry.get("s", entry.get("g")) for entry in exported["entries"]] == [
+                1, 2, 3, "gap", 8, 9, "reset", 10]
+            # A companion restarted with the controller off still shows the
+            # history, to the browser the controller accepted before.
+            service.LOG_ACCESS_RECHECK_S = 0
+            fake.auth_up = False
+            restarted = Companion("Kitchen server", data, http, Upstream)
+            await restarted.open_log()
+            assert restarted.device_id == "AA:BB:CC:DD:EE:FF"
+            pages_again = TestServer(web_app(restarted), host="127.0.0.1")
+            await pages_again.start_server()
+            again_url = f"http://127.0.0.1:{pages_again.port}/__companion"
+            restarted.set_controller(target)
+            async with http.get(again_url + "/log?limit=1", headers=signed) as reply:
+                assert reply.status == 200 and (await reply.json())["entries"][0]["s"] == 10
+            async with http.get(again_url + "/log?limit=1", headers={"X-WebUI-Session": "stranger"}) as reply:
+                assert reply.status == 401, "a session the controller never accepted waits for it"
+            status = await restarted.status()
+            assert status["log"]["rows"] == 6 and status["log"]["enabled"] is False
+            await pages_again.close()
+            await restarted.logs.close()
+            await restarted.relay.close()
+            # With the password off, any browser reads it; the answer is asked again.
+            fake.auth_up, fake.login = True, False
+            async with http.get(page_url + "/log?limit=1") as reply:
+                assert reply.status == 200
+            fake.login = True
+            service.LOG_ACCESS_RECHECK_S = 300
+            # Delete history empties the store and keeps reading rights and the id.
+            async with http.post(page_url + "/log/delete", data="{}", headers=signed) as reply:
+                assert reply.status == 415
+            async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
+                assert reply.status == 200
+            assert (await companion.status())["log"]["rows"] == 0
+            assert await companion.logs.device() == "AA:BB:CC:DD:EE:FF"
+            await session.send({"t": "log", "b": 7, "e": [[11, 6000, 1789000030, "i", "state", "after delete"]]})
+            await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 11))
             # The switch off stops the subscription; the store keeps what it has.
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": False})
             await eventually(lambda: companion.log_on is False)
@@ -622,6 +694,8 @@ async def main():
             fake.mode = "erase"
             await eventually(lambda: companion.store.pairing() is None)
             assert (await companion.status())["paired"] is False and companion.pairing.state == "unpaired"
+            assert companion.device_id is None and await companion.logs.device() is None, "Forget erases the log"
+            assert (await companion.logs.stats("AA:BB:CC:DD:EE:FF"))["rows"] == 0
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
             await asyncio.sleep(0.3)
             assert len(fake.pair_requests) == 2, "no new request on its own after the controller forgot it"
@@ -660,6 +734,7 @@ async def main():
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
             assert companion.pairing.state == "unpaired" and companion.device_name is None
             await pages.close()
+            await companion.relay.close()
     await server.close()
     print("Companion link: pairing, handshake, pings, cfg, creds, route, hold, commands, errors and erase OK")
 

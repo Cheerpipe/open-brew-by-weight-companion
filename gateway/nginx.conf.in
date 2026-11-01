@@ -61,6 +61,12 @@ http {
       proxy_http_version 1.1;
     }
 
+    # The stored log is read with the browser's Web UI session: never in clear.
+    location ^~ /__companion/log {
+      default_type application/json;
+      return 403 '{"error":"HTTPS_REQUIRED","message":"Open the companion over HTTPS to read the log"}';
+    }
+
     location = /__companion {
       return 301 /__companion/;
     }
@@ -95,10 +101,12 @@ http {
       return 301 /__companion/gateway;
     }
 
-    # Open Brew by Weight Companion's own pages and status.
+    # Open Brew by Weight Companion's own pages and status. X-Real-IP names the
+    # browser when the stored log asks the controller whether it may read it.
     location ^~ /__companion/ {
       proxy_pass http://unix:@RUN@/companion.sock;
       proxy_http_version 1.1;
+      proxy_set_header X-Real-IP $remote_addr;
     }
 
     location = /__companion {

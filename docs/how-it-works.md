@@ -407,6 +407,53 @@ the Web UI through the companion turned off, `/api/` answers
 only while the controller's relay answer says a feature needs it, such as
 La Marzocco.
 
+### The diagnostic log history
+
+With **Diagnostic log through the companion** on, the controller streams its
+diagnostic log over the link (`docs/COMPANION_LINK.md` in the firmware
+repository has the frames) and the companion keeps it in SQLite at
+`data/companion.db` (WAL, `user_version` migrations, every call on the same
+single disk thread as the secrets).
+
+- **Subscription.** In each session the companion sends `logsub` once both
+  `cfg` turned the stream on and `dev` named the controller's id, with that
+  id's newest stored `(boot, sequence)`. The id is kept in the database, so a
+  restarted companion resumes from its cursor instead of asking for the whole
+  ring again, and its pages show the history before any link opens.
+- **Rows and marks.** Events are keyed by `(device id, boot, sequence)`.
+  A `miss` (events the controller's ring overwrote) and a `reset` (a cursor
+  the controller could not resume) become mark rows anchored to the first
+  event after them; nothing stored is deleted by either.
+- **Failures.** A log frame never closes the link: text past its bounds is
+  cut, an unknown level reads as info, a frame without a usable boot or
+  sequence is dropped and counted (`log.dropped`), and a frame the database
+  could not write makes the companion send `logsub` again from its cursor, so
+  the controller sends it again. A database that cannot open (damaged, newer
+  schema, read-only volume) disables the history only; the status names why.
+- **Retention.** On start and daily: events older than
+  `COMPANION_LOG_RETENTION_DAYS` (events without a clock stay), then the
+  oldest until the used pages fit `COMPANION_LOG_RETENTION_MB` — other
+  controllers' rows first. Freed pages are reused, so the file settles near
+  the budget without a vacuum. Each round then writes `companion.db.backup`
+  with SQLite's online backup, on its own connections and thread.
+- **Access.** `GET /__companion/log` (newest-first pages: `?boot=&before=&limit=`,
+  answering `entries`, `next`, `hasMore`), `GET /__companion/log/export` and
+  `POST /__companion/log/delete` answer only over HTTPS (nginx refuses them
+  on plain HTTP with `403 HTTPS_REQUIRED`) and only for a browser the
+  controller lets open the Web UI: the companion asks `GET /api/v1/auth`
+  through the relay with the browser's `X-WebUI-Session`, at most every five
+  minutes per session, and answers `401 AUTH_REQUIRED` otherwise. Accepted
+  sessions are remembered (their SHA-256, for 90 days unseen), so they keep
+  reading while the controller is off. Forget erases the history, the id and
+  every remembered session; Delete history erases only the history.
+- **Entries.** An event is `{"b","s","ms","w","l","c","m"}` (boot, sequence,
+  uptime ms, wall-clock seconds or 0, level `c/e/w/i/d`, category, text). A
+  marker is `{"g":"gap","count":N}`, `{"g":"reset"}` or
+  `{"g":"boot","boot":B}` (a restart into boot B). Pages put a marker below
+  the event it precedes; the export
+  (`{"format":"openbrewbyweight-companion-log","version":2,"device":…,"entries":[…]}`,
+  oldest first) puts it before.
+
 ### Status page and JSON
 
 `/__companion/` (and `/__companion/pair`) is the status and pairing page.
@@ -420,8 +467,10 @@ Diagnostic page: `name`, `version`, `id`, `paired`, `pairedWith`, the
 (`down`, `connecting`, `open` or `retry` with `linkReason`, for example
 `VERSION` when the controller speaks another link version or `ERROR` after
 an unexpected error), the La Marzocco `route`, `unknownFrames` (frames of
-an unknown type in this session) and `laMarzocco` (`enabled`, `account`,
-`connection`, `subscribed`, `up`). `POST /__companion/pair` with a JSON
+an unknown type in this session), `laMarzocco` (`enabled`, `account`,
+`connection`, `subscribed`, `up`) and `log` (`enabled`, `days`, `mb`,
+`dropped`, and the store's `rows`, `bytes`, `oldestBoot`, `newestBoot`,
+`marks`, `missed` for the controller's id, or `error`). `POST /__companion/pair` with a JSON
 body sends a new pairing request, and `POST /__companion/erase` erases a
 pairing the controller no longer recognizes (`409` while it works); a page
 on another site cannot send either without asking.
@@ -474,10 +523,12 @@ name). It asks for the controller's address only when nothing answers.
 | `companion/pairing.py`, `companion/link.py`, `companion/crypto.py` | Pairing client, link handshake and frame codec, link cryptography. |
 | `companion/lamarzocco.py`, `companion/dashboard.py` | La Marzocco client, and the dashboard filter. |
 | `companion/store.py` | The files in `data/secrets/`. |
+| `companion/logstore.py` | The controller's log history in `data/companion.db`. |
 | `companion/page.html` | Status and pairing page, styled like the setup page. |
 | `companion/ui-off.html` | Notice with the controller's address while the Web UI goes directly to it. |
 | `setup` | Setup and check script, run on the server. |
 | `compose.host.yaml`, `compose.existing-network.yaml` | Network modes, chosen with `COMPOSE_FILE`. |
 | `data/` (volume) | CA and server certificate with their keys (readable only by root), and the last controller found. |
 | `data/secrets/` (volume) | Companion id and pairing key, pairing secret, La Marzocco account and installation key (folder 0700, files 0600). |
+| `data/companion.db`, `data/companion.db.backup` (volume) | The controller's log history and its daily consistent copy. |
 | `/run/gateway/` (container) | Rendered nginx configuration, setup pages, `status.json`, the Web UI cache and the service's socket. |

@@ -217,6 +217,22 @@ page:
   account no longer has access to the machine. Correct the account in the Web
   UI as well.
 
+## The log history is empty or asks you to sign in
+
+- **"Sign in to the Web UI through this companion":** the controller's Web UI
+  has a password. Open `https://openbrewbyweight-secure.local`, sign in, then
+  reload the companion's page or the Diagnostic page. Once signed in, the
+  history stays readable even while the controller is off.
+- **"Open this page over HTTPS":** the history is never sent over plain HTTP.
+  Use the secure address instead of the setup page's.
+- **Nothing stored yet:** check **Diagnostic log through the companion** in
+  Admin → Companion and that the companion page shows the link as connected;
+  the first lines arrive within two minutes, or at once after a warning.
+- **"The log history is unavailable":** the companion could not open
+  `data/companion.db`. The reason follows the message and is in the
+  companion's log. Everything else keeps working; a damaged file can be
+  replaced by `data/companion.db.backup` with the companion stopped.
+
 ## Start the pairing over
 
 Choose **Forget** in Admin → Companion first. The next time the companion

@@ -91,6 +91,28 @@ instead of the Web UI. A controller with older firmware, or a companion that
 is not paired yet, keeps working as before: the companion passes the Web UI
 straight through, one screen at a time.
 
+## The controller's log history
+
+The controller keeps only its most recent diagnostic log, in memory: a restart
+or a busy stretch loses the oldest lines. With **Diagnostic log through the
+companion** on (Admin → Companion, on by default), the companion keeps a copy
+of every line, so you can look back days or weeks:
+
+- On the Diagnostic page opened through the companion, **Show older** pages
+  back through earlier restarts, and **Export** downloads the whole history.
+- The companion's own page (`https://openbrewbyweight-secure.local/__companion/`)
+  shows the same history with a severity filter, an export and **Delete the
+  log history**.
+- Both work even while the controller is off, for a browser that was signed
+  in to the Web UI through the companion before. Lines the controller could
+  not copy, for example while the companion was off for long, are marked as
+  a gap instead of silently missing.
+- During a shot the controller sends nothing: lines wait and are copied when
+  the shot ends.
+- The history is kept for 30 days in at most about 50 MB, oldest lines first;
+  `COMPANION_LOG_RETENTION_DAYS` and `COMPANION_LOG_RETENTION_MB` change both.
+  Forgetting the companion in Admin deletes it.
+
 ## La Marzocco
 
 On a Linea Micra, turn on **La Marzocco** in **Admin → Companion** after
@@ -225,7 +247,7 @@ hand, edit `.env`, leave a value empty to use its default, and run
 | `COMPANION_HTTP_PORT` / `COMPANION_HTTPS_PORT` | `80` / `443` | Ports for the setup page and the secure Web UI. |
 | `OBBW_CONTROLLER_URL` | empty | Empty finds the controller by itself. `http://<ip>` or `http://<name>.local` uses that one controller only. |
 | `OBBW_CONTROLLER_NAME` | empty | With more than one controller, the device name to use, as shown in the Web UI. |
-| `COMPANION_DATA` | `./data` | Folder that keeps the companion's certificate authority, pairing and keys. |
+| `COMPANION_DATA` | `./data` | Folder that keeps the companion's certificate authority, pairing, keys and the controller's log history. Keep it on the server's own disk. |
 | `COMPANION_LOG_RETENTION_DAYS` | `30` | How long the controller's diagnostic log history is kept. |
 | `COMPANION_LOG_RETENTION_MB` | `50` | Size budget for the stored diagnostic log; the oldest events go first. |
 
@@ -245,6 +267,8 @@ Everything lives in the `data` folder on your server:
 | `secrets/pairing.json` | The secret it shares with the controller after pairing. |
 | `secrets/credentials.json` | Your La Marzocco email, password and machine serial, only while La Marzocco is on. |
 | `secrets/lamarzocco.json` | The key of the companion's own La Marzocco installation, kept until the companion is unpaired. |
+| `companion.db`, `companion.db.backup` | The controller's diagnostic log history, and a consistent copy of it refreshed daily for your backups. |
+| `log/` | The companion's own log. |
 
 The keys the companion uses to sign each screen's requests to the controller
 live only in memory and change every time it starts.
@@ -260,6 +284,14 @@ live only in memory and change every time it starts.
 - The companion's pages show its state and, while a request is open, the
   pairing code. Like the setup page, anyone on your network can open them;
   they never show account details.
+- The log history is the exception: it opens only over HTTPS, and only for a
+  browser the controller lets open the Web UI. With the Web UI password on,
+  that means a browser signed in through the companion; a browser it accepted
+  keeps reading while the controller is off, and a change of the password
+  setting applies within five minutes of the controller being back.
+- Keep the `data` folder on the server's own disk, not a network share: the
+  log history's database can be damaged there. To back it up, copy the folder;
+  `companion.db.backup` is always a complete copy, even while it runs.
 
 ## Good to know
 

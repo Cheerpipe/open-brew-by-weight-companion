@@ -67,10 +67,12 @@
         <option value="i" selected></option><option value="d"></option>
       </select>
       <small id="log-level-hint" class="muted"></small>
-      <a id="log-export" download></a>
+      <a id="log-export" href="#" hidden></a>
     </p>
+    <p id="log-note" class="status warn" hidden></p>
     <pre id="log-view" style="max-height:24rem;overflow:auto;margin:0;font-size:.85em"></pre>
     <button id="log-more" type="button" hidden></button>
+    <button id="log-delete" type="button" hidden></button>
   </section>
 </main>
 <footer>
@@ -114,14 +116,19 @@
       uiDisabled: "Directly on the controller (off in Admin → Companion)",
       screens0: "no screen open", screens1: "1 screen open", screensN: "{n} screens open",
       logTitle: "Diagnostic log", logEmpty: "Nothing stored yet",
-      logStats: "{n} events · {mb} MB · kept {days} days",
+      logStats: "{n} events · {mb} of {budget} MB · kept {days} days",
       logMore: "Show older", logExport: "Export everything",
+      logDelete: "Delete the log history",
+      logDeleteConfirm: "Delete the whole diagnostic log history kept on this companion? The controller keeps its own recent log.",
       logLevelC: "Critical", logLevelE: "Error", logLevelW: "Warning",
       logLevelI: "Info", logLevelD: "Debug",
       logLevelHint: "This severity and above",
       logGap: "· {n} events could not be copied ·", logBoot: "· restart (boot {b}) ·",
-      logReset: "· the log was cleared on the controller ·",
-      logOff: "The controller keeps its log to itself (off in Admin → Companion)"
+      logReset: "· the controller could not continue from here; earlier events may be missing ·",
+      logOff: "The controller is not sending its log here: Diagnostic log through the companion is off in Admin → Companion.",
+      logAuth: "Sign in to the Web UI through this companion to read the log. Once signed in, it stays readable here even while the controller is off.",
+      logHttps: "Open this page over HTTPS to read the log.",
+      logStore: "The log history is unavailable: {error}"
     }
   };
   var t = T.en;
@@ -195,19 +202,39 @@
   });
 
   // The stored diagnostic log: read from this companion's own store, so it
-  // shows and exports with the controller down. Newest first, older pages on
-  // demand; gaps and restarts name themselves between the events.
-  var LEVELS = { c: 0, e: 1, w: 2, i: 3, d: 4 }, logEntries = [], logNext = null;
+  // shows and exports with the controller down, for a browser the controller
+  // lets open the Web UI (its session goes along). Newest first, older pages
+  // on demand; the newest page follows new events while nothing older is open.
+  var LEVELS = { c: 0, e: 1, w: 2, i: 3, d: 4 }, logEntries = [], logNext = null, logOlder = false, logBusy = false, logRows = null;
   $("log-title").textContent = t.logTitle;
   $("log-more").textContent = t.logMore;
   $("log-export").textContent = t.logExport;
-  $("log-level").options[0].text = t.logLevelC;
-  $("log-level").options[1].text = t.logLevelE;
-  $("log-level").options[2].text = t.logLevelW;
-  $("log-level").options[3].text = t.logLevelI;
-  $("log-level").options[4].text = t.logLevelD;
+  $("log-delete").textContent = t.logDelete;
+  ["c", "e", "w", "i", "d"].forEach(function (level, i) {
+    $("log-level").options[i].text = t["logLevel" + level.toUpperCase()];
+  });
   $("log-level-hint").textContent = " · " + t.logLevelHint;
   $("log-level").addEventListener("change", renderLog);
+  function session() {
+    try { return localStorage.getItem("obbwSession") || sessionStorage.getItem("obbwSession") || ""; }
+    catch (_) { return ""; }
+  }
+  function logFetch(url, init) {
+    init = init || {};
+    init.cache = "no-store";
+    init.headers = Object.assign({ "X-WebUI-Session": session() }, init.headers);
+    return fetch(url, init).then(function (r) {
+      if (r.ok) return r;
+      return r.json().then(function (body) { throw body; }, function () { throw {}; });
+    });
+  }
+  function logRefused(body) {
+    var note = body && body.error === "AUTH_REQUIRED" ? t.logAuth : body && body.error === "HTTPS_REQUIRED" ? t.logHttps
+      : body && body.error === "STORE" ? fill(t.logStore, { error: body.message || "" }) : "";
+    $("log-note").textContent = note;
+    $("log-note").hidden = !note;
+    logBusy = false;
+  }
   function logLine(entry) {
     if (entry.g === "boot") return fill(t.logBoot, { b: entry.boot });
     if (entry.g === "gap") return fill(t.logGap, { n: entry.count });
@@ -224,30 +251,55 @@
     }
     $("log-view").textContent = lines.length ? lines.join("\n") : t.logEmpty;
   }
-  function logPage() {
-    var url = "/__companion/log?limit=100" + (logNext ? "&boot=" + logNext.boot + "&before=" + logNext.before : "");
-    fetch(url, { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (page) {
-      if (!page || !Array.isArray(page.entries)) return;  // A closed store answers an error.
-      logEntries = logEntries.concat(page.entries);
+  function logPage(fresh) {
+    if (logBusy) return;
+    logBusy = true;
+    var next = fresh ? null : logNext;
+    var url = "/__companion/log?limit=100" + (next ? "&boot=" + next.boot + "&before=" + next.before : "");
+    logFetch(url).then(function (r) { return r.json(); }).then(function (page) {
+      logEntries = (fresh ? [] : logEntries).concat(page.entries);
+      logOlder = !fresh;
       logNext = page.next;
+      logBusy = false;
+      $("log-note").hidden = true;
       $("log-more").hidden = !page.next;
+      $("log-export").hidden = $("log-delete").hidden = !logEntries.length;
       renderLog();
-    }, function () {});
+    }, logRefused);
   }
-  $("log-more").addEventListener("click", logPage);
+  $("log-more").addEventListener("click", function () { logPage(false); });
+  $("log-export").addEventListener("click", function (event) {
+    event.preventDefault();
+    logFetch("/__companion/log/export").then(function (r) {
+      var name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "");
+      return r.blob().then(function (blob) {
+        var link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = name ? name[1] : "obbw-log.json";
+        link.click();
+        setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+      });
+    }).catch(logRefused);
+  });
+  $("log-delete").addEventListener("click", function () {
+    if (!confirm(t.logDeleteConfirm)) return;
+    logFetch("/__companion/log/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(function () { logRows = null; logPage(true); }, logRefused);
+  });
   function renderLogStats(s) {
     var log = s.log || {};
-    if (log.error) { $("log-stats").textContent = "—"; return; }
-    if (!s.paired || !log.enabled) {
-      $("log-stats").textContent = s.paired ? t.logOff : "";
-      $("log-more").hidden = true;
+    if (!s.paired) {
+      $("log-stats").textContent = "";
       return;
     }
-    $("log-stats").textContent = log.rows ? fill(t.logStats, {
-      n: log.rows, mb: (log.bytes / 1048576).toFixed(1), days: log.days || 30
-    }) : t.logEmpty;
-    $("log-export").href = "/__companion/log/export";
-    if (!logEntries.length) logPage();
+    $("log-stats").textContent = log.error ? fill(t.logStore, { error: log.error })
+      : (log.rows ? fill(t.logStats, { n: log.rows, mb: (log.bytes / 1048576).toFixed(1), budget: log.mb, days: log.days })
+        : t.logEmpty) + (s.link === "open" && !log.enabled ? " · " + t.logOff : "");
+    // The newest page follows new events while the reader has not paged back.
+    if (!log.error && log.rows !== logRows && !logOlder) {
+      logRows = log.rows;
+      logPage(true);
+    }
   }
   refresh();
 })();

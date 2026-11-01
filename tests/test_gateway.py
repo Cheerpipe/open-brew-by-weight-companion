@@ -28,6 +28,12 @@ assert cfg["hostname"] == "openbrewbyweight-secure.local" and cfg["ip"] == "192.
 assert (cfg["http_port"], cfg["https_port"], cfg["mdns_publish"]) == (80, 443, True)
 assert gateway.load_config({**BASE, "COMPANION_HOSTNAME": "Brew.Local."})["hostname"] == "brew.local"
 assert gateway.load_config({**BASE, "COMPANION_MDNS_PUBLISH": "off"})["mdns_publish"] is False
+# The log retention settings, as compose passes them: empty means the default.
+retention = gateway.load_config({**BASE, "COMPANION_LOG_RETENTION_DAYS": "90", "COMPANION_LOG_RETENTION_MB": ""})
+assert (retention["log_retention_days"], retention["log_retention_mb"]) == (90, 50)
+compose = (ROOT / "compose.yaml").read_text()
+assert all(f"{key}: ${{{key}:-}}" in compose for key in ("COMPANION_LOG_RETENTION_DAYS", "COMPANION_LOG_RETENTION_MB")), \
+    "compose passes the retention settings to the container"
 
 # The HTTPS gateway's setting names keep working; the companion's names win.
 legacy = gateway.load_config({"GATEWAY_IP": "192.168.1.241", "GATEWAY_HOSTNAME": "espresso", "HTTP_PORT": "8080",
@@ -94,6 +100,9 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in page
     assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.crt'" in page
     assert "index.en.html" in conf and conf.count("location = /__companion/gateway") == 2
+    plain = conf.split("ssl default_server", 1)[0]
+    assert "location ^~ /__companion/log {" in plain and "HTTPS_REQUIRED" in plain, "the stored log never goes in clear"
+    assert conf.count("location ^~ /__companion/log {") == 1
     assert conf.count("return 301 /__companion/gateway;") == 2, "the gateway's earlier status address redirects"
     assert "Open Brew by Weight Companion · Kitchen server" in page
     assert 'fetch("https://openbrewbyweight-secure.local/__companion/ping"' in page
