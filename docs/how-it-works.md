@@ -381,7 +381,9 @@ every op itself:
   the same parameters, replayed to screens that join it (up to 16 pages or
   512 KiB). Other groups get one fetch with every parameter, once when they
   appear and again when the store changes; scrolls and exports are fetches
-  too, one at a time, and identical ones are shared. When the standing
+  too, one at a time, and identical ones are shared. Home's request for the
+  shots before its hero card is such a fetch, from a screen that has no
+  Stats window of its own. When the standing
   group's last screen leaves, the most recently active other group takes
   the window.
 - The offline copy's record index is cached per store; screens asking at

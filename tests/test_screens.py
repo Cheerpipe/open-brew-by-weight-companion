@@ -277,7 +277,17 @@ async def main():
             # The owner alone changes its window: the header refresh, not a new subscription.
             await a.send({"op": "stats", "on": True, "window": 100})
             assert (await ops_after(session, 4))[-1] == {"op": "stats", "on": True, "window": 100}
-            await all_closed(a, b)
+            # Home's rows-only fetch, from a screen with no Stats view: its rows, not a 4003.
+            c = await screen(2).open()
+            await c.next("home")
+            await c.next("card")
+            await c.send({"op": "stats", "on": True, "fetch": True, "request": 11, "offset": 1, "limit": 2,
+                          "sort": "date", "dir": "desc", "filter": {}})
+            ops = await ops_after(session, 5)
+            assert ops[-1] == {"op": "stats", "on": True, "fetch": True, "request": ops[-1]["request"], "offset": 1,
+                               "limit": 2, "sort": "date", "dir": "desc", "filter": {}, "window": 10}
+            assert (await c.next("stats"))["request"] == 11 and (await c.next("stats"))["rowBase"] == 1
+            await all_closed(a, b, c)
 
             # --- Diagnostic: a late screen gets the merged model, split; the last one leaves ----------
             a = await screen(0).open([{"op": "diagnostic", "on": True}])

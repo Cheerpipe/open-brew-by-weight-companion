@@ -340,9 +340,8 @@ class View:
             if set(message) - {"op", "on"}:
                 raise Invalid()
             self.unsubscribe(screen)
-        elif fetch:
-            if record.group is None or offset is None or tag is not None or (
-                    self.kind == "stats" and "window" in given):
+        elif fetch:  # Without a view of its own it is Home's rows-only Stats fetch, as on the controller.
+            if offset is None or tag is not None or (self.kind == "stats" and "window" in given):
                 raise Invalid()
             self.mux.attribute(screen)  # What it leaves out is its own window's, not the controller's.
             self._queue(self.key({**record.params, **given}), target=(screen, request or 0))
