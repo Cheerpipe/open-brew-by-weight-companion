@@ -310,6 +310,10 @@ class Companion:
         self.sync_due[key] = frame
         return True
 
+    def sync_blocked(self):
+        """Sync cannot flow now: the link is down, a hold is on, or a request waits for a clear frame."""
+        return self.outbox is None or self.clear_at is None or bool(self.sync_due)
+
     def _hold_state(self, frame):
         """The controller's frames tell whether sync may flow: a `hold` with `sync` false (its reply to
         each ping) and every log or archive frame mean clear; `sync` true blocks until the next clear."""
@@ -987,8 +991,7 @@ def web_app(companion):
         try:
             header, good, synced = await companion.archive.header(window, active, epoch, chosen)
         except (Unavailable, sqlite3.Error) as error:
-            log(f"the Stats header over the whole history is unavailable ({error}); screens show the "
-                "controller's")
+            companion.archive.note_unavailable(error)
             return web.json_response({"error": "STATS_UNAVAILABLE"}, status=503)
         return web.json_response({"stats": header, "good": good, "epoch": synced}, headers=no_store)
 

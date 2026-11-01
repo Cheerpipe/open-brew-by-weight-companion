@@ -27,6 +27,10 @@ FILTER_MAX = 8  # SHOT_LIST_FILTER_MAX: facets list at most eight presets and ei
 MISSING = None
 VERDICTS = {"on_recipe": 0, "fast": 1, "slow": 2}
 BBW_STOPS = frozenset({"normal_target", "extended_max_weight", "slow_min_weight"})
+# Every row field the header reads (Record below), so callers can leave the rest, the curve above all.
+FIELDS = ("durationS", "goalG", "fastBeforeS", "slowAfterS", "arrivalS", "actualG", "cutLineG", "avgFlowGS",
+          "verdict", "shotType", "stopDetail", "presetId", "presetName", "scaleName", "hasWallTime",
+          "endedAtLocalSec")
 
 
 def f32(value):

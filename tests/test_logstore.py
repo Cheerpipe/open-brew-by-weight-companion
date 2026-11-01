@@ -176,7 +176,7 @@ async def main():
         # --- The archive beside it is not the log's: its size never prunes the log --
         log_rows = (await store.stats(DEVICE))["rows"]
         await offload(lambda: store.connection.executemany(
-            "insert into archive_records values (?, 'shots', 1, ?, '', 0, 'good', 0, 0, ?)",
+            "insert into archive_records values (?, 'shots', 1, ?, '', 0, 'good', 0, 0, 0, ?)",
             [(DEVICE, n, "x" * 4000) for n in range(1, 600)]))
         assert await store.prune(days=3650, megabytes=1, device=DEVICE) == 0
         assert (await store.stats(DEVICE))["rows"] == log_rows and (await store.stats(DEVICE))["bytes"] <= 1048576

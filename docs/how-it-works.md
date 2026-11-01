@@ -442,7 +442,8 @@ single disk thread as the secrets).
 - **Retention.** On start and daily: events older than
   `COMPANION_LOG_RETENTION_DAYS` (events without a clock stay), then the
   oldest until the log tables' pages fit `COMPANION_LOG_RETENTION_MB` —
-  other controllers' rows first; the archive's tables in the same file never
+  other controllers' rows first, the excess's share of them at a time,
+  measured before and after; the archive's tables in the same file never
   count (SQLite's `dbstat`). Freed pages are reused, so the log settles near
   the budget without a vacuum. Each round then writes `companion.db.backup`
   with SQLite's online backup, on its own connections and thread.
@@ -484,14 +485,20 @@ copies both of the controller's record stores into the same database
   300 s is sent again. The epoch, the controller's oldest id and the ids it
   listed are adopted only once every listed record is stored.
 - **Generations.** Rows are keyed `(device, store, generation, id)`. The
-  controller's ids start again only after Clear history or a factory reset;
-  the companion takes that as a restart when the index's newest id is below
-  the last complete sync's oldest, when every id it shares with the archive
-  is another record, or when more than half of the last index's records are
-  missing at or above the new oldest id. A restart deletes nothing: it closes
-  the generation (all its rows become archive-only) and opens the next one,
-  noting when. An empty index changes nothing. Pairing the same controller
-  again reattaches to its rows.
+  index names the store's write counter and next record id (`gen`, `next`);
+  both only grow, and fall back only on Clear history or a factory reset, so
+  a decrease of either (against the pair kept per store) is a restart,
+  decided before any page is written. When both may have overtaken their old
+  values (a long absence) or the controller names neither (older firmware),
+  identities decide: the index's newest id below the last complete sync's
+  oldest, or every id it shares with the archive another record (all shared
+  ids are fetched before deciding), is a restart; when only some differ, the
+  old record is set aside in generation 0 or below (archive-only) instead of
+  being overwritten, and that pass mirrors no deletion. A restart deletes
+  nothing: it closes the generation (all its rows become archive-only) and
+  opens the next one, noting when. An empty index changes nothing. Pairing
+  the same controller again reattaches to its rows. A change the user makes
+  during a pass makes it start again from the index.
 - **Identity and deletions.** A shot is `bootId:endedAtMs`, an activation
   every immutable field (`type`, `durationS`, `hasWallTime`, `noWeight`,
   both end times), so a controller without a clock still tells records
@@ -501,9 +508,11 @@ copies both of the controller's record stores into the same database
   controller, keep in the archive) or **Keep records deleted on the
   controller** is on (`meta` key `archiveKeepDeleted`), which marks it kept
   instead; below the oldest it stays (rotation, or a deleted oldest record).
-  Removing a record the controller still lists from the archive leaves an
-  exclusion, so it is not copied again; the exclusion goes when the id leaves
-  the index or a new generation opens. A hole row says how many records
+  Removing a record the controller may still hold (at or above the synced
+  oldest, or any before the first complete sync) leaves an exclusion, so it
+  is not copied again, and the whole-history Stats header keeps counting it
+  while the controller holds it; the exclusion goes when the id leaves the
+  index or a new generation opens. A hole row says how many records
   could not be copied. A refetched row whose curve is empty (the controller
   recycled it) keeps the stored curve.
 - **Archive-only rows** are those of closed generations, those below the open
@@ -541,10 +550,12 @@ copies both of the controller's record stores into the same database
   the good shots the filters keep, from which the browser offers the window
   choices. When the copy is behind `epoch`, the companion syncs the shots at
   once and waits up to 8 s; it also syncs as soon as the live Stats frames a
-  screen receives show a new shot. Anything else answers
-  `503 STATS_UNAVAILABLE` with the cause in the companion's log, and the
-  browser keeps the controller's header. Headers are cached per window,
-  preset, filters and store state.
+  screen receives show a new shot. While the controller holds sync (or a
+  request waits for it), the newest complete header answers at once with its
+  own `epoch`. A real failure answers `503 STATS_UNAVAILABLE` (the cause in
+  the companion's log, at most every five minutes), and the browser keeps the
+  controller's header. Headers and the status facts are cached by the
+  archive's state; the header reads only the fields it needs.
 - **No sync traffic during a shot.** The controller answers each companion
   ping with `{"t":"hold","on":…,"sync":false}` while nothing holds its radio
   (and sends `"sync":true` on a change where it can). The companion sends

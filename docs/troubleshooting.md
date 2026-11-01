@@ -251,6 +251,10 @@ page:
   started the controller's numbering again. Nothing was deleted; the earlier
   records are listed with grey numbers and can be deleted on the companion's
   page, one section at a time.
+- **A shot is listed twice, once with a grey number:** while the companion
+  was away for a long time, a shot number was reused and the companion could
+  not tell for sure whether it was the same shot, so it kept both. Delete the
+  one you do not want.
 - **A deleted shot is still listed:** **Keep records deleted on the
   controller** is on, or the shot was removed with **keep in the archive**.
   Delete it from the companion's copy in its menu.

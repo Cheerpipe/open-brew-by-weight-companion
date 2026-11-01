@@ -27,7 +27,7 @@ import time
 from .store import offload
 
 SCHEMA = 3
-PRUNE_STEP = 500  # Rows per delete round while trimming to the size budget.
+PRUNE_ROUNDS = 3  # Proportional trims to the size budget, each measured once (dbstat walks the tables).
 GRANT_DAYS = 90  # A Web UI session the controller accepted stays usable this long unseen.
 FORMAT, EXPORT_VERSION = "openbrewbyweight-companion-log", 2
 FIRST_PAGE = 2 ** 32  # The page cursor before the newest event: past every ordinal and sequence.
@@ -72,29 +72,33 @@ LOG_TABLES = ("log_boots", "log_events", "log_marks")
 RENAME = "".join(f"alter table {table}_v2 rename to {table};" for table in LOG_TABLES)
 # Version 3: the archive. Rows are keyed by generation: a restarted
 # controller history (Clear, a factory reset) closes one and opens the next,
-# so nothing it held is ever deleted by inference. Records keep the row the
-# Web UI rebuilds (`body`) and whether the user kept it (`kept`); a trace row
-# without data says the shot has none; `listed` is the last complete index's
-# ids; an exclusion stops a record removed from the archive alone from being
-# copied again while the controller still holds it.
+# so nothing it held is ever deleted by inference; generations 0 and below
+# hold records set aside when a replacement was ambiguous. Records keep the
+# row the Web UI rebuilds (`body`), whether the user kept it (`kept`) and
+# their wall-clock end (`ended_at`, 0 without one); a trace row without data
+# says the shot has none; `listed` is the last complete index's ids and
+# `counters` the controller's store generation and next record id it named;
+# an exclusion stops a record removed from the archive alone from being
+# copied again while the controller may hold it, and keeps the fields the
+# whole-history Stats header still counts it by (`body`).
 ARCHIVE = """
     create table archive_records (device_id text not null, store text not null,
         generation integer not null, id integer not null, ident text not null, rev integer not null,
-        kind text not null, bad integer not null, kept integer not null, body text not null,
-        unique (device_id, store, generation, id));
+        kind text not null, bad integer not null, kept integer not null, ended_at integer not null,
+        body text not null, unique (device_id, store, generation, id));
     create table archive_traces (device_id text not null, generation integer not null,
         id integer not null, boot_id integer not null, ended_ms integer not null, data blob,
         unique (device_id, generation, id, boot_id, ended_ms));
     create table archive_sync (device_id text not null, store text not null,
         generation integer not null, epoch integer not null, oldest integer,
-        listed text not null, restarted real, unique (device_id, store, generation));
+        listed text not null, restarted real, counters text, unique (device_id, store, generation));
     create table archive_holes (device_id text not null, store text not null,
         generation integer not null, below integer not null, above integer not null,
         count integer not null, noted real not null,
         primary key (device_id, store, generation, below)) without rowid;
     create table archive_exclusions (device_id text not null, store text not null,
-        generation integer not null, id integer not null,
-        primary key (device_id, store, generation, id)) without rowid;
+        generation integer not null, id integer not null, body text,
+        primary key (device_id, store, generation, id));
 """
 ARCHIVE_TABLES = ("archive_records", "archive_traces", "archive_sync", "archive_holes", "archive_exclusions")
 
@@ -291,12 +295,19 @@ class LogStore:
             deleted += self.connection.execute(
                 "delete from log_events where wall_sec != 0 and wall_sec < ?",
                 (time.time() - days * 86400,)).rowcount
-            while self._used_bytes() > megabytes * 1024 * 1024:
+            budget, used = megabytes * 1024 * 1024, self._used_bytes()
+            for _ in range(PRUNE_ROUNDS):
+                if used <= budget:
+                    break
+                # The excess's share of the rows, oldest first (other controllers' first), and a little more.
+                rows = self.connection.execute("select count(*) from log_events").fetchone()[0]
                 gone = self.connection.execute(
                     "delete from log_events where (device_id, ordinal, sequence) in "
                     "(select device_id, ordinal, sequence from log_events "
-                    "order by device_id = ?, ordinal, sequence limit ?)", (device, PRUNE_STEP)).rowcount
+                    "order by device_id = ?, ordinal, sequence limit ?)",
+                    (device, -(-rows * (used - budget) * 101 // (used * 100)))).rowcount
                 deleted += gone
+                used = self._used_bytes()
                 if gone == 0:
                     break
             # A mark goes with the event it is anchored to, and an emptied boot
