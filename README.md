@@ -396,7 +396,7 @@ controller (`tests/fake_controller.py` for the relay and the screens) and a
 fake La Marzocco cloud:
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore archive stats; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
+docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore archive stats link_vectors; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
 ```
 
 `./setup`'s test runs the script against a fake Docker (about 20 seconds,
