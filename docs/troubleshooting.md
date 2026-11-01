@@ -180,7 +180,9 @@ the controller. Then choose on the companion's page:
   pairing replaces the old one.
 - **Erase this pairing**, if you no longer want the companion. It deletes
   the pairing, your La Marzocco account and the companion's La Marzocco
-  installation key.
+  installation key. The archive of your shots and activations and the log
+  history stay; pairing the same controller again brings them back, and the
+  companion's page can delete them.
 
 Until you choose one, your La Marzocco account stays on the companion.
 

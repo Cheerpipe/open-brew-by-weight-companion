@@ -684,6 +684,10 @@ async def main():
             # Delete history empties the store and keeps reading rights and the id.
             async with http.post(page_url + "/log/delete", data="{}", headers=signed) as reply:
                 assert reply.status == 415
+            fake.auth_up = False  # Off: a remembered sign-in still reads, but deletes nothing (review C7).
+            async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
+                assert reply.status == 503 and (await reply.json())["error"] == "CONTROLLER_UNREACHABLE"
+            fake.auth_up = True
             async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
                 assert reply.status == 200
             assert (await companion.status())["log"]["rows"] == 0

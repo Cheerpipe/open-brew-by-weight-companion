@@ -62,7 +62,7 @@
     <h2 id="log-title"></h2>
     <p id="log-stats" class="muted"></p>
     <p>
-      <select id="log-level">
+      <select id="log-level" aria-describedby="log-level-hint">
         <option value="c"></option><option value="e"></option><option value="w"></option>
         <option value="i" selected></option><option value="d"></option>
       </select>
@@ -119,7 +119,7 @@
       rate_limited: "The controller received another request a moment ago. Try again in a few seconds.",
       unreachable: "The controller did not answer. Is it on?",
       not_recognized: "The controller no longer recognizes this companion, for example after a factory reset, so the companion stopped using your La Marzocco account. It still keeps the account until you pair again or erase this pairing.",
-      erase: "Erase this pairing", eraseConfirm: "Erase this pairing, the La Marzocco account and the companion's La Marzocco installation from this companion?",
+      erase: "Erase this pairing", eraseConfirm: "Erase this pairing, the La Marzocco account and the companion's La Marzocco installation from this companion? Its copy of your shot history and the controller's log stay here, and come back if you pair this controller again.",
       version: "The controller and this companion use different versions of their connection. Update both to their latest release.",
       unknown: "The controller sent messages this companion does not understand. Update the companion.",
       error: "Pairing did not work. The companion's log says why.",
@@ -145,7 +145,7 @@
       logOff: "The controller is not sending its log here: Diagnostic log through the companion is off in Admin → Companion.",
       logAuth: "Sign in to the Web UI through this companion to read the log. Once signed in, it stays readable here even while the controller is off.",
       logHttps: "Open this page over HTTPS to read the log.",
-      logStore: "The log history is unavailable: {error}",
+      logStore: "The log history cannot be read right now. The companion's log says why.",
       archiveTitle: "Shot archive", archiveEmpty: "Nothing stored yet",
       archiveStats: "{shots} shots and {history} activations · {older} of them no longer on the controller · {mb} MB",
       archiveDates: "From {first} to {last}", archiveSynced: "Last copied {when}",
@@ -160,13 +160,19 @@
       archiveKeepHint: "When a shot or activation is deleted in the Web UI opened directly on the controller, this companion keeps its copy.",
       archiveScope: "Delete from the archive: ", scopeAll: "Everything", scopeShots: "All shots",
       scopeHistory: "All activations", scopeRange: "Shots and activations from a date range",
-      scopeGeneration: "{store} history {n} · {count} records{current}", scopeCurrent: " (current)",
       archiveDeleteConfirm: "Delete {what} from this companion? Export everything first if you may want them back: records the controller no longer keeps cannot be recovered.",
       archiveAllConfirm: "Delete every shot and activation kept on this companion? Export everything first if you may want them back: records the controller no longer keeps cannot be recovered, and the ones it still keeps are copied again.",
       archiveRangeMissing: "Choose both dates first. Records without a date (made before the controller knew the time) are never part of a range.",
       archiveAuth: "Sign in to the Web UI through this companion to export or delete the archive.",
       archiveController: "Turn the controller on so it can confirm your sign-in, then try again.",
-      archiveStore: "The archive is unavailable: {error}"
+      archiveStore: "The archive cannot be read right now. The companion's log says why.",
+      archiveHttps: "Open this page over HTTPS to export or delete the archive.",
+      archiveFailed: "The archive could not be changed. Try again.",
+      archiveFrom: "From", archiveTo: "To",
+      generationNow: "Current {store} history · {count} records",
+      generationUntil: "{Store} history until {date} · {count} records",
+      generationEarlier: "Earlier {store} history · {count} records",
+      generationAside: "Replaced {store} records · {count}"
     }
   };
   var t = T.en;
@@ -269,7 +275,8 @@
   }
   function logRefused(body) {
     var note = body && body.error === "AUTH_REQUIRED" ? t.logAuth : body && body.error === "HTTPS_REQUIRED" ? t.logHttps
-      : body && body.error === "STORE" ? fill(t.logStore, { error: body.message || "" }) : "";
+      : body && body.error === "CONTROLLER_UNREACHABLE" ? t.archiveController
+      : body && body.error === "STORE" ? t.logStore : "";
     $("log-note").textContent = note;
     $("log-note").hidden = !note;
     logBusy = false;
@@ -334,9 +341,9 @@
   $("archive-export").textContent = t.archiveExport;
   $("archive-delete").textContent = t.archiveDelete;
   function archiveRefused(body) {
-    var note = body && body.error === "AUTH_REQUIRED" ? t.archiveAuth : body && body.error === "HTTPS_REQUIRED" ? t.logHttps
+    var note = body && body.error === "AUTH_REQUIRED" ? t.archiveAuth : body && body.error === "HTTPS_REQUIRED" ? t.archiveHttps
       : body && body.error === "CONTROLLER_UNREACHABLE" ? t.archiveController
-      : body && body.error === "STORE" ? fill(t.archiveStore, { error: body.message || "" }) : "";
+      : body && body.error === "STORE" ? t.archiveStore : body ? t.archiveFailed : "";
     $("archive-note").textContent = note;
     $("archive-note").hidden = !note;
   }
@@ -344,7 +351,7 @@
   function renderArchive(s) {
     var a = s.archive || {}, total = (a.shotsTotal || 0) + (a.historyTotal || 0), first = Math.min(
       a.shotsFirst || Infinity, a.historyFirst || Infinity), last = Math.max(a.shotsLast || 0, a.historyLast || 0);
-    var lines = !s.paired ? [] : a.error && !total ? [fill(t.archiveStore, { error: a.error })]
+    var lines = !s.paired ? [] : a.error && !total ? [t.archiveStore]
       : !total ? [t.archiveEmpty]
       : [fill(t.archiveStats, { shots: a.shotsTotal, history: a.historyTotal, older: a.shots + a.history,
         mb: (a.bytes / 1048576).toFixed(1) })];
@@ -368,6 +375,8 @@
   $("archive-keep-label").textContent = t.archiveKeep;
   $("archive-keep-hint").textContent = t.archiveKeepHint;
   $("archive-scope-label").textContent = t.archiveScope;
+  $("archive-from").setAttribute("aria-label", t.archiveFrom);
+  $("archive-to").setAttribute("aria-label", t.archiveTo);
   function archivePost(path, body) {
     return logFetch("/__companion/archive/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body) }).then(function () { $("archive-note").hidden = true; refresh(); }, function (body) {
@@ -400,9 +409,14 @@
       list.forEach(function (g) {
         var older = list.filter(function (o) { return o.generation === g.generation - 1; })[0];
         if (g.restartedAt && older) restarts.push(fill(t.archiveRestart, { store: name, date: day(g.restartedAt), n: older.count }));
-        if (list.length > 1 && g.count) options.push(["g" + store + g.generation, fill(t.scopeGeneration, {
-          store: name.charAt(0).toUpperCase() + name.slice(1), n: g.generation, count: g.count,
-          current: g.current ? t.scopeCurrent : "" }), { store: store, generation: g.generation }]);
+        // A closed history ended when the next existing one opened; set-aside records sit below 1.
+        var until = list.filter(function (o) { return o.generation > g.generation; }).sort(function (x, y) {
+          return x.generation - y.generation; })[0];
+        var label = g.current ? t.generationNow : g.generation < 1 ? t.generationAside
+          : until && until.restartedAt ? t.generationUntil : t.generationEarlier;
+        if (list.length > 1 && g.count) options.push(["g" + store + g.generation, fill(label, {
+          store: name, Store: name.charAt(0).toUpperCase() + name.slice(1), count: g.count,
+          date: until && until.restartedAt ? day(until.restartedAt) : "" }), { store: store, generation: g.generation }]);
       });
     });
     $("archive-restarts").textContent = "";
@@ -426,7 +440,7 @@
       $("log-stats").textContent = "";
       return;
     }
-    $("log-stats").textContent = log.error ? fill(t.logStore, { error: log.error })
+    $("log-stats").textContent = log.error ? t.logStore
       : (log.rows ? fill(t.logStats, { n: log.rows, mb: (log.bytes / 1048576).toFixed(1), budget: log.mb, days: log.days })
         : t.logEmpty) + (s.link === "open" && !log.enabled ? " · " + t.logOff : "");
     // The newest page follows new events while the reader has not paged back.

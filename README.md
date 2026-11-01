@@ -60,7 +60,9 @@ A factory reset of the controller forgets the companion too, but the
 companion cannot be sure the controller really means it, so it only stops
 using your La Marzocco account and keeps it. Its page then offers **Pair
 again** or **Erase this pairing**; until you choose one, your La Marzocco
-account stays on the companion.
+account stays on the companion. Either way the companion keeps its copy of
+your shot history and the log: pairing the same controller again brings them
+back.
 
 ## Several screens at once
 
@@ -104,7 +106,8 @@ of every line, so you can look back days or weeks:
   shows the same history with a severity filter, an export and **Delete the
   log history**.
 - Both work even while the controller is off, for a browser that was signed
-  in to the Web UI through the companion before. Lines the controller could
+  in to the Web UI through the companion before; deleting the history needs
+  the controller on, to confirm your sign-in. Lines the controller could
   not copy, for example while the companion was off for long, are marked as
   a gap instead of silently missing.
 - During a shot the controller sends nothing: lines wait and are copied when

@@ -35,6 +35,7 @@ import asyncio
 import base64
 import binascii
 import json
+import sqlite3
 import time
 
 from . import log, stats
@@ -50,9 +51,9 @@ TRACE_RETRY_S = 60
 RUN_GAP = 3  # Unwanted rows a fetch window may span to join two runs of wanted ones.
 NAMES = {"shots": "shot", "history": "activation"}
 HISTORY_IDENT = ("type", "durationS", "hasWallTime", "noWeight", "endedAtUnixSec", "endedAtLocalSec")
-# Archive-only: a closed generation, below the open one's oldest, or kept and no longer listed.
-ONLY = ("(r.generation < :open or (s.oldest is not null and (r.id < s.oldest or (r.kept = 1 and not exists "
-        "(select 1 from json_each(s.listed) j where j.value = r.id)))))")
+# Archive-only: a closed generation, below the open one's oldest, or kept (the user removed it from the
+# controller; while its delete is still on the way the browser shows the controller's row instead).
+ONLY = "(r.generation < :open or r.kept = 1 or (s.oldest is not null and r.id < s.oldest))"
 JOIN = ("archive_records r left join archive_sync s on s.device_id = r.device_id and s.store = r.store "
         "and s.generation = r.generation")
 COLUMNS = "(device_id, store, generation, id, ident, rev, kind, bad, kept, ended_at, body)"
@@ -109,8 +110,8 @@ class ArchiveStore:
 
     async def _user(self, work):
         """A change the user made: any sync pass in flight starts over, cached answers go."""
+        self.revision += 1  # Before the work is queued: a pass's next write sees it (the disk thread is serial).
         result = await self._call(work)
-        self.revision += 1
         for callback in self.changed:
             callback()
         return result
@@ -386,30 +387,39 @@ class ArchiveStore:
             return True
         return await self._user(write)
 
-    async def keep(self, device, store, record_id):
-        """Mark an open-generation record kept before the controller deletes it; False when there is none."""
+    async def keep(self, device, store, record_id, kept=True):
+        """Mark an open-generation record kept before the controller deletes it, or unmark it when the
+        controller refused the delete; False when the archive has not copied it (yet)."""
         return await self._user(lambda: self._write(
-            "update archive_records set kept = 1 where device_id = ? and store = ? and generation = ? and id = ?",
-            (device, store, self._open(device, store), record_id)) > 0)
+            "update archive_records set kept = ? where device_id = ? and store = ? and generation = ? and id = ?",
+            (int(kept), device, store, self._open(device, store), record_id)) > 0)
 
     def _remove(self, device, store, keys):
         """Delete these (generation, id) rows with their traces. An open-generation id the controller may
-        still hold (at or above the synced oldest, or any before the first complete sync) gets an
-        exclusion, so it is not copied again, with the fields the whole-history Stats header counts.
-        Returns how many went."""
+        still hold (at or above the synced oldest, or any before the first complete sync; not a kept row
+        its last index no longer lists) gets an exclusion, so it is not copied again, with the fields the
+        whole-history Stats header counts; one not copied yet gets it too, without them. Returns how
+        many records went, the excluded ones included."""
         opened = self._open(device, store)
         row = self._sync_row(device, store, opened)
         oldest, gone = row["oldest"] if row else None, 0
+        listed = set(json.loads(row["listed"])) if row else set()
         for generation, record_id in keys:
-            if generation == opened and (oldest is None or record_id >= oldest):
+            key = (device, store, generation, record_id)
+            held = self.connection.execute("select kept from archive_records where device_id = ? and store = ? "
+                                           "and generation = ? and id = ?", key).fetchone()
+            excluded = generation == opened and (oldest is None or record_id >= oldest) and not (
+                held and held["kept"] and record_id not in listed)
+            if excluded:
                 self.connection.execute(
-                    "insert or replace into archive_exclusions select device_id, store, generation, id, "
+                    "insert or replace into archive_exclusions values (?, ?, ?, ?, (select "
                     + (HEADER_FIELDS if store == "shots" else "null")
-                    + " from archive_records where device_id = ? and store = ? and generation = ? and id = ?",
-                    (device, store, generation, record_id))
-            gone += self.connection.execute(
+                    + " from archive_records where device_id = ? and store = ? and generation = ? and id = ?))",
+                    key + key)
+            deleted = self.connection.execute(
                 "delete from archive_records where device_id = ? and store = ? and generation = ? and id = ?",
-                (device, store, generation, record_id)).rowcount
+                key).rowcount
+            gone += deleted or excluded
             if store == "shots":
                 self._drop_traces(device, generation, (record_id,))
         return gone
@@ -431,8 +441,11 @@ class ArchiveStore:
             with self.connection:
                 for table in ARCHIVE_TABLES:
                     self.connection.execute(f"delete from {table}")
-            self.connection.execute("vacuum")
-            self.connection.execute("pragma wal_checkpoint(truncate)")
+            try:  # The delete stands; a backup reading the file meanwhile only leaves free pages behind.
+                self.connection.execute("vacuum")
+                self.connection.execute("pragma wal_checkpoint(truncate)")
+            except sqlite3.OperationalError as error:
+                log(f"the archive's space could not be given back yet ({error}); the next erase does it")
             return gone
 
         def scoped():
@@ -538,6 +551,7 @@ class Archive:
 
     def _user_changed(self):
         self.headers.clear()
+        self.complete.clear()
         self.wake.set()  # A pass in flight sees the change and starts again from the index.
 
     # --- Session -----------------------------------------------------------------
@@ -712,14 +726,19 @@ class Archive:
         named = [index.get("gen"), index.get("next")]
         named = named if all(type(value) is int for value in named) else None
         listed, order = dict(zip(rows[0::2], rows[1::2])), rows[0::2]
-        if not listed:  # Nothing to compare with (a cleared store): keep everything until it records again.
+        # Exact, and decided before anything is written (an empty index included, so the counters
+        # stored never fall back): either counter fell back.
+        restarted = bool(named and counters and (named[0] < counters[0] or named[1] < counters[1]))
+        if not listed:  # Nothing to compare ids with: everything stays until the store records again.
+            if restarted:
+                generation, oldest, previous = await self._restart(store, generation, named, revision), None, []
             self._steady(revision)
             await self.store.adopt(device, store, generation, new_epoch, oldest, previous, named)
             return
         low, high = min(listed), max(listed)
-        # Exact: either counter fell back. Fallback: ids that cannot come after the last sync's oldest.
-        restarted = bool(named and counters and (named[0] < counters[0] or named[1] < counters[1])) or \
-            (oldest is not None and high < oldest)
+        # Fallback: ids that cannot come after the last sync's oldest.
+        if not restarted and oldest is not None and high < oldest:
+            restarted = True
         if restarted:
             generation = await self._restart(store, generation, named, revision)
         archived, excluded = await self.store.records(device, store, generation)
@@ -836,6 +855,8 @@ class Archive:
                 self.headers.pop(next(iter(self.headers)))
             self.headers[key] = (*built, synced)
         if synced == epoch:
+            if view not in self.complete and len(self.complete) >= HEADERS:
+                self.complete.pop(next(iter(self.complete)))
             self.complete[view] = self.headers[key]
         return self.headers[key]
 

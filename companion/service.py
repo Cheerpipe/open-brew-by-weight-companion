@@ -154,8 +154,10 @@ class Companion:
         self.wake.set()
         self.spawn(self.relay.handshake())
 
-    async def erase(self, why):
-        """Delete the pairing, the La Marzocco account and its installation key."""
+    async def erase(self, why, history=True):
+        """Delete the pairing, the La Marzocco account and its installation key and, unless `history` is
+        false, the log history and the archive (Forget, D2). The page's erase of a pairing the controller
+        no longer recognizes keeps both: pairing that controller again reattaches to them (S4)."""
         await offload(self.store.erase_pairing)
         self.lm.erase()
         self.creds_gen = None
@@ -163,8 +165,12 @@ class Companion:
         self.pairing.state, self.pairing.auto = "unpaired", False
         self.relay.reset()
         self.archive.stop()
-        await self.erase_log()
-        log(f"{why}; its pairing, La Marzocco account, installation key, log history and archive are erased")
+        if history:
+            await self.erase_log()
+            log(f"{why}; its pairing, La Marzocco account, installation key, log history and archive are erased")
+        else:
+            log(f"{why}; its pairing, La Marzocco account and installation key are erased, the log history and "
+                "the archive are kept")
         self.wake.set()
 
     def not_recognized(self):
@@ -825,7 +831,7 @@ def web_app(companion):
                 "paired", "requesting", "pending"):
             return web.json_response({"error": "IN_USE", "message": "Only a pairing the controller no longer "
                                       "recognizes can be erased here; use Forget in Admin"}, status=409)
-        await companion.erase("erased on the companion's page")
+        await companion.erase("erased on the companion's page", history=False)
         return web.json_response(await companion.status(), headers=no_store)
 
     def _log_query(request):
@@ -898,7 +904,7 @@ def web_app(companion):
     async def log_delete(request):
         if request.content_type != "application/json":
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
-        refusal = await _log_refusal(request)
+        refusal = await _log_refusal(request, live=True)
         if refusal is not None:
             return refusal
         try:
@@ -910,13 +916,15 @@ def web_app(companion):
 
     # --- The archive ---------------------------------------------------------
     def _numbers(source, *names, optional=()):
-        """Whole numbers in uint32 range; a name in `optional` may be absent (None)."""
+        """Whole numbers in uint32 range, a `generation` also below zero (records set aside); a name in
+        `optional` may be absent (None)."""
         try:
             values = [None if name in optional and source.get(name) is None else int(source[name])
                       for name in names]
         except (KeyError, TypeError, ValueError):
             return None
-        return values if all(value is None or 0 <= value < 2 ** 32 for value in values) else None
+        return values if all(value is None or (-2 ** 31 if name == "generation" else 0) <= value < 2 ** 32
+                             for name, value in zip(names, values)) else None
 
     def _invalid():
         return web.json_response({"error": "INVALID_REQUEST"}, status=400)
@@ -1044,9 +1052,14 @@ def web_app(companion):
         if refusal is not None:
             return refusal
         values = _numbers(body, "id")
-        if values is None or body.get("store") not in FETCH_MAX:
+        if values is None or body.get("store") not in FETCH_MAX or not isinstance(body.get("kept", True), bool):
             return _invalid()
-        return _found(await companion.archive.store.keep(companion.device_id, body["store"], values[0]))
+        if await companion.archive.store.keep(companion.device_id, body["store"], values[0], body.get("kept", True)):
+            return web.json_response({"ok": True}, headers=no_store)
+        # Not copied yet (the newest record, until the controller's next notice): nothing could be kept,
+        # so the Web UI leaves it on the controller.
+        return web.json_response({"error": "NOT_COPIED", "message": "The companion has not saved its copy of "
+                                  "this record yet. Try again in a few minutes."}, status=409)
 
     async def archive_erase(request):
         """Bulk delete: everything, or one store, one generation (`current`: the open one) or a date range."""
@@ -1087,7 +1100,7 @@ def web_app(companion):
                           ("history", lambda after: store.chunk(device, "history", after)),
                           ("traces", lambda after: store.trace_chunk(device, after))):
             await answer.write(f',"{key}":['.encode())
-            after, first = (0, 0), True
+            after, first = (-2 ** 63, 0), True  # Records set aside sit below generation 1.
             while after is not None:
                 items, after = await read(after)
                 for item in items:

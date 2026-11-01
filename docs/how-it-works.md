@@ -264,8 +264,10 @@ counted, and the page asks you to update the companion.
   to delete anything. It stops its La Marzocco client at once and keeps
   every secret, and the page offers **Pair again** or **Erase this
   pairing**, which deletes the pairing, the La Marzocco account and the
-  installation key. The account stays on the companion until one of them is
-  chosen.
+  installation key but keeps the log history and the archive (a factory
+  reset keeps the archive, and pairing the same controller again reattaches
+  to both; only Forget erases them). The account stays on the companion
+  until one of them is chosen.
 
 ### La Marzocco
 
@@ -459,8 +461,10 @@ single disk thread as the secrets).
   through the relay with the browser's `X-WebUI-Session`, at most every five
   minutes per session, and answers `401 AUTH_REQUIRED` otherwise. Accepted
   sessions are remembered (their SHA-256, for 90 days unseen), so they keep
-  reading while the controller is off. Forget erases the history, the id and
-  every remembered session; Delete history erases only the history.
+  reading while the controller is off; Delete history needs the controller's
+  answer at that moment (`503 CONTROLLER_UNREACHABLE` otherwise). Forget
+  erases the history, the id and every remembered session; Delete history
+  erases only the history.
 - **Entries.** An event is `{"b","s","ms","w","l","c","m"}` (boot, sequence,
   uptime ms, wall-clock seconds or 0, level `c/e/w/i/d`, category, text). A
   marker is `{"g":"gap","count":N}`, `{"g":"reset"}` or
@@ -499,9 +503,11 @@ copies both of the controller's record stores into the same database
   old record is set aside in generation 0 or below (archive-only) instead of
   being overwritten, and that pass mirrors no deletion. A restart deletes
   nothing: it closes the generation (all its rows become archive-only) and
-  opens the next one, noting when. An empty index changes nothing. Pairing
-  the same controller again reattaches to its rows. A change the user makes
-  during a pass makes it start again from the index.
+  opens the next one, noting when. An empty index restarts the generation
+  only when a counter fell back; otherwise (or from older firmware) it
+  changes nothing. Pairing the same controller again reattaches to its rows,
+  and erasing a pairing the controller no longer recognizes keeps them. A
+  change the user makes during a pass makes it start again from the index.
 - **Identity and deletions.** A shot is `bootId:endedAtMs`, an activation
   every immutable field (`type`, `durationS`, `hasWallTime`, `noWeight`,
   both end times), so a controller without a clock still tells records
@@ -512,14 +518,17 @@ copies both of the controller's record stores into the same database
   controller** is on (`meta` key `archiveKeepDeleted`), which marks it kept
   instead; below the oldest it stays (rotation, or a deleted oldest record).
   Removing a record the controller may still hold (at or above the synced
-  oldest, or any before the first complete sync) leaves an exclusion, so it
-  is not copied again, and the whole-history Stats header keeps counting it
-  while the controller holds it; the exclusion goes when the id leaves the
+  oldest, or any before the first complete sync, but not a kept record the
+  last index no longer lists) leaves an exclusion, so it is not copied
+  again, and the whole-history Stats header keeps counting it while the
+  controller holds it; a record not copied yet gets the exclusion too (the
+  header then leaves it out). The exclusion goes when the id leaves the
   index or a new generation opens. A hole row says how many records
   could not be copied. A refetched row whose curve is empty (the controller
   recycled it) keeps the stored curve.
 - **Archive-only rows** are those of closed generations, those below the open
-  generation's oldest id, and kept rows the controller no longer lists.
+  generation's oldest id, and kept rows (while the controller's delete is on
+  its way, the Web UI shows the controller's row instead of both).
   `GET /__companion/archive/shots` and `/history` answer them with the
   controller's own semantics, so the Web UI merges them with the
   controller's list: `sort=date|rating` (shots), `dir=desc|asc`, `bad=1`,
@@ -531,7 +540,11 @@ copies both of the controller's record stores into the same database
   the answer adds `holes`, `generations` (`generation`, `count`,
   `restartedAt`, `current`) and, for shots, `presets` found among those rows.
 - **Changes.** `POST /__companion/archive/delete` (`store`, `id`, optional
-  `generation`), `/keep`, `/rate` (archive-only shots), `/erase` (everything,
+  `generation`), `/keep` (`store`, `id`, optional `kept` false to undo a mark
+  when the controller refused the delete; `409 NOT_COPIED` when the archive
+  has no copy yet, so the Web UI leaves the record on the controller),
+  `/rate` (archive-only shots; a `generation` may be 0 or below for records
+  set aside), `/erase` (everything,
   or a `store`, a `generation` or `current`, a `from`/`to` range on
   `endedAtUnixSec`; records without a clock are never in a range; deleting
   everything copies what the controller keeps again) and `/settings`
