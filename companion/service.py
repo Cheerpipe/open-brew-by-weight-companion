@@ -409,6 +409,7 @@ class Companion:
             await self._on_log(frame)
         elif kind == "rs":
             self.archive.on_rs(frame)
+            self.screens.mux.observed("shots", frame.get("sh"))
         elif kind == "rec":
             self.archive.on_rec(frame)
         elif kind == "trc":

@@ -354,6 +354,22 @@ class ArchiveStore:
             return bodies, following, holes, self._generations(device, store), presets
         return await self._call(read)
 
+    async def window(self, device, epoch, pairs):
+        """The bodies of these (id, revision) shots, in their order, from the open generation once its last
+        complete sync adopted the controller's `epoch`; None when one is missing, kept or under another
+        revision. It writes nothing."""
+        def read():
+            generation = self._open(device, "shots")
+            row = self._sync_row(device, "shots", generation)
+            if row is None or row["epoch"] != epoch:
+                return None
+            found = {(rid, rev): body for rid, rev, body in self.connection.execute(
+                "select id, rev, body from archive_records where device_id = ? and store = 'shots' and generation = ? "
+                f"and kept = 0 and id in ({','.join('?' * len(pairs))})", (device, generation, *dict(pairs)))}
+            bodies = [found.get(pair) for pair in pairs]
+            return None if None in bodies else [json.loads(body) for body in bodies]
+        return await self._call(read)
+
     async def trace(self, device, record_id, boot, end):
         row = await self._call(lambda: self.connection.execute(
             "select data from archive_traces where device_id = ? and id = ? and boot_id = ? and ended_ms = ? "

@@ -396,6 +396,29 @@ every op itself:
   the whole index, as from the controller directly. A delta that does not
   check out, or applies to another epoch, is logged and the whole index is
   asked at once; an older controller never gets the delta flag.
+- A screen's offline copy fetches the shots its index lacks in Stats windows
+  (`sort` date, `dir` desc, `filter` `{}`, at most 50 rows, no other key;
+  Home's fetch of its last shots has the same shape and is treated alike,
+  with or without a Stats view).
+  The companion answers such a window itself, from the
+  [archive](#the-shot-and-activation-archive), only when every row matches
+  the record index that screen was given: the archive is on, its last
+  complete sync is at the index's epoch, `sum` checked that index, the screen
+  was answered with that same index, no Stats page or `rs` notice has named
+  another shots epoch since, the controller's latest Stats page has exactly
+  the fields the companion builds (a newer firmware's page is never
+  imitated), the window lies within the index, no page to that screen is
+  half sent, no standing Stats page the controller sends first is still
+  due, and the archive holds every shot of the window under the revision
+  the index lists, stored under the current columns. The
+  page is the one the controller would send (its fields, column order and
+  values, its 8 KiB frames, a `seq` of the companion's own) without the
+  Stats header, which a fetch's reader does not use; a curve the controller
+  has since recycled comes from the archive's copy, as a browser keeps it.
+  Any doubt, a window the archive cannot read included (logged at most every
+  five minutes), sends the window to the controller exactly as before, and
+  serving writes nothing. Every other Stats op (scrolls, other orders and
+  filters, Show bad shots, the exports) always goes to the controller.
 - `activity` is aggregated: the controller hears the longest power window of
   the visible screens, and `hidden` only when every screen is hidden.
   Screens get `alive` from the service while the controller was heard in

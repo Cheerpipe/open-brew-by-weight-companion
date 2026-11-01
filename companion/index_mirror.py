@@ -8,6 +8,8 @@ answer in the current upstream session (a ui-stream connection, a link
 session) carried it, a request from the epoch this mirror holds may ask for a
 delta (`base`, `up`, `del`) instead of the whole index. Anything this mirror
 cannot rebuild exactly clears it, so the next ask is for the whole index.
+`verified` says a `sum` checked the index it holds (a firmware without deltas
+never sends one).
 
 One mirror per store and consumer: the screens' index lists good shots only,
 the archive's every shot, and the controller keeps a baseline for each. The
@@ -37,7 +39,7 @@ def checksum(rows):
 class IndexMirror:
     def __init__(self, name):
         self.name = name  # For the log: "archive's shots index".
-        self.epoch, self.pairs, self.supported = 0, None, False
+        self.epoch, self.pairs, self.supported, self.verified = 0, None, False, False
 
     def session(self):
         """A new upstream session: no delta until one of its answers carried `sum`."""
@@ -49,7 +51,7 @@ class IndexMirror:
 
     def clear(self, reason):
         log(f"the {self.name} did not match the controller's ({reason}); the whole index is asked next")
-        self.epoch, self.pairs = 0, None
+        self.epoch, self.pairs, self.verified = 0, None, False
 
     def rows(self):
         return [value for pair in self.pairs or () for value in pair]
@@ -78,5 +80,5 @@ class IndexMirror:
             self.clear(error)
             return None
         self.epoch, self.pairs = frame["epoch"], list(zip(rows[0::2], rows[1::2]))
-        self.supported = self.supported or total is not None
+        self.supported, self.verified = self.supported or total is not None, total is not None
         return {**frame, "rows": rows}
