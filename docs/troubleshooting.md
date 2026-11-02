@@ -264,7 +264,7 @@ page:
 - **A deleted shot is still listed:** the companion removes it the next time
   it copies from the controller, usually within a few minutes. With an older
   controller firmware it cannot tell a deleted shot from one that left by
-  itself: update the controller, or delete it again in the Web UI.
+  itself: update the controller, then delete it again in the Web UI.
 - **Changing the archive says to turn the controller on:** changes need the
   controller to confirm your sign-in at that moment. Reading and exporting
   work with it off.
