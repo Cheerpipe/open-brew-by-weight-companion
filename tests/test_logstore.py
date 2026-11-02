@@ -82,7 +82,7 @@ async def main():
         entries, _, _ = await store.page(DEVICE, FIRST_PAGE, FIRST_PAGE, 10)
         assert kinds(entries) == [8, "gap", 3, 2, 1, "reset"], entries
         await store.erase()
-        assert await store.device() is None
+        assert await store.meta("device") is None
         await store.close()
 
         # --- Version 2 gains the archive's tables and keeps its log ------------------
@@ -110,8 +110,8 @@ async def main():
 
         store = LogStore(data)
         await store.open()
-        await store.set_device(DEVICE)
-        assert await store.device() == DEVICE
+        await store.set_meta("device", DEVICE)
+        assert await store.meta("device") == DEVICE
 
         # --- Two boots: a restart marker between them names the newer boot ----------
         await store.apply(DEVICE, {"b": 7, "e": [event(1), event(2), event(3)]})
@@ -205,11 +205,11 @@ async def main():
         # --- Delete history keeps who may read it; Forget takes everything ----------
         await store.grant("abc", True)
         await store.erase(history_only=True)
-        assert (await store.stats(DEVICE))["rows"] == 0 and await store.device() == DEVICE
+        assert (await store.stats(DEVICE))["rows"] == 0 and await store.meta("device") == DEVICE
         assert "abc" in await store.grants()
         assert await sql(store, "select count(*) from archive_records") == [(599,)], "Delete history is the log's"
         await store.erase()
-        assert await store.device() is None and not await store.grants()
+        assert await store.meta("device") is None and not await store.grants()
         assert await sql(store, "select count(*) from archive_records") == [(0,)], "Forget takes the archive too"
         assert not (data / "companion.db.backup").exists()
         await store.close()

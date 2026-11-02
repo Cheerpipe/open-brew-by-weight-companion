@@ -2,8 +2,8 @@
 """Several screens on the companion's one controller session, against a fake controller.
 
 Home and the shot card, Settings, History and Stats groups (owner, fetches, promotion), Diagnostic
-and the log, records, liveness, the command queue, takeover, 4003, the 1 MiB bound, and the upstream
-op count for one screen against three. Offline, inside the image (see the README).
+and the log, an older page's ignored records op, liveness, the command queue, takeover, 4003, the 1 MiB
+bound, and the upstream op count for one screen against three. Offline, inside the image (see the README).
 """
 
 import asyncio
@@ -343,44 +343,10 @@ async def main():
             await a.send({"op": "activity", "seconds": 0, "hidden": True})
             assert (await ops_after(session, 6))[-1] == {"op": "activity", "seconds": 0, "hidden": True}
 
-            # --- Records: one ask for screens asking together, then the companion's copy ---------------
+            # --- An older page's `records` op (a record index): ignored, never sent up nor closed (4003) ---
             await a.send({"op": "records", "shots": 0})
-            await b.send({"op": "records", "shots": 0})
-            ops = await ops_after(session, 7)
-            assert ops[-1] == {"op": "records", "shots": 0}
-            assert (await a.next("records"))["rows"] == [3, 111, 2, 222]
-            assert (await b.next("records"))["rows"] == [3, 111, 2, 222]
-            await c.send({"op": "records", "shots": 40})
-            assert (await ops_after(session, 8))[-1] == {"op": "records", "shots": 40}, "asks with its cached epoch"
-            assert "rows" not in await c.next("records")
-            await b.send({"op": "records", "shots": 0, "history": 0})
-            ops = await ops_after(session, 9)
-            assert ops[-1] == {"op": "records", "shots": 40, "history": 0}
-            answers = {frame["store"]: frame for frame in (await b.next("records"), await b.next("records"))}
-            assert answers["shots"]["rows"] == [3, 111, 2, 222], "rows from the companion's copy"
-
-            # --- Records from a firmware with deltas: `delta` only after a `sum` in this session; the --
-            # screens always get the whole index, rebuilt and checked by the companion
-            assert not any("delta" in op for op in session.ops), "a firmware without `sum` never sees `delta`"
-
-            async def records(epoch, rows, held, asked):
-                fake.indexes = {"shots": (epoch, rows), "history": (40, [])}
-                count = len(session.ops)
-                await a.send({"op": "records", "shots": held})
-                assert (await ops_after(session, count + len(asked)))[count:] == asked
-                answer = await a.next("records")
-                assert answer == {"v": 1, "type": "records", "boot": 7, "store": "shots", "epoch": epoch,
-                                  "rows": rows}, answer
-            await records(41, [4, 444, 3, 111, 2, 222], 40, [{"op": "records", "shots": 40}])
-            # A new shot, a rating and a deletion travel as a delta.
-            await records(42, [5, 555, 4, 444, 3, 112], 41, [{"op": "records", "shots": 41, "delta": True}])
-            # A delta that does not check out, or applies to another epoch: the whole index at once.
-            for field, epoch, rows in (("sum", 43, [6, 666, 5, 555, 4, 444, 3, 112]),
-                                       ("base", 44, [7, 777, 6, 666, 5, 555, 4, 444])):
-                fake.tamper = field
-                await records(epoch, rows, epoch - 1,
-                              [{"op": "records", "shots": epoch - 1, "delta": True}, {"op": "records", "shots": 0}])
-            await records(45, [8, 888, 7, 777, 6, 666, 5, 555], 44, [{"op": "records", "shots": 44, "delta": True}])
+            await a.quiet()
+            assert len(session.ops) == 6 and a.code is None
 
             # --- Commands: the next mutation waits for the controller's lastCommand ------------------------
             async def command(index):
@@ -413,13 +379,13 @@ async def main():
 
             # --- 4003 from the controller: the screen that just sent an op, 4002 for the others ----------
             async def reject(controller_session, op):
-                if op["op"] == "records":
+                if op["op"] == "log":
                     await controller_session.ws.close(code=4003)
                     return True
                 return False
             fake.handler = reject
             await asyncio.sleep(0.4)
-            await a.send({"op": "records", "history": 5})
+            await a.send({"op": "log", "on": True})
             assert await a.closed() == 4003 and await b.closed() == 4002
             fake.handler = None
             await eventually(lambda: the_mux.upstream.state == "closed")
@@ -430,15 +396,6 @@ async def main():
             b = await screen(1).open()
             await a.next("home")
             await b.next("home")
-            # A new upstream session: no `delta` until one of its own answers carried `sum`.
-            fake.indexes["shots"] = (46, [9, 999, 8, 888])
-            count = len(session.ops)
-            await b.send({"op": "records", "shots": 45})
-            assert (await ops_after(session, count + 1))[count:] == [{"op": "records", "shots": 45}]
-            while (answer := await b.next()).get("type") != "records":
-                pass
-            assert answer["rows"] == [9, 999, 8, 888]
-            fake.indexes = None
             async with web.post(f"http://127.0.0.1:{server.port}/api/v1/ui/claim", json={},
                                 headers={"X-WebUI-Client": DIRECT}) as reply:
                 assert reply.status == 200
@@ -513,8 +470,8 @@ async def main():
             await pages.close()
             await companion.relay.close()
     await server.close()
-    print("Companion screens: Home, card, Settings, History, Stats, Diagnostic, log, records, liveness, "
-          "commands, takeover, 4003, bounds and op count OK")
+    print("Companion screens: Home, card, Settings, History, Stats, Diagnostic, log, an ignored records op, "
+          "liveness, commands, takeover, 4003, bounds and op count OK")
 
 
 asyncio.run(main())

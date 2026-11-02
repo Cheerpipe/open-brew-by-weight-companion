@@ -65,7 +65,7 @@ def dumps(value):
 
 
 def index_answer(baselines, store, held, delta, epoch, rows):
-    """A firmware with deltas: the fields an index answer adds to `epoch` for the flat newest-first
+    """A firmware with deltas: the fields a link index answer adds to `epoch` for the flat newest-first
     `rows`, asked from `held`. Listed, it carries `sum` and becomes the session's baseline (in
     `baselines`); asked with the delta flag from the baseline's epoch, it lists only the difference
     when that is smaller."""
@@ -100,9 +100,6 @@ class Controller:
         self.sessions = asyncio.Queue()
         self.require_relay_stream = True
         self.epoch = 5  # The record stores' epoch in the answers below.
-        # The offline-copy index: None answers as a firmware without deltas (a fixed index at 40);
-        # {store: (epoch, flat rows)} as one with them. `tamper` corrupts that field of the next delta.
-        self.indexes, self.tamper = None, None
         self.handler = None  # Optional override per test: async (session, op) -> handled?
 
     # --- Relay routes -------------------------------------------------------------
@@ -289,7 +286,6 @@ class Session:
         self.closed = asyncio.get_running_loop().create_future()
         self.history = self.stats = None
         self.seq = 0
-        self.baselines = {}  # The index this session last received, per store.
 
     async def send(self, frame):
         await self.ws.send_str(dumps(frame))
@@ -329,20 +325,6 @@ class Session:
         elif name == "stats" and op["on"] and set(op) != {"op", "on", "window"}:
             for frame in stats_page(self, op, snapshot=not op.get("fetch"), epoch=self.controller.epoch):
                 await self.send(frame)
-        elif name == "records":
-            indexes = self.controller.indexes
-            for store in ("shots", "history"):
-                if store in op:
-                    epoch, rows = indexes[store] if indexes else (40, [3, 111, 2, 222])
-                    frame = {"v": 1, "type": "records", "boot": 7, "store": store, "epoch": epoch}
-                    if indexes:
-                        frame.update(index_answer(self.baselines, store, op[store], op.get("delta"), epoch, rows))
-                        if "base" in frame and self.controller.tamper:
-                            frame[self.controller.tamper] ^= 1
-                            self.controller.tamper = None
-                    elif op[store] != 40:
-                        frame["rows"] = rows
-                    await self.send(frame)
         elif name == "resync":
             await self.send(home_snapshot())
             await self.send(card_snapshot())

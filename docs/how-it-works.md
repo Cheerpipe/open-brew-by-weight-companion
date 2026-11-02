@@ -386,39 +386,12 @@ every op itself:
   Stats window of its own. When the standing
   group's last screen leaves, the most recently active other group takes
   the window.
-- The offline copy's record index is cached per store; screens asking at
-  the same time share one request, and every ask still goes to the
-  controller. With a controller that sends deltas (its index answers carry
-  `sum`, the CRC-32 of the whole index), the companion asks for a delta
-  against the index it holds once an answer in the current shared session
-  carried `sum`, rebuilds the whole index from it (`companion/index_mirror.py`)
-  and checks it against `sum` before any screen sees it; screens always get
-  the whole index, as from the controller directly. A delta that does not
-  check out, or applies to another epoch, is logged and the whole index is
-  asked at once; an older controller never gets the delta flag.
-- A screen's offline copy fetches the shots its index lacks in Stats windows
-  (`sort` date, `dir` desc, `filter` `{}`, at most 50 rows, no other key;
-  Home's fetch of its last shots has the same shape and is treated alike,
-  with or without a Stats view).
-  The companion answers such a window itself, from the
-  [archive](#the-shot-and-activation-archive), only when every row matches
-  the record index that screen was given: the archive is on, its last
-  complete sync is at the index's epoch, `sum` checked that index, the screen
-  was answered with that same index, no Stats page or `rs` notice has named
-  another shots epoch since, the controller's latest Stats page has exactly
-  the fields the companion builds (a newer firmware's page is never
-  imitated), the window lies within the index, no page to that screen is
-  half sent, no standing Stats page the controller sends first is still
-  due, and the archive holds every shot of the window under the revision
-  the index lists, stored under the current columns. The
-  page is the one the controller would send (its fields, column order and
-  values, its 8 KiB frames, a `seq` of the companion's own) without the
-  Stats header, which a fetch's reader does not use; a curve the controller
-  has since recycled comes from the archive's copy, as a browser keeps it.
-  Any doubt, a window the archive cannot read included (logged at most every
-  five minutes), sends the window to the controller exactly as before, and
-  serving writes nothing. Every other Stats op (scrolls, other orders and
-  filters, Show bad shots, the exports) always goes to the controller.
+- Every Stats and History op, Home's last-shots fetch included, goes to the
+  controller; the companion never answers one from its archive. A screen's
+  `records` op (a record index an older Web UI asked for) is ignored: it
+  goes nowhere and the screen stays open, so a page cached before an update
+  never loops on 4003. With the controller off the Web UI reads the
+  [archive](#the-shot-and-activation-archive) over HTTPS instead.
 - `activity` is aggregated: the controller hears the longest power window of
   the visible screens, and `hidden` only when every screen is hidden.
   Screens get `alive` from the service while the controller was heard in
@@ -512,7 +485,9 @@ With **Shot archive in the companion** on (`cfg` carries `"archive":true`;
 a controller whose `cfg` has no `archive` cannot send records), the companion
 copies both of the controller's record stores into the same database
 (`companion/archive.py`, on the log store's connection and disk thread;
-`docs/COMPANION_LINK.md` in the firmware repository has the frames).
+`docs/COMPANION_LINK.md` in the firmware repository has the frames). The
+last `cfg`'s switch is kept (`meta` key `archive`), so a companion restarted
+while the controller is off still reports it and answers the reads below.
 
 - **Sync.** Once per session, after `cfg` and `dev`, it asks each store's
   index (`rx` with the epoch it holds), activations first, then shots, then
@@ -525,7 +500,7 @@ copies both of the controller's record stores into the same database
   300 s is sent again. The epoch, the controller's oldest id and the ids it
   listed are adopted only once every listed record is stored.
 - **Index deltas.** The archive keeps its own in-memory copy of each store's
-  index (every shot, bad ones included, unlike the screens'). Once an index
+  index (every shot, bad ones included). Once an index
   answer in the current link session carried `sum`, an `rx` from the epoch
   that copy holds adds `d:1`, and the controller may answer with only the
   difference; the copy rebuilds the whole index, checks it against `sum` and
@@ -579,7 +554,11 @@ copies both of the controller's record stores into the same database
   the final xor), `types=` (activations), at most eight values each; rating
   order puts unrated shots last, then the rating, then the newest first.
   `cursor` is the opaque `next` of the previous page (a keyset on the sort
-  key). Each row carries `archiveGeneration` (shots also `archiveTrace`);
+  key). `all=1` lists every copied row instead, each marked `archiveOnly`:
+  the Web UI's read-only view with the controller off, which reads through
+  the remembered grant like the log history and answers `409 ARCHIVE_OFF`
+  while **Shot archive in the companion** is off. Each row carries
+  `archiveGeneration` (shots also `archiveTrace`);
   the answer adds `holes`, `generations` (`generation`, `count`,
   `restartedAt`, `current`) and, for shots, `presets` found among those rows.
 - **Changes.** `POST /__companion/archive/delete` (`store`, `id`, optional
@@ -702,7 +681,7 @@ name). It asks for the controller's address only when nothing answers.
 | `companion/store.py` | The files in `data/secrets/`. |
 | `companion/logstore.py` | The owner of `data/companion.db`: the controller's log history, migrations, backup and erase. |
 | `companion/archive.py` | The shot and activation archive in the same database, and its sync. |
-| `companion/index_mirror.py` | The controller's record index as the screens or the archive last received it, rebuilt from deltas and checked by `sum`. |
+| `companion/index_mirror.py` | The controller's record index as the archive last received it, rebuilt from deltas and checked by `sum`. |
 | `companion/stats.py` | The Stats header over the whole history, ported from the firmware. |
 | `companion/page.html` | Status and pairing page, styled like the setup page. |
 | `companion/ui-off.html` | Notice with the controller's address while the Web UI goes directly to it. |

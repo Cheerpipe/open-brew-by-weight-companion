@@ -665,6 +665,12 @@ async def main():
             verdict["value"] = None  # The controller is off.
             companion.log_unreachable = 0
             await get("/history?limit=5")  # A browser it accepted keeps reading.
+            # ...every copied row too, for its read-only view: the open history's newest first, each
+            # one marked whether the controller still lists it.
+            only = {(r["archiveGeneration"], r["id"]) for r in (await get("/shots?limit=50&bad=1"))["rows"]}
+            every = (await get("/shots?limit=50&bad=1&all=1"))["rows"]
+            assert every[0]["id"] == max(await ids(companion, "shots", 1)) and every[0]["archiveOnly"] is False
+            assert all(r["archiveOnly"] is ((r["archiveGeneration"], r["id"]) in only) for r in every)
             assert await post("/rate", {"id": 30, "rating": 1}) == (503, {
                 "error": "CONTROLLER_UNREACHABLE", "message": "The controller must be on to confirm your sign-in"})
             verdict["value"] = True
@@ -752,9 +758,21 @@ async def main():
             await fake.notice(companion)
             await asyncio.sleep(0.2)
             assert fake.requests == [] and await ids(companion, "shots", 2) == set(range(1, 12))
+            # ...and the controller-off view (every copied row) follows the switch; the merged rows stay.
+            async with http.get(base + "/shots?limit=5&all=1", headers=session) as reply:
+                assert reply.status == 409 and (await reply.json())["error"] == "ARCHIVE_OFF"
+            await get("/shots?limit=5")
+
+            async def kept():  # The switch as a companion restarted now, with the controller off, knows it.
+                restarted = Companion("Kitchen server", data, http, Upstream)
+                await restarted.open_log()
+                await restarted.logs.close()
+                await restarted.relay.close()
+                return restarted.archive.available, restarted.archive.on
+            assert await kept() == (True, False)
             await companion._on_frame({"t": "cfg", "ui": True, "log": False, "archive": True})
             await settled(companion)
-            assert 12 in await ids(companion, "shots", 2)
+            assert 12 in await ids(companion, "shots", 2) and await kept() == (True, True)
 
             # --- Bulk deletes: the open generation (Clear's copy option), one, a range ---
             assert await post("/erase", {"store": "history", "current": True}) == (200, {"ok": True, "deleted": 1})
@@ -1087,7 +1105,7 @@ async def main():
             link_.close()
             await companion.erase("erased on the page", history=False)
             assert await sql(companion, "select count(*) from archive_records") == kept
-            assert await companion.logs.device() == DEVICE, "the log store keeps the controller and its history"
+            assert await companion.logs.meta("device") == DEVICE, "the log store keeps the controller and its history"
             await link_.open()
             await settled(companion)
 

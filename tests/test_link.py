@@ -580,7 +580,7 @@ async def main():
             await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
             sub = await session.next("logsub", skip=("ping", "lm"))
             assert sub["on"] is True and sub["boot"] == 0 and sub["after"] == 0
-            assert await companion.logs.device() == "AA:BB:CC:DD:EE:FF", "the id is kept for a restart"
+            assert await companion.logs.meta("device") == "AA:BB:CC:DD:EE:FF", "the id is kept for a restart"
             await session.send({"t": "log", "b": 7, "e": [
                 [1, 100, 1789000000, "i", "state", "Open Brew by Weight 1.1.0 (bootId=7)"],
                 [2, 200, 1789000000, "w", "scale", "the scale link was lost"]]})
@@ -691,7 +691,7 @@ async def main():
             async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
                 assert reply.status == 200
             assert (await companion.status())["log"]["rows"] == 0
-            assert await companion.logs.device() == "AA:BB:CC:DD:EE:FF"
+            assert await companion.logs.meta("device") == "AA:BB:CC:DD:EE:FF"
             await session.send({"t": "log", "b": 7, "e": [[11, 6000, 1789000030, "i", "state", "after delete"]]})
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 11))
             # The switch off stops the subscription; the store keeps what it has.
@@ -718,7 +718,7 @@ async def main():
             fake.mode = "erase"
             await eventually(lambda: companion.store.pairing() is None)
             assert (await companion.status())["paired"] is False and companion.pairing.state == "unpaired"
-            assert companion.device_id is None and await companion.logs.device() is None, "Forget erases the log"
+            assert companion.device_id is None and await companion.logs.meta("device") is None, "Forget erases the log"
             assert (await companion.logs.stats("AA:BB:CC:DD:EE:FF"))["rows"] == 0
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
             await asyncio.sleep(0.3)

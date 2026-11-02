@@ -297,13 +297,14 @@ class ArchiveStore:
     async def tail(self, device, store, query, limit):
         """Archive-only rows filtered and ordered exactly as the controller filters and orders its own
         (shotListFilterMatches, History types), so the browser can merge both streams; `query` holds
-        sort, dir, cursor (the previous page's last sort key) and the filters. Returns the rows, the next
-        cursor, the holes, the generations and, for shots, the presets found among these rows."""
+        sort, dir, cursor (the previous page's last sort key), the filters and `all`: every copied row,
+        each marked `archiveOnly`, for a browser reading with the controller off. Returns the rows, the
+        next cursor, the holes, the generations and, for shots, the presets found among these rows."""
         def read():
             self.connection.create_function("obbw_scale_key", 1, stats.scale_key, deterministic=True)
             order = self._order(store, query["sort"], query["dir"])
             args = {"device": device, "store": store, "open": self._open(device, store), "limit": limit + 1}
-            where = f"r.device_id = :device and r.store = :store and {ONLY}"
+            where = "r.device_id = :device and r.store = :store" + ("" if query["all"] else f" and {ONLY}")
 
             def among(name, expression, values):
                 nonlocal where
@@ -326,11 +327,13 @@ class ArchiveStore:
                 args.update({f"c{n}": value for n, value in enumerate(query["cursor"])})
             keys = ", ".join(f"{expression} as k{n}" for n, expression in enumerate(order))
             rows = self.connection.execute(
-                f"select r.generation, r.id, r.body, {keys} from {JOIN} where {where} "
+                f"select r.generation, r.id, r.body, {ONLY} as only, {keys} from {JOIN} where {where} "
                 f"order by {', '.join(f'k{n}' for n in range(len(order)))} limit :limit", args).fetchall()
             bodies = []
             for row in rows[:limit]:
                 body = {**json.loads(row["body"]), "archiveGeneration": row["generation"]}
+                if query["all"]:
+                    body["archiveOnly"] = bool(row["only"])
                 if store == "shots":
                     body["archiveTrace"] = self.connection.execute(
                         "select 1 from archive_traces where device_id = ? and generation = ? and id = ? "
@@ -352,22 +355,6 @@ class ArchiveStore:
                         seen.add(preset)
                         presets.append([preset, name])
             return bodies, following, holes, self._generations(device, store), presets
-        return await self._call(read)
-
-    async def window(self, device, epoch, pairs):
-        """The bodies of these (id, revision) shots, in their order, from the open generation once its last
-        complete sync adopted the controller's `epoch`; None when one is missing, kept or under another
-        revision. It writes nothing."""
-        def read():
-            generation = self._open(device, "shots")
-            row = self._sync_row(device, "shots", generation)
-            if row is None or row["epoch"] != epoch:
-                return None
-            found = {(rid, rev): body for rid, rev, body in self.connection.execute(
-                "select id, rev, body from archive_records where device_id = ? and store = 'shots' and generation = ? "
-                f"and kept = 0 and id in ({','.join('?' * len(pairs))})", (device, generation, *dict(pairs)))}
-            bodies = [found.get(pair) for pair in pairs]
-            return None if None in bodies else [json.loads(body) for body in bodies]
         return await self._call(read)
 
     async def trace(self, device, record_id, boot, end):

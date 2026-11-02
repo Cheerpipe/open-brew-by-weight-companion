@@ -394,6 +394,11 @@ class Companion:
             await self._apply_account()
             self.log_on, self.configured = frame.get("log") is True, True
             self.archive.configure(frame)  # First: it says whether this firmware holds sync during a shot.
+            if self._log_usable():  # Kept, so a restart with the controller off still reads the archive.
+                try:
+                    await self.logs.set_meta("archive", json.dumps(frame.get("archive")))
+                except sqlite3.Error as error:
+                    log(f"the log store could not keep the archive switch ({error})")
             await self._log_subscribe()
             self._report(force=True)
         elif kind == "creds":
@@ -409,7 +414,6 @@ class Companion:
             await self._on_log(frame)
         elif kind == "rs":
             self.archive.on_rs(frame)
-            self.screens.mux.observed("shots", frame.get("sh"))
         elif kind == "rec":
             self.archive.on_rec(frame)
         elif kind == "trc":
@@ -460,7 +464,7 @@ class Companion:
             self.device_id = value
             if self._log_usable():
                 try:
-                    await self.logs.set_device(value)
+                    await self.logs.set_meta("device", value)
                 except sqlite3.Error as error:
                     log(f"the log store could not keep the controller's id ({error})")
         self.log_identified = True
@@ -474,10 +478,13 @@ class Companion:
         return self.logs.connection is not None
 
     async def open_log(self):
-        """The log store and what it remembers: the controller's id and the sessions it accepted."""
+        """The log store and what it remembers: the controller's id, its archive switch and the sessions
+        it accepted."""
         try:
             await self.logs.open()
-            self.device_id = await self.logs.device()
+            self.device_id = await self.logs.meta("device")
+            switch = await self.logs.meta("archive")
+            self.archive.available, self.archive.on = switch in ("true", "false"), switch == "true"
             self.log_grants = await self.logs.grants()
         except (sqlite3.Error, OSError) as error:
             # A store that cannot open disables only the log history: the
@@ -957,6 +964,7 @@ def web_app(companion):
             return values
         try:
             parsed = {"sort": query.get("sort", "date"), "dir": query.get("dir", "desc"), "bad": query.get("bad") == "1",
+                      "all": query.get("all") == "1",
                       "result": listed("result", RESULTS) if store == "shots" else [],
                       "preset": listed("preset") if store == "shots" else [],
                       "scale": listed("scale") if store == "shots" else [],
@@ -979,6 +987,8 @@ def web_app(companion):
         refusal = await _log_refusal(request)
         if refusal is not None:
             return refusal
+        if query[0]["all"] and not companion.archive.on:  # The controller-off view follows the switch.
+            return web.json_response({"error": "ARCHIVE_OFF"}, status=409)
         rows, following, holes, generations, presets = await companion.archive.store.tail(
             companion.device_id, store, *query)
         answer = {"device": companion.device_id, "rows": rows, "next": following, "holes": holes,

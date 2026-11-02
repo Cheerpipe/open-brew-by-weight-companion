@@ -139,6 +139,13 @@ controller's history fills up:
 - Ratings and deletions you make on the controller reach the archive too.
   Through the companion, a shot's menu also offers **Remove from the
   controller, keep in the archive** and **Remove from the archive only**.
+- With the controller off, the app opened through the companion still shows
+  your shots and activations: the screen that says the controller is out of
+  reach offers **Browse shots and activations**, which opens Shots and
+  History read-only from the archive. **Shot archive in the companion**
+  controls it: with the switch off, nothing is offered. It works on a phone
+  or computer that signed in through the companion while the controller was
+  on (any device, with the Web UI password off).
 - **Clear history** and a factory reset never delete the archive: the
   companion keeps everything it copied and starts a new section for what
   comes next ("The controller's shot history restarted on …"). Clear history
@@ -399,7 +406,7 @@ controller (`tests/fake_controller.py` for the relay and the screens) and a
 fake La Marzocco cloud:
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore archive stats link_vectors rows; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
+docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore archive stats link_vectors; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
 ```
 
 `./setup`'s test runs the script against a fake Docker (about 20 seconds,

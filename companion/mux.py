@@ -5,9 +5,7 @@ screens. The companion builds every upstream op itself from validated screen
 ops, keeps what a late screen needs (merged Home, Settings and Diagnostic
 models, the shot card since its last snapshot, the log ring, the record
 views' standing pages) and answers each screen from it, so the controller's
-cost does not grow with the number of screens. A screen's offline copy takes
-its rows from the companion's archive when the controller's record index
-proves them current [rows].
+cost does not grow with the number of screens.
 """
 
 import asyncio
@@ -15,7 +13,6 @@ import collections
 import json
 
 from . import log
-from .index_mirror import IndexMirror
 from .upstream import Upstream, dumps
 
 U32 = 0xFFFFFFFF
@@ -25,20 +22,13 @@ CARD_FRAMES, CARD_BYTES = 512, 256 * 1024
 RECORD_PAGES, RECORD_BYTES = 16, 512 * 1024
 LOG_EVENTS, LOG_BYTES = 1024, 512 * 1024
 BIND_S, IDLE_S, DIAGNOSTIC_LINGER_S = 5, 5, 5
-FETCH_TIMEOUT_S, RECORDS_TIMEOUT_S = 120, 15
+FETCH_TIMEOUT_S = 120
 RESYNC_REPEAT_S, RESYNC_UPSTREAM_S = 30, 60
 ATTRIBUTION_S = 1
 HISTORY_TYPES = ("shot", "rinse", "other", "power_on", "no_scale_guard_aborted", "backflush")
 STATS_RESULTS = ("on_recipe", "fast", "slow")
 HISTORY_CAPACITY, HISTORY_PAGE_MAX, SHOT_LOG_CAPACITY = 1000, 120, 1000
 STATS_WINDOWS, FILTER_MAX = (10, 50, 100), 8
-# The offline copy's Stats fetch exactly as the Web UI asks it (syncOfflineStore): date/desc, no filter.
-OFFLINE_OP = frozenset({"op", "on", "fetch", "request", "offset", "limit", "sort", "dir", "filter"})
-OFFLINE_ROWS, STATS_FRAME_BYTES = 50, 8192  # Its largest window; the firmware's Stats frame budget.
-ARCHIVE_READ_S = 2  # A window's read takes milliseconds; one stuck behind the disk thread forwards.
-# Every key of the firmware's Stats page (sendStatsStream): a newer page shape is never imitated.
-STATS_PAGE = frozenset({"v", "type", "boot", "snapshot", "epoch", "seq", "request", "stats", "cols", "tag", "good",
-                        "total", "offset", "limit", "hasMore", "rows", "rowBase", "more"})
 FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
 DEFAULTS = {"history": {"offset": 0, "limit": 20, "dir": "desc", "types": ()},
             "stats": {"offset": 0, "limit": 10, "sort": "date", "dir": "desc", "filter": "{}", "window": 10}}
@@ -207,8 +197,7 @@ class Screen:
         self.diagnostic = self.diagnostic_synced = False
         self.log, self.log_after, self.log_owed, self.log_invalid, self.log_missed = False, 0, False, False, 0
         self.records = {"history": Record("history"), "stats": Record("stats")}
-        self.stats_seq, self.stats_map, self.stats_open = 0, {}, False  # Open: a page's later frames are due.
-        self.indexed = {}  # Store -> the epoch of the record index this screen was last answered with.
+        self.stats_seq, self.stats_map = 0, {}
         self.until, self.hidden = 0.0, False
         self.active_at = self.resync_at = float("-inf")
         self.queue, self.queued = collections.deque(), 0
@@ -262,15 +251,13 @@ class View:
 
     def __init__(self, mux, kind):
         self.mux, self.kind = mux, kind
-        self.next_id = self.served = 0  # Served: the companion's own page seqs, negative beside upstream ones.
-        self.failed_at = float("-inf")
+        self.next_id = 0
         self.clear()
 
     def clear(self):
         if getattr(self, "inflight", None) and self.inflight.timer:
             self.inflight.timer.cancel()
         self.standing, self.request, self.epoch, self.awaiting = None, 0, None, False
-        self.boot = self.cols = None  # Stats: of the latest upstream page.
         self.buffer, self.buffer_bytes, self.buffer_pages, self.buffer_state = [], 0, 0, "waiting"
         self.pages = {}  # Non-owner group -> (frames of its last page, complete)
         self.queue, self.inflight = [], None
@@ -319,7 +306,7 @@ class View:
                     del screen.stats_map[next(iter(screen.stats_map))]
             if frame.get("seq") not in screen.stats_map:
                 return
-            out["seq"], screen.stats_open = screen.stats_map[frame.get("seq")], frame.get("more") is True
+            out["seq"] = screen.stats_map[frame.get("seq")]
         if snapshot and self._start(frame):
             out["snapshot"] = True
         screen.send(dumps(out))
@@ -355,15 +342,8 @@ class View:
         elif fetch:  # Without a view of its own it is Home's rows-only Stats fetch, as on the controller.
             if offset is None or tag is not None or (self.kind == "stats" and "window" in given):
                 raise Invalid()
-            key, target = self.key({**record.params, **given}), (screen, request or 0)
-            held = self.kind == "stats" and set(message) == OFFLINE_OP and message["filter"] == {} and \
-                given["sort"] == "date" and given["dir"] == "desc" and limit <= OFFLINE_ROWS and \
-                self._held(screen, offset, limit)
-            if held:
-                self.mux.companion.spawn(self._serve(target, key, offset, limit, held))
-            else:
-                self.mux.attribute(screen)  # What it leaves out is its own window's, not the controller's.
-                self._queue(key, target=target)
+            self.mux.attribute(screen)  # What it leaves out is its own window's, not the controller's.
+            self._queue(self.key({**record.params, **given}), target=(screen, request or 0))
         elif self.kind == "stats" and record.group is not None and set(given) == {"window"} and \
                 request is None and tag is None:
             self.subscribe(screen, record.request, {**record.params, "window": given["window"]}, window_only=True)
@@ -495,60 +475,6 @@ class View:
                 self.mux.up(self.op(fetch.key, fetch.id, fetch=True))
                 return
 
-    # The offline copy from the archive [rows]: never a write, the controller answers on any doubt
-    def _held(self, screen, offset, limit):
-        """(epoch, the (id, revision) pairs at [offset, offset + limit)) of the shots index this screen was
-        answered with, while the archive is on, a `sum` verified that index, no upstream frame named another
-        store epoch since, the latest Stats page has the shape `_page` builds, no page to this screen is half
-        sent and no standing page is due (the controller sends it before any fetch); None otherwise."""
-        store, archive = self.mux.stores["shots"], self.mux.companion.archive
-        index = store["index"]
-        if archive.on and archive.usable() and index.verified and index.pairs is not None and \
-                screen.indexed.get("shots") == index.epoch == store["seen"] and \
-                self.cols and not self.awaiting and not screen.stats_open and offset + limit <= len(index.pairs):
-            return index.epoch, index.pairs[offset:offset + limit]
-        return None
-
-    async def _serve(self, target, key, offset, limit, held):
-        """The window from the archive when it holds every row under its listed revision, else upstream."""
-        screen, request = target
-        try:
-            bodies = await asyncio.wait_for(self.mux.companion.archive.store.window(
-                self.mux.companion.device_id, *held), ARCHIVE_READ_S)
-        except Exception as error:  # The store failed or closed: the controller answers.
-            bodies = None
-            if _now() - self.failed_at >= 300:
-                self.failed_at = _now()
-                log(f"the archive could not answer an offline-copy window ({error or 'too slow'}); the controller does")
-        if screen.closed:  # With or without a Stats view (Home's fetch), any other screen is answered.
-            return
-        rows = [_row(self.cols.split(","), body) for body in bodies or ()] if self._held(
-            screen, offset, limit) == held else ()
-        if rows and all(rows):
-            self._page(screen, request, rows, offset, limit, held[0])
-        else:
-            self.mux.attribute(screen)
-            self._queue(key, target=target)
-
-    def _page(self, screen, request, rows, offset, limit, epoch):
-        """The page as the firmware frames a fetch (sendStatsStream): its fields in its order, rows added
-        while the frame stays under its budget (a larger row alone), without the Stats header, which a fetch
-        page's reader does not use."""
-        total = len(self.mux.stores["shots"]["index"].pairs)
-        self.served += 1
-        head = {"v": 1, "type": "stats", "boot": self.boot, "snapshot": False, "epoch": epoch,
-                "seq": -self.served, "request": request}
-        tail = {"total": total, "offset": offset, "limit": limit, "hasMore": offset + limit < total}
-        texts, base = [dumps(row) for row in rows], 0
-        while base < len(rows):
-            first = {} if base else {"cols": self.cols, "tag": 0, "good": total}
-            used, end = len(dumps({**head, **first, **tail})) + 8, base  # Up to `"rows":[`.
-            while end < len(rows) and (end == base or used + 1 + len(texts[end]) + 48 <= STATS_FRAME_BYTES):
-                used, end = used + (end > base) + len(texts[end]), end + 1
-            self.deliver(screen, {**head, **first, **tail, "rows": rows[base:end], "rowBase": base,
-                                  "more": end < len(rows)}, request)
-            base = end
-
     def _expired(self, fetch):
         """Stats fetches wait silently while a shot's trace capture is open; never resent."""
         if self.inflight is fetch:
@@ -560,11 +486,6 @@ class View:
         request = frame.get("request")
         if not isinstance(request, int) or (self.kind == "stats" and not isinstance(frame.get("seq"), int)):
             return
-        if self.kind == "stats":
-            self.mux.observed("shots", frame.get("epoch"))
-            if isinstance(frame.get("cols"), str):
-                self.boot, self.cols = frame.get("boot"), frame["cols"] if frame.get("v") == 1 and \
-                    set(frame) <= STATS_PAGE else None
         if self.standing is not None and request == self.request:
             self._standing(frame)
         elif self.inflight is not None and request == self.inflight.id:
@@ -626,15 +547,6 @@ class View:
             self.pump()
 
 
-def _row(cols, body):
-    """An archive body (`{**fields, **curve}`) as the firmware's row: the values in `cols` order, then the
-    curve object (it starts at `wD`); None for a body stored under other columns."""
-    keys = list(body)
-    if keys[:len(cols)] != cols or keys[len(cols):len(cols) + 1] != ["wD"]:
-        return None
-    return [body[name] for name in cols] + [{name: body[name] for name in keys[len(cols):]}]
-
-
 # --- The multiplexer ---------------------------------------------------------------------------
 class Mux:
     def __init__(self, companion, relay):
@@ -644,9 +556,6 @@ class Mux:
         self.upstream = Upstream(companion, relay, self)
         self.views = {"history": View(self, "history"), "stats": View(self, "stats")}
         self.home, self.settings, self.diagnostic = Merged(), Merged(), Merged()
-        # Seen: the store epoch upstream frames named last.
-        self.stores = {name: {"index": IndexMirror(f"screens' {name} index"), "at": None, "waiters": [],
-                              "seen": None} for name in ("shots", "history")}
         self.idle = self.linger = None
         self.changed = asyncio.Event()
         self.attributed = collections.deque(maxlen=64)  # (time, screen) of ops sent upstream for a screen
@@ -663,9 +572,6 @@ class Mux:
         self.alive_waiters = []
         for view in self.views.values():
             view.clear()
-        for store in self.stores.values():
-            store["at"], store["waiters"], store["seen"] = None, [], None
-            store["index"].session()
 
     def bound(self):
         return [screen for screen in self.screens if screen.bound and not screen.closed]
@@ -711,7 +617,6 @@ class Mux:
     def upstream_opened(self):
         for view in self.views.values():
             view.pump()
-        self._ask_records()
         if not self.bound() and not self.idle:
             self.idle = asyncio.get_running_loop().call_later(IDLE_S, self._idle)
 
@@ -765,8 +670,6 @@ class Mux:
         remaining = bool(self.bound())  # The last screen leaving: the session closes soon, nothing to send.
         for view in self.views.values():
             view.unsubscribe(screen, settle=remaining)
-        for store in self.stores.values():
-            store["waiters"] = [waiter for waiter in store["waiters"] if waiter[0] is not screen]
         if remaining:
             self._settle()
             self.upstream.sync_activity()
@@ -870,13 +773,7 @@ class Mux:
             self._log_subscribe(screen, on, after or 0)
         elif op in self.views:
             self.views[op].on_op(screen, message)
-        elif op == "records":
-            _fields(message, {"op", "shots", "history"})
-            epochs = {store: _number(message, store, 0, U32) for store in ("shots", "history")}
-            if all(epoch is None for epoch in epochs.values()):
-                raise Invalid()
-            self._records(screen, {store: epoch for store, epoch in epochs.items() if epoch is not None})
-        else:
+        elif op != "records":  # An older page's record index request: ignored, never closed.
             raise Invalid()
 
     def aggregate(self):
@@ -1138,55 +1035,6 @@ class Mux:
         screen.log_owed = screen.log_invalid = False
         screen.log_missed = 0
 
-    # --- Offline-copy index ---------------------------------------------------------------
-    def observed(self, store, epoch):
-        """A controller frame named this store epoch (a Stats page, the link's notice)."""
-        if type(epoch) is int:
-            self.stores[store]["seen"] = epoch
-
-    def _records(self, screen, epochs):
-        for store, epoch in epochs.items():
-            self.stores[store]["waiters"].append((screen, epoch))
-        self.attribute(screen)
-        self._ask_records()
-
-    def _ask_records(self):
-        """One upstream ask per store from its mirror's epoch, shared by every screen waiting; a delta
-        only when every store asked may have one."""
-        now, ask = _now(), {}
-        for name, store in self.stores.items():
-            if store["waiters"] and (store["at"] is None or now - store["at"] > RECORDS_TIMEOUT_S):
-                ask[name] = store["index"].epoch
-        delta = all(self.stores[name]["index"].delta(epoch) for name, epoch in ask.items())
-        if ask and self.up({"op": "records", **ask, **({"delta": True} if delta else {})}):
-            for name in ask:
-                self.stores[name]["at"] = now
-
-    def _on_records(self, frame):
-        """Screens get the whole index, rebuilt and verified from this upstream answer, never a delta."""
-        name, epoch = frame.get("store"), frame.get("epoch")
-        if name not in self.stores or not isinstance(epoch, int):
-            return
-        store = self.stores[name]
-        store["at"] = None
-        index = store["index"]
-        listed = index.apply(frame)
-        if listed is not None and "rows" not in listed and epoch != index.epoch:
-            index.clear("another epoch")
-            listed = None
-        if listed is None:
-            if "rows" not in frame:  # A delta or an unchanged answer this mirror cannot serve: ask whole now.
-                self._ask_records()
-            return
-        rows = listed["rows"] if "rows" in listed else index.rows()
-        waiters, store["waiters"], store["seen"] = store["waiters"], [], epoch
-        for screen, held in waiters:
-            answer = {"v": 1, "type": "records", "boot": frame.get("boot"), "store": name, "epoch": epoch}
-            if held != epoch:
-                answer["rows"] = rows
-            screen.indexed[name] = epoch
-            screen.send(dumps(answer))
-
     # --- Upstream frames ------------------------------------------------------------------
     def on_frame(self, frame, text):
         kind = frame.get("type")
@@ -1202,8 +1050,6 @@ class Mux:
             self._on_log(frame)
         elif kind in self.views:
             self.views[kind].on_frame(frame)
-        elif kind == "records":
-            self._on_records(frame)
         elif kind != "alive":  # A newer controller's frame: every screen may know it.
             for screen in self.bound():
                 screen.send(text)

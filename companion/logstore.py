@@ -147,17 +147,18 @@ class LogStore:
             self.connection.close()
             self.connection = None
 
-    # --- The controller's id -------------------------------------------------
-    async def device(self):
-        """The id of the controller the history belongs to, kept across restarts."""
-        return await offload(self._device)
+    # --- What it remembers about the controller -------------------------------
+    async def meta(self, key):
+        """`device`: the id of the controller the history belongs to; `archive`: its last `cfg`'s archive
+        switch. Kept across restarts."""
+        return await offload(self._meta, key)
 
-    def _device(self):
-        row = self.connection.execute("select value from meta where key = 'device'").fetchone()
+    def _meta(self, key):
+        row = self.connection.execute("select value from meta where key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
-    async def set_device(self, device):
-        await offload(self.connection.execute, "insert or replace into meta values ('device', ?)", (device,))
+    async def set_meta(self, key, value):
+        await offload(self.connection.execute, "insert or replace into meta values (?, ?)", (key, value))
 
     # --- Sync ----------------------------------------------------------------
     def _latest(self, device):

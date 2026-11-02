@@ -5,10 +5,8 @@
 (docs/schemas/ in the firmware repository, written by its host test from the
 real serializers): each case is a request the companion sends and the exact
 frame text the controller answers with. Its checksum pins the copy. The only
-thing put into the frames is this companion's own fetch request id. Its
-browser_ cases (a browser session's index and offline-copy windows) pin the
-page the companion builds from the archive it synced here. Offline, inside
-the image (see the README).
+thing put into the frames is this companion's own fetch request id.
+Offline, inside the image (see the README).
 """
 
 import asyncio
@@ -26,11 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import aiohttp  # noqa: E402
 
-from companion import index_mirror, mux, service  # noqa: E402
+from companion import index_mirror, service  # noqa: E402
 from companion.service import Companion  # noqa: E402
 
 VECTORS = ROOT / "tests/fixtures/companion-records-v1.vectors.json"
-SHA256 = "2673dc53c2275df5853d02c77f55b721e9ac8d226b0ffbc22b9d9f1336649437"
+SHA256 = "a285700c7ecc4e33b664d05e21186fc62a76e546baf472fed9c5579c9493a63c"
 DEVICE = "AA:BB:CC:DD:EE:FF"
 
 
@@ -97,34 +95,6 @@ async def sql(companion, statement, *args):
     return await service.offload(lambda: [tuple(row) for row in companion.logs.connection.execute(statement, args)])
 
 
-async def served(companion, cases, name):
-    """A screen's offline-copy window answered by the mux from the archive, as parsed frames. The screen holds
-    a standing Stats page (the firmware's browser frames) and the browser index."""
-    the_mux, firmware = companion.screens.mux, [json.loads(text) for text in cases[name]["frames"]]
-    screen = mux.Screen(the_mux, None, "test")
-    screen.bound = True
-    the_mux.screens.add(screen)
-    view = the_mux.views["stats"]
-    the_mux._op(screen, {"op": "stats", "on": True, "request": 1, "offset": 0, "limit": 10, "sort": "date",
-                         "dir": "desc"})
-    page = [json.loads(text) for text in cases["browser_fetch_shots"]["frames"]]
-    for number, frame in enumerate(page):
-        the_mux.on_frame({**frame, "request": view.request, "snapshot": not number}, None)
-    the_mux._op(screen, {"op": "records", "shots": 0})
-    index = cases["browser_index_shots"]["frames"][0]
-    the_mux.on_frame(json.loads(index), index)
-    screen.queue.clear()
-    changes = companion.logs.connection.total_changes
-    the_mux._op(screen, cases[name]["request"])
-    for _ in range(100):
-        if screen.queue and json.loads(screen.queue[-1])["more"] is False:
-            break
-        await asyncio.sleep(0.01)
-    the_mux.screens.discard(screen)
-    assert companion.logs.connection.total_changes == changes, "serving writes nothing"
-    return [json.loads(text) for text in screen.queue], firmware
-
-
 async def main():
     assert hashlib.sha256(VECTORS.read_bytes()).hexdigest() == SHA256, \
         "the vectors differ from the firmware's: copy its file again"
@@ -172,20 +142,6 @@ async def main():
             traces = dict(await sql(companion, "select id, data from archive_traces where id in (1, 2)"))
             ok = json.loads(cases["trace_ok"]["frames"][0])
             assert traces[1] == base64.b64decode(ok["d"]) and len(traces[1]) == 5000 and traces[2] is None
-
-            # The offline copy's windows from this archive: the firmware's own browser page for the same window,
-            # apart from the companion's seq and tag and the Stats header, which a fetch's reader skips (Home's
-            # hero fetch, which has none, the same window shape from a screen also on Stats).
-            for name in ("browser_fetch_shots", "browser_fetch_window", "browser_fetch_hero"):
-                page, firmware = await served(companion, cases, name)
-                assert [frame["rowBase"] for frame in page] == [frame["rowBase"] for frame in firmware], name
-                for ours, theirs in zip(page, firmware):
-                    # Compared as text: the same JSON types too (a bool is no 1, an 8.0 no 8).
-                    assert json.dumps({k: v for k, v in ours.items() if k not in ("seq", "tag")}) == json.dumps(
-                        {k: v for k, v in theirs.items() if k not in ("seq", "tag", "stats")}), name
-                    assert ours["seq"] == page[0]["seq"] > 1 and type(ours.get("tag", 0)) is int
-                assert len(firmware) > 1 or name != "browser_fetch_shots", "a page over two frames"
-                assert ("stats" in firmware[0]) == (name != "browser_fetch_hero")
 
             # The notice names the epochs the archive holds: nothing is asked.
             asked = len(controller.requests)
