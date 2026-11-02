@@ -95,8 +95,7 @@ time: opening it on another device takes it over, and the first one offers
 **Web UI through the companion**, in **Admin → Companion**, is on by default.
 Turn it off to keep every device on the controller's own address: the
 companion's secure address then shows a page with the controller's address
-instead of the Web UI. A controller with older firmware, or a companion that
-is not paired yet, keeps working as before: the companion passes the Web UI
+instead of the Web UI. Until the companion is paired, it passes the Web UI
 straight through, one screen at a time.
 
 ## The controller's log history
