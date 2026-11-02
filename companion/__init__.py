@@ -12,7 +12,9 @@ RELEASE = "1.0.0"
 # COMPANION_COMMIT, set by ./setup), shown as 1.0.0+<commit> like the firmware.
 _COMMIT = re.sub(r"[^0-9a-z-]", "", os.environ.get("COMPANION_COMMIT", "").lower())[:16]
 VERSION = RELEASE + ("+" + _COMMIT if _COMMIT else "")
-PROTOCOL = 1
+# Pairing and the relay stay at 1, so a controller of another release still
+# serves the Web UI through this companion (and its OTA); the link is 2.
+PROTOCOL, LINK_PROTOCOL = 1, 2
 
 # One logger for both processes' names, in the controller log's clock and
 # shape so the two interleave. Until configure_logging runs, lines go straight

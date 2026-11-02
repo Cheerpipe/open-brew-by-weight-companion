@@ -21,6 +21,11 @@ from .relay import CLIENT_ID, address, response_headers
 from .upstream import MAX_FRAME, PATH as STREAM, REQUEST_BYTES
 
 CLAIM, LOGIN, COMPANION_ADMIN = "/api/v1/ui/claim", "/api/v1/auth/login", "/api/v1/companion/admin"
+TRACE = "/api/v1/diagnostic/shot-trace"
+# Changes a screen makes to the controller's records: the replica's store is not current from the moment
+# one leaves until it caught up after the controller's answer.
+CHANGES = {"/api/v1/stats/rate": "shots", "/api/v1/stats/delete": "shots", "/api/v1/stats/clear": "shots",
+           "/api/v1/history/delete": "history", "/api/v1/history/clear": "history"}
 COMMAND_SETTLE_S = 10
 CHUNK = 16 * 1024
 HEARTBEAT_S = 30  # A screen that stops answering pongs is closed and frees its slot.
@@ -120,6 +125,15 @@ class Screens:
         method, uri, path = request.method, request.raw_path, request.path
         client = request.headers.get("X-WebUI-Client", "")
         screen = client if CLIENT_ID.fullmatch(client) else None
+        archive = self.companion.archive
+        if method == "GET" and path == TRACE and archive.serving() and \
+                await self.companion.ui_access(request.headers) is True:
+            data = await archive.held_trace(request.query)
+            if data is not None:  # The replica holds this shot's trace: the controller is not asked.
+                archive.counters["served"] += 1
+                return web.Response(body=data, content_type="application/octet-stream",
+                                    headers={"Cache-Control": "no-store"})
+        changes = CHANGES.get(path) if method == "POST" else None
         session_route = path == CLAIM or path.startswith("/api/v1/auth/")
         lane = self.reads if method in ("GET", "HEAD") or session_route else self.commands
         await lane.acquire()
@@ -130,6 +144,8 @@ class Screens:
             rewrite = path in (CLAIM, LOGIN) or screen in self.mux.claimed
             try:
                 reply = None
+                if changes:
+                    archive.invalidate(changes)
                 if self.relay.mode == "ready":
                     reply = await self.relay.request(method, uri, request.headers, body,
                                                      address(request.headers.get("X-Real-IP")),
@@ -142,6 +158,9 @@ class Screens:
                     rewrite = False
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                 return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
+            finally:
+                if changes:
+                    archive.invalidate(changes, done=True)
             try:
                 request_id = self._observe(path, screen, rewrite, reply)
                 if reply.data is not None:

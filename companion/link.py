@@ -1,4 +1,4 @@
-"""Companion link v1: the opening handshake and the signed frame codec."""
+"""Companion link v2: the opening handshake and the signed frame codec."""
 
 import asyncio
 import hashlib
@@ -9,7 +9,7 @@ import socket
 
 import aiohttp
 
-from . import PROTOCOL, clip, crypto
+from . import LINK_PROTOCOL, clip, crypto
 
 MAX_FRAME = 4096
 # The controller's record frames (the archive's index, pages and traces) may
@@ -91,7 +91,7 @@ async def open_link(http, url, hello, secret):
     try:
         ws.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, ACK_TIMEOUT_S * 1000)
         nc = os.urandom(16)
-        await ws.send_str(json.dumps({"t": "hello", **hello, "protocol": PROTOCOL, "nonce": crypto.b64(nc)}))
+        await ws.send_str(json.dumps({"t": "hello", **hello, "protocol": LINK_PROTOCOL, "nonce": crypto.b64(nc)}))
         reply = await _receive(ws)
         if reply.get("t") == "erase":
             if hmac.compare_digest(crypto.unb64(reply.get("mac"), 32), crypto.mac(secret, b"E", nc)):

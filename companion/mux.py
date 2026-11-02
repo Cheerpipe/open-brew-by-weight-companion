@@ -5,14 +5,19 @@ screens. The companion builds every upstream op itself from validated screen
 ops, keeps what a late screen needs (merged Home, Settings and Diagnostic
 models, the shot card since its last snapshot, the log ring, the record
 views' standing pages) and answers each screen from it, so the controller's
-cost does not grow with the number of screens.
+cost does not grow with the number of screens. With the shot archive on,
+Shots and History come from the archive's replica instead (archive.py), the
+whole history in one list; a page whose store cannot catch up in time comes
+whole from the controller.
 """
 
 import asyncio
 import collections
 import json
+import sqlite3
 
-from . import log
+from . import log, pages
+from .archive import Unavailable
 from .upstream import Upstream, dumps
 
 U32 = 0xFFFFFFFF
@@ -33,6 +38,8 @@ FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
 DEFAULTS = {"history": {"offset": 0, "limit": 20, "dir": "desc", "types": ()},
             "stats": {"offset": 0, "limit": 10, "sort": "date", "dir": "desc", "filter": "{}", "window": 10}}
 ROWS = {"history": "records", "stats": "rows"}
+STORE = {"history": "history", "stats": "shots"}
+CAPACITY = {"history": HISTORY_CAPACITY, "stats": SHOT_LOG_CAPACITY}
 
 
 class Invalid(Exception):
@@ -191,6 +198,8 @@ class Record:
         self.params = dict(DEFAULTS[kind])
         self.group = None  # Parameter group while subscribed.
         self.request, self.synced = 0, False
+        # Served by the archive's replica (never by an upstream window), and the standing page's serial.
+        self.replica, self.serial = False, 0
 
 
 class Screen:
@@ -289,6 +298,8 @@ class View:
         op = {"op": self.kind, "on": True}
         if fetch:
             op["fetch"] = True
+        # The whole history may page past the controller's own records; it answers those empty.
+        key = (min(key[0], CAPACITY[self.kind]), *key[1:])
         if self.kind == "history":
             offset, limit, direction, types = key
             op.update(request=request, offset=offset, limit=limit, dir=direction)
@@ -311,7 +322,8 @@ class View:
         return op
 
     def members(self, group):
-        return [screen for screen in self.mux.bound() if screen.records[self.kind].group == group]
+        return [screen for screen in self.mux.bound()
+                if screen.records[self.kind].group == group and not screen.records[self.kind].replica]
 
     def _start(self, frame):
         return self.kind == "history" or frame.get("rowBase") == 0
@@ -336,7 +348,7 @@ class View:
         on = _flag(message, "on", required=True)
         request = _number(message, "request", 1, U32)
         tag = _number(message, "tag", 1, U32)
-        offset = _number(message, "offset", 0, HISTORY_CAPACITY if self.kind == "history" else SHOT_LOG_CAPACITY)
+        offset = _number(message, "offset", 0, U32)
         limit = _number(message, "limit", 1, HISTORY_PAGE_MAX if self.kind == "history" else SHOT_LOG_CAPACITY)
         direction = _choice(message, "dir", ("asc", "desc"))
         fetch = _flag(message, "fetch")
@@ -362,16 +374,92 @@ class View:
         elif fetch:  # Without a view of its own it is Home's rows-only Stats fetch, as on the controller.
             if offset is None or tag is not None or (self.kind == "stats" and "window" in given):
                 raise Invalid()
-            self.mux.attribute(screen)  # What it leaves out is its own window's, not the controller's.
-            self._queue(self.key({**record.params, **given}), target=(screen, request or 0))
+            self.fetch(screen, request or 0, {**record.params, **given})
         elif self.kind == "stats" and record.group is not None and set(given) == {"window"} and \
                 request is None and tag is None:
             self.subscribe(screen, record.request, {**record.params, "window": given["window"]}, window_only=True)
         else:
-            self.subscribe(screen, request or 0, {**record.params, **replaced, **given})
+            self.subscribe(screen, request or 0, {**record.params, **replaced, **given}, tag=tag or 0)
 
-    def subscribe(self, screen, request, params, window_only=False):
+    # The replica: pages from the archive's copy, no upstream window
+    def fetch(self, screen, request, params):
+        if self.mux.companion.archive.serving():
+            self.mux.companion.spawn(self._serve(screen, request, params, False, fetch=True))
+        else:
+            self.mux.attribute(screen)  # What it leaves out is its own window's, not the controller's.
+            self._queue(self.key(params), target=(screen, request))
+
+    def refresh(self):
+        """The copy changed (or the active preset, for Stats): every page it serves is built again."""
+        for screen in self.mux.bound():
+            record = screen.records[self.kind]
+            if record.replica and record.group is not None:
+                self.mux.companion.spawn(self._serve(screen, record.request, record.params, False))
+
+    async def _serve(self, screen, request, params, snapshot, fetch=False, tag=0):
+        """One page from the replica; when its store cannot catch up in time (link down, no answer
+        within CATCH_UP_S) the page comes whole from the controller instead, never mixed."""
+        archive, record = self.mux.companion.archive, screen.records[self.kind]
+        serial = record.serial
+        page = header = None
+        if await archive.ready(STORE[self.kind]) and self.mux.home.boot is not None:
+            try:
+                page = await archive.page(STORE[self.kind], self._query(params), params["offset"],
+                                          params["limit"], self.mux.home.boot)
+                if self.kind == "stats" and (not fetch or record.group is not None):
+                    header = (await archive.header(params["window"], self.mux.active_preset(), page["epoch"],
+                                                   ((), (), ())))[0]
+            except (sqlite3.Error, Unavailable, ValueError) as error:
+                log(f"the archive could not build a {self.kind} page ({error}); the controller sends it")
+                page = None
+        if screen.closed or (not fetch and (record.serial != serial or not record.replica)):
+            return
+        if page is None:
+            archive.counters["fallbacks"] += 1
+            if fetch:
+                self.mux.attribute(screen)
+                self._queue(self.key(params), target=(screen, request))
+            else:
+                self._upstream_subscribe(screen, request, params)
+            return
+        archive.counters["served"] += 1
+        if self.kind == "stats":
+            screen.stats_seq += 1
+            frames, tag = pages.stats_frames(page, screen.stats_seq, request, snapshot, header, tag)
+        else:
+            frame, tag = pages.history_frame(page, request, snapshot, tag)
+            frames = [frame]
+        if page["archive"] is not None:  # Rows only the archive keeps: its histories and gaps name them.
+            frames[0] = frames[0][:-1] + ',"archive":' + dumps(page["archive"]) + "}"
+        for text in frames:
+            screen.send(text)
+        if not fetch:
+            record.synced = True
+
+    def _query(self, params):
+        if self.kind == "history":
+            return {"dir": params["dir"], "types": list(params["types"])}
+        criteria = json.loads(params["filter"])
+        return {"sort": params["sort"], "dir": params["dir"], "bad": criteria.get("bad", False),
+                "result": criteria.get("result", []), "preset": criteria.get("preset", []),
+                "scale": criteria.get("scale", [])}
+
+    def subscribe(self, screen, request, params, window_only=False, tag=0):
         record = screen.records[self.kind]
+        if self.mux.companion.archive.serving():
+            record.params, record.group, record.request = params, self.key(params), request
+            record.replica, record.synced = True, False
+            record.serial += 1
+            self.mux.attribute(screen)
+            self.settle()  # Its upstream window, if it held one, is no longer its.
+            self.mux.companion.spawn(self._serve(screen, request, params, not window_only,
+                                                 tag=0 if window_only else tag))
+            return
+        self._upstream_subscribe(screen, request, params, window_only)
+
+    def _upstream_subscribe(self, screen, request, params, window_only=False):
+        record = screen.records[self.kind]
+        record.replica = False
         old, group = record.group, self.key(params)
         # Nobody else holds the standing window: this screen may move it.
         alone = self.standing is not None and not any(s is not screen for s in self.members(self.standing))
@@ -395,7 +483,8 @@ class View:
 
     def unsubscribe(self, screen, settle=True):
         record = screen.records[self.kind]
-        record.group, record.synced = None, False
+        record.group, record.synced, record.replica = None, False, False
+        record.serial += 1
         for fetch in [self.inflight, *self.queue]:
             if fetch:
                 fetch.targets = [target for target in fetch.targets if target[0] is not screen]
@@ -407,14 +496,18 @@ class View:
         if record.group is None:
             return
         record.synced = False
-        if record.group == self.standing:
+        if record.replica:
+            record.serial += 1
+            self.mux.companion.spawn(self._serve(screen, record.request, record.params, True))
+        elif record.group == self.standing:
             self._replay(screen)
         else:
             self._join(screen, record.group)
 
     def settle(self):
         """After a screen left: promote another group, or end the upstream window."""
-        screens = [screen for screen in self.mux.bound() if screen.records[self.kind].group is not None]
+        screens = [screen for screen in self.mux.bound()
+                   if screen.records[self.kind].group is not None and not screen.records[self.kind].replica]
         if not screens:
             if self.standing is not None:
                 self.mux.up({"op": self.kind, "on": False})
@@ -706,6 +799,20 @@ class Mux:
         self.attributed.clear()
         self._reset(park=deliberate)  # An idle close keeps the parked pages; a lost session may be a reboot.
 
+    def replica_changed(self, store=None):
+        """The replica's copy changed or stopped serving: the pages it serves are built again."""
+        for kind, view in self.views.items():
+            if store in (None, STORE[kind]):
+                view.refresh()
+
+    def active_preset(self):
+        """The active preset, from Home's model: the Stats header's "This preset" chart follows it."""
+        changes = self.home.changes
+        if "presets.activeId" in changes:
+            return changes["presets.activeId"]
+        presets = changes.get("presets")
+        return presets.get("activeId", 0) if isinstance(presets, dict) else 0
+
     def unpark(self, notice=None):
         """Drop the parked pages (Forget, a link reset), or with an `rs` notice those whose store moved."""
         for kind, key in (("stats", "sh"), ("history", "hi")):
@@ -904,8 +1011,11 @@ class Mux:
             self._resync_upstream()
 
     def _on_home(self, frame, text):
+        active = self.active_preset()
         if not self.home.apply(frame):
             return
+        if self.active_preset() != active:  # The controller sends its Stats page again; so does the replica.
+            self.views["stats"].refresh()
         snapshot = frame.get("snapshot") is True
         for screen in self.bound():
             if screen.home or snapshot:

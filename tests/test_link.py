@@ -184,10 +184,13 @@ class Controller:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         hello = json.loads(await ws.receive_str())
-        assert hello["t"] == "hello" and hello["protocol"] == 1 and hello["name"] == "Kitchen server"
+        assert hello["t"] == "hello" and hello["protocol"] == 2 and hello["name"] == "Kitchen server"
         nc = crypto.unb64(hello["nonce"], 16)
         mode = self.mode
-        if mode == "retry":
+        if mode == "version":  # A controller of another release: its link refuses this one.
+            self.mode = "ok"
+            await ws.send_json({"t": "error", "code": "PROTOCOL"})
+        elif mode == "retry":
             self.retries -= 1
             self.mode = "retry" if self.retries > 0 else "ok"
             await ws.send_json({"t": "error", "code": "RETRY_LATER"})
@@ -385,6 +388,14 @@ async def main():
             assert full["d"] == service.dashboard.reduce(D["read"], push=False)
             await session.next("ping", skip=())  # Every PING_S["companion"] from now on.
 
+            # --- A sync hold (a shot): no ping at all until it ends, then one at once ---
+            await session.send({"t": "hold", "on": False, "sync": True})
+            await session.quiet(1.0, skip=())  # Two and a half ping intervals without a single frame.
+            await session.send({"t": "hold", "on": False, "sync": False})
+            began = asyncio.get_running_loop().time()
+            await session.next("ping", skip=(), timeout=0.3)
+            assert asyncio.get_running_loop().time() - began < 0.2, "the first ping checks the link at once"
+
             # --- Pushes: filtered per event, dropped when they carry nothing -------
             upstream.events.pushed(D["pushes"]["commandsOnly"], 0)
             upstream.events.pushed(D["pushes"]["backflush"], 0)
@@ -552,6 +563,15 @@ async def main():
             session = await asyncio.wait_for(fake.sessions.get(), 2)
             await eventually(lambda: companion.link == "open")
             service.RETRY_LATER_S = 0.2
+
+            # --- Another link version: the link waits for an update, the relay keeps the Web UI ---
+            fake.mode = "version"
+            await session.ws.close()
+            await eventually(lambda: companion.link_reason == "VERSION")
+            assert companion.relay.mode == "ready", "a mismatched pair still serves the Web UI (and its OTA)"
+            companion.set_controller(target)  # The updated controller announces itself.
+            session = await asyncio.wait_for(fake.sessions.get(), 3)
+            await eventually(lambda: companion.link == "open")
 
             # --- Started with the controller off: the relay handshake is asked again --
             # A manual address hears no announcement, so an unanswered handshake must
@@ -778,7 +798,8 @@ async def main():
             await pages.close()
             await companion.relay.close()
     await server.close()
-    print("Companion link: pairing, handshake, pings, cfg, creds, route, hold, commands, errors and erase OK")
+    print("Companion link: pairing, handshake, pings, sync hold silence, cfg, creds, route, hold, commands, "
+          "errors, link version and erase OK")
 
 
 asyncio.run(main())

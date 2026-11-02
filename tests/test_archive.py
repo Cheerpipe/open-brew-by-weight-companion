@@ -171,8 +171,10 @@ class Controller:
             await companion._on_frame({"t": "hold", "on": False, "sync": True})
 
     async def release(self, companion):
-        """The hold ends: what arrived meanwhile is answered, then the pings are answered again."""
+        """The hold ends: the controller says so at once, answers what arrived meanwhile, then the pings
+        are answered again."""
         held, self.held = self.held, None
+        await companion._on_frame({"t": "hold", "on": False, "sync": False})
         for frame in held:
             if frame["t"] != "logsub":
                 await self.answer(companion, frame)
@@ -315,6 +317,8 @@ async def parity(companion, get):
     only = {(r["archiveGeneration"], r["id"]) for r in everything}
     expected_only = {(1, rid) for rid in range(1, 21)} | {(2, rid) for rid in range(5, 15)}
     assert only == expected_only, sorted(only ^ expected_only)
+    history = (await get("/shots?limit=50&bad=1&all=1&sort=date&dir=asc"))["rows"]
+    assert len(history) == 46, "both generations, the controller's rows included"
     lunar = zlib.crc32(b"Lunar") ^ 0xFFFFFFFF
     filters = [{}, {"bad": "1"}, {"result": "fast,slow"}, {"preset": "1,3"}, {"scale": str(lunar)},
                {"bad": "1", "result": "on_recipe", "preset": "2"}]
@@ -339,6 +343,18 @@ async def parity(companion, get):
                     if cursor is None:
                         break
                 assert paged == whole, (sort, direction, given)
+                # The replica's page (the mux serves it): the whole history in the controller's order,
+                # the rows only the archive keeps marked, the window sliced like shotLogPageSlice.
+                listed = sorted((r for r in history if firmware_match(r, query)),
+                                key=lambda r: firmware_key(r, sort, direction))
+                total, good, start, rows, meta = await companion.archive.store.page(
+                    DEVICE, "shots", {**query, "sort": sort, "dir": direction}, 2, 7)
+                assert (total, start) == (len(listed), min(2, len(listed))), (sort, direction, given)
+                assert good == sum(r["badReason"] is None for r in listed)
+                assert [(g, rid, only) for g, rid, _, only, _ in rows] == [
+                    (r["archiveGeneration"], r["id"], (r["archiveGeneration"], r["id"]) in expected_only)
+                    for r in listed[2:9]], (sort, direction, given)
+                assert (meta is None) == (not any(only for *_, only, _ in rows))
     presets = (await get("/shots?limit=1"))["presets"]
     assert len(presets) == 3 and all(name.endswith("g2") for _, name in presets), "the newest name per preset"
     for bad in ("sort=rating&dir=up", "result=early", "preset=x", "cursor=1", "scale=" + ",".join(["1"] * 9)):
@@ -418,7 +434,7 @@ class Link:
     def close(self):
         self.task.cancel()
         self.pings.cancel()
-        self.companion.sync_due, self.companion.clear_at = {}, None  # As a new session starts them.
+        self.companion.sync_due, self.companion.sync_hold = {}, None  # As a new session starts them.
         self.companion.log_subscribed = self.companion.log_identified = self.companion.configured = False
         self.companion.archive.stop()
         self.companion.outbox = None
@@ -827,7 +843,7 @@ async def main():
             seen = len(fake.requests)
             await link_.open(log=True)
             await asyncio.sleep(0.3)
-            assert not [f for f in fake.requests[seen:] if f["t"] == "logsub"], "logsub waits for a clear frame"
+            assert not [f for f in fake.requests[seen:] if f["t"] == "logsub"], "logsub waits for the hold's end"
             await fake.release(companion)
             await asyncio.sleep(0.2)
             assert [f["t"] for f in fake.requests[seen:]].count("logsub") == 1

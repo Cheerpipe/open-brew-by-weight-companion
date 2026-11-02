@@ -43,9 +43,6 @@ LOG_CATEGORY_MAX, LOG_MESSAGE_MAX = 24, 1024
 LOG_ACCESS_RECHECK_S = 300  # How often a session's right to read the history is asked of the controller.
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
-# Sync requests leave only right after a controller frame that showed no hold (S17): this long after it.
-CLEAR_S = 1.0
-CLEAR_FRAMES = frozenset({"log", "rs", "rec", "trc"})  # The controller sends these only outside a hold.
 STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
 # A sleep that comes back this late means the loop stood still; 20 s is where
 # the controller's 30 s ping contract starts to break.
@@ -89,7 +86,9 @@ class Companion:
         self.log_unreachable = 0.0  # When the controller last could not answer that question.
         self.retention = (RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT)
         self.archive = Archive(self)  # The shot and activation archive, in the same store.
-        self.sync_due, self.clear_at = {}, None  # Sync requests waiting for a clear controller frame.
+        # Sync requests waiting for the end of a sync hold, and the hold the controller's `hold` frames
+        # name: True during a shot (nothing crosses the link), None until the session's first one.
+        self.sync_due, self.sync_hold = {}, None
         self.creds_gen = None  # Generation whose sign-in result the controller still waits for.
         self.full_ep, self.full_task = None, None
         self.expect, self.confirm_timer = None, None
@@ -197,8 +196,8 @@ class Companion:
     def poke(self):
         """Fresh evidence the controller answered (an announcement, a relay handshake):
         ping at once, so a link whose socket died with its restart — a reboot sends no
-        FIN or RST — is found now, not at the next ping cadence."""
-        if self.ws is not None:
+        FIN or RST — is found now, not at the next ping cadence. Never during a shot."""
+        if self.ws is not None and not self.sync_hold:
             self.post({"t": "ping", "up": self.lm.up})
 
     # --- Link ----------------------------------------------------------------
@@ -266,7 +265,7 @@ class Companion:
         self.hold, self.held, self.full_ep, self.reported = False, [], None, None
         # This session's cfg and dev re-arm the logsub; the last session's cfg says nothing about this one.
         self.log_subscribed = self.log_identified = self.configured = False
-        self.sync_due, self.clear_at = {}, None
+        self.sync_due, self.sync_hold = {}, None
         self.unknown_frames = 0
         self.unknown_kinds.clear()
         self.heard_at = 0.0
@@ -315,31 +314,35 @@ class Companion:
         return True
 
     def post_sync(self, frame, key):
-        """A sync request (S17): sent only right after a controller frame that showed no hold, so none
-        crosses Wi-Fi during a shot; otherwise it waits (one per `key`, the newest) for the next such
-        frame."""
+        """A sync request (S17): sent at once outside a sync hold, so none crosses Wi-Fi during a shot;
+        otherwise it waits (one per `key`, the newest) for the hold's end."""
         if self.outbox is None:
             return False
-        if self.clear_at is not None and time.monotonic() - self.clear_at < CLEAR_S:
+        if self.sync_hold is False:
             return self.post(frame)
         self.sync_due[key] = frame
         return True
 
     def sync_blocked(self):
-        """Sync cannot flow now: the link is down, a hold is on, or a request waits for a clear frame."""
-        return self.outbox is None or self.clear_at is None or bool(self.sync_due)
+        """Sync cannot flow now: the link is down, a hold is on (or not known yet), or a request waits."""
+        return self.outbox is None or self.sync_hold is not False or bool(self.sync_due)
 
     def _hold_state(self, frame):
-        """The controller's frames tell whether sync may flow: a `hold` with `sync` false (its reply to
-        each ping) and every log or archive frame mean clear; `sync` true blocks until the next clear."""
-        kind = frame.get("t")
-        if kind in CLEAR_FRAMES or (kind == "hold" and frame.get("sync") is False):
-            self.clear_at = time.monotonic()
+        """The controller sends `hold` whenever a sync hold starts or ends, on every build: during one
+        nothing crosses the link either way (no ping, no sync request) and both sides trust it; at its
+        end the waiting requests go and a ping checks the link at once. A ping's answer carries the
+        store epochs, the replica's heartbeat."""
+        if frame.get("t") != "hold":
+            return
+        was, self.sync_hold = self.sync_hold, frame.get("sync") is True
+        if not self.sync_hold:
             due, self.sync_due = self.sync_due, {}
             for request in due.values():
                 self.post(request)
-        elif kind == "hold" and frame.get("sync") is True:
-            self.clear_at = None
+        if was is not None and was != self.sync_hold:
+            self.ping_now.set()  # The pinger stops for the hold, or pings now that it ended.
+        if "sh" in frame or "hi" in frame:
+            self.archive.on_heartbeat(frame)
 
     async def _writer(self, ws, codec, outbox):
         while True:
@@ -357,9 +360,13 @@ class Companion:
 
     async def _pinger(self):
         """A ping when the session opens, whenever `up` changes or the route turns to the companion,
-        and then every PING_S of the route."""
+        and then every PING_S of the route; none during a sync hold, and one the moment it ends (only a
+        missing answer to that one finds a link lost during the shot)."""
         loop = asyncio.get_running_loop()
         while True:
+            while self.sync_hold:
+                self.ping_now.clear()
+                await self.ping_now.wait()
             up, route = self.lm.up, self.route
             self.post({"t": "ping", "up": up})
             deadline = loop.time() + PING_S[route]
@@ -369,6 +376,8 @@ class Companion:
                     await asyncio.wait_for(self.ping_now.wait(), max(0.0, deadline - loop.time()))
                 except asyncio.TimeoutError:
                     self._stalled(loop.time() - deadline)
+                    break
+                if self.sync_hold:
                     break
                 if self.lm.up != up or self.route != route == "direct":
                     self._stalled(loop.time() - deadline)

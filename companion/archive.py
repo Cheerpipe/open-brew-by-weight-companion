@@ -43,13 +43,15 @@ import binascii
 import json
 import time
 
-from . import log, stats
+from . import log, pages, stats
 from .index_mirror import IndexMirror
 from .logstore import ARCHIVE_TABLES, table_bytes
 from .store import offload
 
 STORES = ("history", "shots")  # The sync order: the small store first.
 FETCH_MAX = {"shots": 50, "history": 120}
+# How long a page waits for the replica to catch up before it comes whole from the controller.
+CATCH_UP_S = 3
 FRESH_S = 8  # How long a Stats header waits for the mirror to reach the controller's epoch.
 HEADERS = 16  # Stats headers kept, per window, preset, filters and archive state.
 REQUEST_S = 300  # A request unanswered this long is asked again (a long hold only delays it).
@@ -287,6 +289,61 @@ class ArchiveStore:
             return [f"({rating} = 0)", rating if direction == "asc" else f"-{rating}", "-r.generation", "-r.id"]
         return ["r.generation", "r.id"] if direction == "asc" else ["-r.generation", "-r.id"]
 
+    def _filter(self, device, store, query, args):
+        """The WHERE clause of the controller's own filter (shotListFilterMatches, History types)."""
+        self.connection.create_function("obbw_scale_key", 1, stats.scale_key, deterministic=True)
+        args.update(device=device, store=store, open=self._open(device, store))
+        where = "r.device_id = :device and r.store = :store" + ("" if query.get("all", True) else f" and {ONLY}")
+
+        def among(name, expression, values):
+            nonlocal where
+            where += f" and {expression} in (" + ",".join(f":{name}{n}" for n in range(len(values))) + ")"
+            args.update({f"{name}{n}": value for n, value in enumerate(values)})
+        if store == "shots":
+            if not query["bad"]:
+                where += " and r.bad = 0"
+            if query["result"]:
+                where += " and coalesce(json_extract(r.body, '$.arrivalS'), 0) != 0"
+                among("v", "json_extract(r.body, '$.verdict')", query["result"])
+            if query["preset"]:
+                among("p", "json_extract(r.body, '$.presetId')", query["preset"])
+            if query["scale"]:
+                among("k", "obbw_scale_key(json_extract(r.body, '$.scaleName'))", query["scale"])
+        elif query["types"]:
+            among("t", "r.kind", query["types"])
+        return where
+
+    def _trace_held(self, device, generation, record_id):
+        return self.connection.execute(
+            "select 1 from archive_traces where device_id = ? and generation = ? and id = ? and data is not null",
+            (device, generation, record_id)).fetchone() is not None
+
+    async def page(self, device, store, query, offset, limit):
+        """One page of the whole history, controller-held and archive-only rows alike, filtered, ordered and
+        sliced as the controller pages its own (shotLogPageSlice): (total, good, rows), each row (generation,
+        id, body, archive-only, trace held). `good` counts the matches the Stats header calls good."""
+        def read():
+            args = {}
+            where = self._filter(device, store, query, args)
+            order = ", ".join(self._order(store, query.get("sort", "date"), query["dir"]))
+            total, good = self.connection.execute(
+                f"select count(*), coalesce(sum(r.bad = 0), 0) from {JOIN} where {where}", args).fetchone()
+            start = min(offset, total)
+            rows = self.connection.execute(
+                f"select r.generation, r.id, r.body, {ONLY} as only from {JOIN} where {where} order by {order} "
+                "limit :limit offset :offset", {**args, "limit": limit, "offset": start}).fetchall()
+            listed = [(row["generation"], row["id"], json.loads(row["body"]), bool(row["only"]),
+                       store == "shots" and self._trace_held(device, row["generation"], row["id"]))
+                      for row in rows]
+            meta = None
+            if any(row[3] for row in listed):  # Markers need the histories and the copy's gaps.
+                meta = {"generations": self._generations(device, store), "holes": [dict(row) for row in (
+                    self.connection.execute("select generation, below, above, count from archive_holes where "
+                                            "device_id = ? and store = ? order by generation desc, below desc",
+                                            (device, store)))]}
+            return total, good, start, listed, meta
+        return await self._call(read)
+
     async def tail(self, device, store, query, limit):
         """Archive-only rows filtered and ordered exactly as the controller filters and orders its own
         (shotListFilterMatches, History types), so the browser can merge both streams; `query` holds
@@ -294,27 +351,9 @@ class ArchiveStore:
         each marked `archiveOnly`, for a browser reading with the controller off. Returns the rows, the
         next cursor, the holes, the generations and, for shots, the presets found among these rows."""
         def read():
-            self.connection.create_function("obbw_scale_key", 1, stats.scale_key, deterministic=True)
             order = self._order(store, query["sort"], query["dir"])
-            args = {"device": device, "store": store, "open": self._open(device, store), "limit": limit + 1}
-            where = "r.device_id = :device and r.store = :store" + ("" if query["all"] else f" and {ONLY}")
-
-            def among(name, expression, values):
-                nonlocal where
-                where += f" and {expression} in (" + ",".join(f":{name}{n}" for n in range(len(values))) + ")"
-                args.update({f"{name}{n}": value for n, value in enumerate(values)})
-            if store == "shots":
-                if not query["bad"]:
-                    where += " and r.bad = 0"
-                if query["result"]:
-                    where += " and coalesce(json_extract(r.body, '$.arrivalS'), 0) != 0"
-                    among("v", "json_extract(r.body, '$.verdict')", query["result"])
-                if query["preset"]:
-                    among("p", "json_extract(r.body, '$.presetId')", query["preset"])
-                if query["scale"]:
-                    among("k", "obbw_scale_key(json_extract(r.body, '$.scaleName'))", query["scale"])
-            elif query["types"]:
-                among("t", "r.kind", query["types"])
+            args = {"limit": limit + 1}
+            where = self._filter(device, store, query, args)
             if query["cursor"] is not None:
                 where += f" and ({', '.join(order)}) > ({', '.join(f':c{n}' for n in range(len(order)))})"
                 args.update({f"c{n}": value for n, value in enumerate(query["cursor"])})
@@ -328,9 +367,7 @@ class ArchiveStore:
                 if query["all"]:
                     body["archiveOnly"] = bool(row["only"])
                 if store == "shots":
-                    body["archiveTrace"] = self.connection.execute(
-                        "select 1 from archive_traces where device_id = ? and generation = ? and id = ? "
-                        "and data is not null", (device, row["generation"], row["id"])).fetchone() is not None
+                    body["archiveTrace"] = self._trace_held(device, row["generation"], row["id"])
                 bodies.append(body)
             last = rows[limit - 1] if len(rows) > limit else None
             following = ":".join(str(last[f"k{n}"]) for n in range(len(order))) if last else None
@@ -442,7 +479,12 @@ class ArchiveStore:
 
 
 class Archive:
-    """The sync: one store at a time over the link, activations first, then shots, then traces."""
+    """The sync: one store at a time over the link, activations first, then shots, then traces.
+
+    It is also the replica the mux serves Shots and History from: a store is current once a pass ended
+    at the epoch the controller last named (its `rs` notice, the epochs in its ping answer, an index
+    answer) with nothing changed since; a notice of another epoch, or a rating, deletion or Clear the
+    relay forwards, makes it not current and starts a catch-up at once, paused only by a sync hold."""
 
     def __init__(self, companion):
         self.companion = companion
@@ -461,6 +503,12 @@ class Archive:
         self.trace_wait, self.busy_until = {}, 0.0  # Traces not given yet: asked again after these.
         self.headers, self.complete = {}, {}  # Stats headers: by full key, and the last whole one per view.
         self.facts_cache, self.unavailable_at = None, None
+        self.epochs = {}  # The epoch each store's copy is at, as the controller named it last.
+        self.current = dict.fromkeys(STORES, False)
+        self.ready_at = {store: asyncio.Event() for store in STORES}
+        self.marks = dict.fromkeys(STORES, 0)  # Moves on every reason a pass in flight may be stale.
+        # Pages the replica served, pages that went to the controller instead, and requests sent to catch up.
+        self.counters = {"served": 0, "fallbacks": 0, "catchUpFetches": 0}
 
     def usable(self):
         return self.companion._log_usable() and self.companion.device_id is not None
@@ -469,6 +517,80 @@ class Archive:
         self.headers.clear()
         self.complete.clear()
         self.wake.set()  # A pass in flight sees the change and starts again from the index.
+        self.companion.screens.mux.replica_changed()
+
+    # --- Replica ---------------------------------------------------------------------
+    def serving(self):
+        """The replica may serve pages: the switch is on and this link session follows the controller."""
+        return self.on and self.subscribed and self.usable() and self.companion.outbox is not None
+
+    def state(self, store):
+        return "off" if not self.serving() else "current" if self.current[store] else "catchingUp"
+
+    def _stale(self, store):
+        self.marks[store] += 1
+        self.current[store] = False
+        self.ready_at[store].clear()
+
+    def invalidate(self, store, done=False):
+        """A rating, deletion or Clear the relay forwards: the store is not current from the moment it
+        leaves, and once the controller answered (`done`) the copy catches up."""
+        if not self.subscribed:
+            return
+        self._stale(store)
+        if done:
+            self.notified.pop(store, None)
+            self.wanted.add(store)
+            self.wake.set()
+
+    async def ready(self, store):
+        """Whether a page of `store` may come from the replica now: it is current, or catches up within
+        CATCH_UP_S. During a sync hold the copy serves as it is: nothing goes upstream during a shot."""
+        if not self.serving():
+            return False
+        if self.current[store] or self.companion.sync_hold:
+            return True
+        self.wanted.add(store)
+        self.wake.set()
+        try:
+            await asyncio.wait_for(self.ready_at[store].wait(), CATCH_UP_S)
+        except asyncio.TimeoutError:
+            return bool(self.companion.sync_hold) and self.serving()
+        return self.current[store] and self.serving()
+
+    def _synced(self, store, mark, epoch):
+        """A pass ended with the copy at the controller's `epoch`: current unless anything moved since."""
+        moved, self.epochs[store] = self.epochs.get(store) != epoch, epoch
+        self.notified.setdefault(store, epoch)
+        if self.marks[store] == mark and self.notified[store] == epoch:
+            self.current[store] = True
+            self.ready_at[store].set()
+        else:
+            self.wanted.add(store)
+            self.wake.set()
+        if moved:
+            self.companion.screens.mux.replica_changed(store)
+
+    async def page(self, store, query, offset, limit, boot):
+        """One page from the copy, as pages.py frames it: boot, epoch, good, total, offset, limit, hasMore,
+        the row texts with their ids and, when the page holds rows only the archive keeps, `archive`."""
+        total, good, start, rows, meta = await self.store.page(self.companion.device_id, store, query, offset, limit)
+        shots = store == "shots"
+        texts = [(rid, (pages.stats_row if shots else pages.history_row)(
+            body, pages.marks(only, generation, trace if shots else None)), only)
+            for generation, rid, body, only, trace in rows]
+        return {"boot": boot, "epoch": self.epochs.get(store, 0), "good": good, "total": total, "offset": start,
+                "limit": limit, "hasMore": start + len(rows) < total, "rows": texts, "archive": meta}
+
+    async def held_trace(self, query):
+        """A shot's trace as the controller's trace route answers it, when the replica holds it."""
+        try:
+            identity = [int(query[name]) for name in ("id", "boot", "end")]
+        except (KeyError, ValueError):
+            return None
+        if not self.serving():
+            return None
+        return await self.store.trace(self.companion.device_id, *identity)
 
     # --- Session -----------------------------------------------------------------
     def configure(self, cfg):
@@ -484,6 +606,8 @@ class Archive:
         if not self.on or self.subscribed or not self.usable() or self.companion.outbox is None:
             return
         self.subscribed, self.notified = True, {}
+        for store in STORES:
+            self._stale(store)
         self.wanted = set(STORES)
         for mirror in self.mirrors.values():
             mirror.session()
@@ -501,16 +625,27 @@ class Archive:
         for waiter in self.waiters.values():
             waiter.cancel()
         self.waiters, self.pages, self.syncing = {}, {}, None
+        for store in STORES:
+            self._stale(store)
+        self.companion.screens.mux.replica_changed()  # Their pages go to the controller again.
 
     # --- Frames from the controller ------------------------------------------------
     def on_rs(self, frame):
+        """A store changed and its change is saved: catch up now."""
+        if self.subscribed:
+            self.on_heartbeat(frame)
+            self.trace_wait, self.busy_until = {}, 0.0  # A notice is when a trace not given yet is asked again.
+
+    def on_heartbeat(self, frame):
+        """The epochs the controller names (`rs`, its ping answer): one the copy is not at starts a catch-up."""
         if not self.subscribed:
             return
         for store, key in (("shots", "sh"), ("history", "hi")):
             if type(frame.get(key)) is int:
                 self.notified[store] = frame[key]
-                self.wanted.add(store)
-        self.trace_wait, self.busy_until = {}, 0.0  # A notice is when a trace not given yet is asked again.
+                if frame[key] != self.epochs.get(store):
+                    self._stale(store)
+                    self.wanted.add(store)
         self.wake.set()
 
     def refresh(self, store, epoch):
@@ -518,6 +653,8 @@ class Archive:
         it): sync now instead of at the next notice. The request leaves with the next clear frame."""
         if self.subscribed and type(epoch) is int:
             self.notified[store] = epoch
+            if epoch != self.epochs.get(store):
+                self._stale(store)
             self.wanted.add(store)
             self.wake.set()
 
@@ -565,6 +702,7 @@ class Archive:
             self.waiters[key] = waiter
             if not self.companion.post_sync(frame, "archive"):
                 raise Gone()
+            self.counters["catchUpFetches"] += 1
             try:
                 return await asyncio.wait_for(waiter, REQUEST_S)
             except asyncio.TimeoutError:
@@ -633,9 +771,10 @@ class Archive:
         return found, wanted
 
     async def _sync(self, store):
-        device, revision = self.companion.device_id, self.store.revision
+        device, revision, mark = self.companion.device_id, self.store.revision, self.marks[store]
         generation, epoch, oldest, previous, counters = await self.store.sync_state(device, store)
         if epoch and self.notified.get(store) == epoch:
+            self._synced(store, mark, epoch)
             return  # The notice names the epoch this archive already holds.
         # A delta only against the index this mirror holds for that same epoch; one it cannot rebuild
         # asks the whole index once.
@@ -647,8 +786,12 @@ class Archive:
         if index is None:
             raise ValueError("a malformed record index")
         rows, new_epoch = index.get("rows"), index.get("epoch")
+        if type(new_epoch) is int:
+            self.notified[store] = new_epoch  # The controller's own word on its epoch, newer than any notice.
         if rows is None or type(new_epoch) is not int:
-            return  # Unchanged since the epoch this archive holds.
+            if epoch and new_epoch == epoch:
+                self._synced(store, mark, epoch)  # Unchanged since the epoch this archive holds.
+            return
         named, gone = [index.get("gen"), index.get("next"), index.get("clr")], index.get("gone")
         if not all(type(value) is int for value in named) or not isinstance(gone, list) or not all(
                 type(rid) is int for rid in gone):
@@ -666,6 +809,7 @@ class Archive:
                                                                    cleared), None, []
             self._steady(revision)
             await self.store.adopt(device, store, generation, new_epoch, oldest, previous, named)
+            self._synced(store, mark, new_epoch)
             return
         low, high = min(listed), max(listed)
         # Fallback: ids that cannot come after the last sync's oldest.
@@ -686,7 +830,7 @@ class Archive:
             found, missing = found + more, missing | still
             replaced = [row for row in found if archived[row[0]][0] != row[1]]
         if missing:
-            return  # A record arrived or went meanwhile: the next notice finishes the sync.
+            return self._again(store)  # A record arrived or went meanwhile: catch up again.
         ambiguous = bool(replaced) and len(replaced) < len(shared)
         if replaced and not ambiguous:
             restarted = True  # Every shared id is another record.
@@ -705,7 +849,7 @@ class Archive:
         _, missing = await self._fetch(store, order, listed,
                                        [rid for rid in order if rid not in archived and rid not in fetched], page)
         if missing:
-            return
+            return self._again(store)
         if not restarted and not ambiguous:  # A pass that could not tell records apart mirrors no deletion.
             # Missing at or above the oldest, or named as deleted: the user deleted it; below the oldest
             # and not named, it rotated out and stays.
@@ -717,6 +861,12 @@ class Archive:
                 "could be copied")
         self._steady(revision)
         await self.store.adopt(device, store, generation, new_epoch, low, order, named)
+        self._synced(store, mark, new_epoch)
+
+    def _again(self, store):
+        self.notified.pop(store, None)
+        self.wanted.add(store)
+        self.wake.set()
 
     async def _traces(self):
         """Each shot's trace once, newest first. One still being saved, or a controller too busy to read
@@ -804,7 +954,8 @@ class Archive:
     # --- Facts -----------------------------------------------------------------------
     async def facts(self):
         facts = {"on": self.on, "available": self.available,
-                 "syncing": self.syncing, "syncedAt": self.synced_at, "error": self.error}
+                 "syncing": self.syncing, "syncedAt": self.synced_at, "error": self.error,
+                 "replica": {store: self.state(store) for store in STORES}, **self.counters}
         if self.usable():
             key = (self.companion.device_id, self.store.revision, self.store.synced)
             if self.facts_cache is None or self.facts_cache[0] != key:
