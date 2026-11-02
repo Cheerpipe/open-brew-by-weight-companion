@@ -125,6 +125,7 @@ class Controller:
         self.transports = []
         self.relay = False  # The relay answers only once the link block asks for it.
         self.login, self.auth_up = True, True  # GET /api/v1/auth: password on; the controller answers.
+        self.admin_screen = None  # The screen holding the Admin unlock, as the relay signs screens.
         self.silent = False  # True: the relay drops the connection unanswered, as when the controller is off.
 
     async def pair_post(self, request):
@@ -168,11 +169,14 @@ class Controller:
                                   "ui": True, "link": True})
 
     async def auth(self, request):
-        """Signed in whenever the browser sent a session (sealed through the relay, so any value)."""
+        """Signed in whenever the browser sent a session (sealed through the relay, so any value); Admin
+        unlocked only for the screen the relay signs, as the controller resolves it."""
         if not self.auth_up:
             return web.json_response({"error": "UNAVAILABLE"}, status=503)
+        relay = request.headers.get("X-OBBW-Relay", "").split()
         return web.json_response({"loginRequired": self.login,
-                                  "signedIn": bool(request.headers.get("X-WebUI-Session"))})
+                                  "signedIn": bool(request.headers.get("X-WebUI-Session")),
+                                  "adminUnlocked": len(relay) == 5 and relay[3] == self.admin_screen})
 
     async def link(self, request):
         if self.mode == "not_paired":
@@ -688,7 +692,19 @@ async def main():
             async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
                 assert reply.status == 503 and (await reply.json())["error"] == "CONTROLLER_UNREACHABLE"
             fake.auth_up = True
+            # Deleting needs Admin unlocked on the screen asking (D14, AC16): the relay signs that
+            # screen's own id, never the companion's shared client.
+            screen = "0123456789abcdef01234567"
+            fake.admin_screen = screen
+            for headers in (signed, {**signed, "X-WebUI-Client": "fedcba9876543210fedcba98"}):
+                async with http.post(page_url + "/log/delete", json={}, headers=headers) as reply:
+                    assert reply.status == 401 and (await reply.json())["error"] == "ADMIN_LOCKED"
+            fake.admin_screen = companion.relay.client_id
             async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
+                assert reply.status == 401, "the companion's shared client never holds the unlock for a screen"
+            fake.admin_screen = screen
+            async with http.post(page_url + "/log/delete", json={}, headers={**signed, "X-WebUI-Client": screen}) \
+                    as reply:
                 assert reply.status == 200
             assert (await companion.status())["log"]["rows"] == 0
             assert await companion.logs.meta("device") == "AA:BB:CC:DD:EE:FF"

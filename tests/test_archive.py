@@ -82,6 +82,9 @@ class Controller:
         self.epochs = {"shots": 11, "history": 21}
         self.gen = {"shots": 1, "history": 1}  # The store header's write counter: Clear keeps it.
         self.counters = True  # False: an older firmware that names neither counter.
+        # D8: the user's Clear count and newest deleted ids; `marks` False is a firmware that names neither,
+        # where a Clear reads as a restarted history.
+        self.clears, self.gone, self.marks = {"shots": 0, "history": 0}, {"shots": [], "history": []}, False
         self.traces = {}  # shot id -> bytes, None (no trace) or "busy"
         self.requests = []
         self.ignore = 0  # Index requests left unanswered (a lost frame).
@@ -127,15 +130,23 @@ class Controller:
             del self.stores[store][min(self.stores[store])]
         self.moved(store)
 
-    def clear(self, store):
-        """Clear history: the records and the id counter go; the write counter keeps counting."""
-        self.stores[store], self.next[store] = {}, 1
+    def delete(self, store, rid):
+        """The user deletes a record: named in `gone`, newest first, at most 16."""
+        del self.stores[store][rid]
+        self.gone[store] = ([rid] + self.gone[store])[:16]
+        self.moved(store)
+
+    def clear(self, store, user=True):
+        """Clear history: the records and the id counter go; the write counter keeps counting. A user's
+        Clear raises the Clear count; a factory reset's keeps it."""
+        self.stores[store], self.next[store], self.gone[store] = {}, 1, []
+        self.clears[store] += int(user)
         self.moved(store)
 
     def factory_reset(self):
         """Every record and both counters start again."""
         for store in self.stores:
-            self.clear(store)
+            self.clear(store, user=False)
             self.gen[store] = 1
 
     def rev(self, store, rid):
@@ -185,6 +196,8 @@ class Controller:
                                     "epoch": self.epochs[frame["s"]]}
             if self.counters:
                 f.update(gen=self.gen[store], next=self.next[store])
+            if self.marks:
+                f.update(clr=self.clears[store], gone=self.gone[store])
             rows = [value for rid in self.newest_first(store) for value in (rid, self.rev(store, rid))]
             if self.deltas:
                 f.update(index_answer(self.baselines, store, frame["ep"], frame.get("d"), f["epoch"], rows))
@@ -283,8 +296,8 @@ def firmware_match(row, query):
 
 
 async def parity(companion, get):
-    """A fixture of archive-only shots: a closed generation, the open one below its oldest, and kept rows
-    the controller no longer lists (which interleave by date), plus rows that are not archive-only."""
+    """A fixture of archive-only shots: a closed generation and the open one below its oldest, plus rows
+    that are not archive-only."""
     def fixture():
         connection = companion.logs.connection
         with connection:
@@ -301,16 +314,13 @@ async def parity(companion, get):
                             "presetName": f"Preset {n % 3 + 1} g{generation}", "scaleName": ["Lunar", "Pearl S", ""][n % 3],
                             "arrivalS": [None, 0, 28.5, 31.0][n % 4], "verdict": ["on_recipe", "fast", "slow"][n % 3],
                             "badReason": "short" if n % 5 == 0 else None, "endedAtUnixSec": 1789000000 + rid}
-                    connection.execute("insert into archive_records values (?, 'shots', ?, ?, '', 0, 'good', ?, ?, 0, ?)",
+                    connection.execute("insert into archive_records values (?, 'shots', ?, ?, '', 0, 'good', ?, 0, ?)",
                                        (DEVICE, generation, rid, int(body["badReason"] is not None),
-                                        int(rid in (22, 23, 25)), json.dumps(body)))
+                                        json.dumps(body)))
     await service.offload(fixture)
     everything = (await get("/shots?limit=50&bad=1&sort=date&dir=asc"))["rows"]
     only = {(r["archiveGeneration"], r["id"]) for r in everything}
-    # Kept rows are archive-only even while the last index still lists them (23: its delete on the
-    # controller is on the way; the browser shows the controller's row while it holds one).
-    expected_only = {(1, rid) for rid in range(1, 21)} | {(2, rid) for rid in range(5, 15)} | {(2, 22), (2, 23),
-                                                                                                (2, 25)}
+    expected_only = {(1, rid) for rid in range(1, 21)} | {(2, rid) for rid in range(5, 15)}
     assert only == expected_only, sorted(only ^ expected_only)
     lunar = zlib.crc32(b"Lunar") ^ 0xFFFFFFFF
     filters = [{}, {"bad": "1"}, {"result": "fast,slow"}, {"preset": "1,3"}, {"scale": str(lunar)},
@@ -336,8 +346,6 @@ async def parity(companion, get):
                     if cursor is None:
                         break
                 assert paged == whole, (sort, direction, given)
-    dated = [(r["archiveGeneration"], r["id"]) for r in (await get("/shots?limit=50&bad=1"))["rows"]]
-    assert dated.index((2, 25)) < dated.index((2, 22)) < dated.index((2, 14)), "kept rows interleave by date"
     presets = (await get("/shots?limit=1"))["presets"]
     assert len(presets) == 3 and all(name.endswith("g2") for _, name in presets), "the newest name per preset"
     for bad in ("sort=rating&dir=up", "result=early", "preset=x", "cursor=1", "scale=" + ",".join(["1"] * 9)):
@@ -432,10 +440,10 @@ async def main():
         async with aiohttp.ClientSession() as http:
             companion = Companion("Kitchen server", data, http, Upstream)
             await companion.open_log()
-            verdict = {"value": True}
+            verdict, admin = {"value": True}, {"value": True}
 
-            async def allows(headers):
-                return verdict["value"]
+            async def allows(headers):  # (signed in, Admin unlocked for that screen), None when unreachable
+                return None if verdict["value"] is None else (verdict["value"], admin["value"])
             companion._web_ui_allows = allows
             pages = TestServer(web_app(companion), host="127.0.0.1")
             await pages.start_server()
@@ -522,7 +530,7 @@ async def main():
             assert not await sql(companion, "select 1 from archive_traces where id in (12, 31)")
             assert not said("restarted")
 
-            # --- A deleted oldest record reads as rotation and is kept -------------------
+            # --- A firmware that names no deletions: a deleted oldest record reads as rotation --
             del fake.stores["shots"][1]
             fake.moved("shots")
             await fake.notice(companion)
@@ -578,7 +586,6 @@ async def main():
             assert (await row(companion, "shots", 30))["rating"] == 5
             for rid in range(2, 12):
                 assert await post("/delete", {"store": "shots", "id": rid}) == (200, {"ok": True})
-            assert not await sql(companion, "select * from archive_exclusions"), "nothing listed was removed"
             assert await post("/delete", {"store": "shots", "generation": 0, "id": 999}) == (
                 404, {"error": "NOT_FOUND"})
             async with http.get(base + "/trace?id=29&boot=7&end=29017", headers=session) as reply:
@@ -586,73 +593,40 @@ async def main():
             async with http.get(base + "/trace?id=6&boot=7&end=6017", headers=session) as reply:
                 assert reply.status == 404 and (await reply.json())["error"] == "NO_SHOT_TRACE"
 
-            # --- Remove from the archive only: not copied again while the controller has it --
-            assert await post("/delete", {"store": "shots", "id": 60}) == (200, {"ok": True})
-            assert await sql(companion, "select id from archive_exclusions") == [(60,)]
-            fake.requests.clear()
-            fake.add_shot()  # 92; 52 rotates out
-            await fake.notice(companion)
-            await settled(companion)
-            assert 60 not in await ids(companion, "shots") and {52, 92} <= await ids(companion, "shots")
-            assert [frame.get("o") for frame in fake.requests if frame["t"] == "rf"] == [0]
-            del fake.stores["shots"][60]
-            fake.moved("shots")
-            await fake.notice(companion)
-            await settled(companion)
-            assert not await sql(companion, "select * from archive_exclusions"), "the id left the index"
+            # --- A record the controller holds is the controller's to delete (AC8) ----------
+            assert await post("/delete", {"store": "shots", "id": 60}) == (404, {"error": "NOT_FOUND"})
+            assert 60 in await ids(companion, "shots")
+            for removed in ("/keep", "/erase", "/settings"):
+                async with http.post(base + removed, json={"store": "shots", "id": 30}, headers=session) as reply:
+                    assert reply.status in (404, 405), (removed, reply.status)
 
-            # --- A record not copied yet: nothing to keep, but it can stay out (review C3) --
-            fresh = fake.add_shot()  # No notice yet: the companion has not copied it.
-            assert await post("/keep", {"store": "shots", "id": fresh}) == (409, {
-                "error": "NOT_COPIED", "message": "The companion has not saved its copy of this record yet. "
-                "Try again in a few minutes."})
-            assert await post("/delete", {"store": "shots", "id": fresh}) == (200, {"ok": True})
-            await fake.notice(companion)
-            await settled(companion)
-            assert fresh not in await ids(companion, "shots"), "removed from the archive before it was copied"
-            del fake.stores["shots"][fresh]
-            fake.moved("shots")
-            await fake.notice(companion)
-            await settled(companion)
-            assert not await sql(companion, "select * from archive_exclusions")
+            # --- Deleting needs Admin unlocked on that screen, confirmed live (AC8) ------
+            admin["value"] = False
+            assert await post("/delete", {"store": "shots", "id": 30}) == (401, {
+                "error": "ADMIN_LOCKED", "message": "Unlock Admin in the Web UI opened through the companion, "
+                "then try again"})
+            assert said("refused /__companion/archive/delete: Admin is not unlocked") == 1
+            assert await post("/rate", {"id": 30, "rating": 3}) == (200, {"ok": True}), "rating needs no unlock"
+            verdict["value"] = None
+            assert (await post("/delete", {"store": "shots", "id": 30}))[0] == 503, "no answer: nothing deleted"
+            verdict["value"], admin["value"] = True, True
+            companion.log_unreachable = 0  # The controller answers again.
+            # Without a relay session the controller is asked as nobody: nothing counts as unlocked,
+            # whatever it answers.
+            class Reply:
+                status = 200
+                data = json.dumps({"loginRequired": False, "signedIn": False, "adminUnlocked": True}).encode()
 
-            # --- Remove from the controller, keep in the archive: no inferred deletion ---
-            assert await post("/keep", {"store": "shots", "id": 64}) == (200, {"ok": True})
-            assert await post("/keep", {"store": "shots", "id": 64, "kept": False}) == (200, {"ok": True}), \
-                "the controller refused the delete: the mark goes"
-            assert await sql(companion, "select kept from archive_records where store = 'shots' and id = 64") == [(0,)]
-            assert await post("/keep", {"store": "shots", "id": 61}) == (200, {"ok": True})
-            assert 61 in [r["id"] for r in (await get("/shots?limit=50&bad=1"))["rows"]], \
-                "kept: archive-only at once, before the next pass"
-            del fake.stores["shots"][61]
-            fake.moved("shots")
-            await fake.notice(companion)
-            await settled(companion)
-            assert 61 in await ids(companion, "shots")
-            assert 61 in [r["id"] for r in (await get("/shots?limit=50&bad=1"))["rows"]], "kept and not listed"
-            epoch = fake.epochs["shots"]
-            good = (await get(f"/stats?window=10&active=1&epoch={epoch}"))["good"]
-            assert await post("/delete", {"store": "shots", "id": 61}) == (200, {"ok": True})
-            assert not await sql(companion, "select * from archive_exclusions"), \
-                "a kept row the controller no longer lists needs no exclusion (review C6)"
-            assert (await get(f"/stats?window=10&active=1&epoch={epoch}"))["good"] == good - 1
+                def release(self):
+                    pass
 
-            # --- Keep records deleted on the controller (S6): on keeps, off mirrors -----
-            assert await post("/settings", {"keepDeleted": True}) == (200, {"ok": True})
-            assert (await post("/settings", {"keepDeleted": 1}))[0] == 400
-            assert (await companion.status())["archive"]["keepDeleted"] is True
-            del fake.stores["shots"][62]
-            fake.moved("shots")
-            await fake.notice(companion)
-            await settled(companion)
-            assert (await sql(companion, "select kept from archive_records where store = 'shots' and id = 62")) == [
-                (1,)]
-            assert await post("/settings", {"keepDeleted": False}) == (200, {"ok": True})
-            del fake.stores["shots"][63]
-            fake.moved("shots")
-            await fake.notice(companion)
-            await settled(companion)
-            assert 63 not in await ids(companion, "shots") and 62 in await ids(companion, "shots")
+            async def passthrough(*_):
+                return Reply()
+            relay, controller = (companion.relay.mode, companion.relay.passthrough), companion.controller
+            companion.relay.mode, companion.relay.passthrough, companion.controller = "disabled", passthrough, object()
+            assert await Companion._web_ui_allows(companion, {"X-WebUI-Client": "0123456789abcdef"}) == (True, False)
+            (companion.relay.mode, companion.relay.passthrough), companion.controller = relay, controller
+            assert 30 in await ids(companion, "shots")
 
             # --- Access: reads keep a remembered grant; changes need the controller now --
             verdict["value"] = False
@@ -677,7 +651,7 @@ async def main():
             async with http.post(base + "/rate", data="{}", headers=session) as reply:
                 assert reply.status == 415
 
-            # --- Clear history, then new shots: the generation closes, nothing goes (S4) --
+            # --- Clear on a firmware that names no Clear count: the generation closes, nothing goes (S4) --
             before = await ids(companion, "shots")
             fake.clear("shots")
             for _ in range(5):
@@ -774,64 +748,50 @@ async def main():
             await settled(companion)
             assert 12 in await ids(companion, "shots", 2) and await kept() == (True, True)
 
-            # --- Bulk deletes: the open generation (Clear's copy option), one, a range ---
-            assert await post("/erase", {"store": "history", "current": True}) == (200, {"ok": True, "deleted": 1})
-            assert await ids(companion, "history", 4) == set() and await ids(companion, "history", 1)
-            fake.requests.clear()
-            fake.add_activation()  # The cleared copy's record stays out while the controller holds it.
-            await fake.notice(companion)
-            await settled(companion)
-            assert await ids(companion, "history", 4) == {2}
-            first = len(await ids(companion, "shots", 1))
-            assert await post("/erase", {"store": "shots", "generation": 1}) == (200, {"ok": True, "deleted": first})
-            assert await post("/erase", {"store": "shots", "generation": 0}) == (200, {"ok": True, "deleted": 1})
-            assert [g["generation"] for g in (await companion.status())["archive"]["generations"]["shots"]] == [2]
-            clock = fake.clock
-            assert await post("/erase", {"store": "shots", "from": clock + 3 * 3600, "to": clock + 4 * 3600}) == (
-                200, {"ok": True, "deleted": 2})
-            assert await ids(companion, "shots", 2) == set(range(1, 13)) - {3, 4}
-            assert await post("/erase", {"from": 0, "to": 2 ** 32 - 1, "store": "history"}) == (
-                200, {"ok": True, "deleted": 31}), "only records with a wall clock have a date"
-            assert await ids(companion, "history", 2) and not await ids(companion, "history", 4)
-            assert (await post("/erase", {"store": "milk"}))[0] == 400
-
             # --- Status and an export across generations -------------------------------
             facts = (await companion.status())["archive"]
-            assert facts["on"] and facts["available"] and facts["shotsTotal"] == 10 and facts["bytes"] > 0
+            assert facts["on"] and facts["available"] and facts["bytes"] > 0
+            assert facts["shotsTotal"] == (await sql(companion, "select count(*) from archive_records "
+                                                                "where store = 'shots'"))[0][0]
+            assert "keepDeleted" not in facts
             # A record set aside twice sits below generation 0: exported and editable (review C4).
+            opened = (await companion.archive.store.sync_state(DEVICE, "shots"))[0]
             await sql(companion, "insert into archive_records select device_id, store, -1, id, ident, rev, kind, "
-                                 "bad, kept, ended_at, body from archive_records where store = 'shots' and "
-                                 "generation = 2 and id = 1")
+                                 "bad, ended_at, body from archive_records where store = 'shots' and "
+                                 f"generation = {opened} and id = 1")
             assert await post("/rate", {"generation": -1, "id": 1, "rating": 4}) == (200, {"ok": True})
             async with http.get(base + "/export", headers=session) as reply:
                 exported = json.loads(await reply.read())
             assert exported["format"] == "openbrewbyweight-companion-archive" and exported["device"] == DEVICE
-            assert {r["archiveGeneration"] for r in exported["history"]} == {2, 3}
-            assert [(r["archiveGeneration"], r["id"]) for r in exported["shots"]] == [(-1, 1)] + [
-                (2, rid) for rid in sorted(set(range(1, 13)) - {3, 4})]
+            assert {r["archiveGeneration"] for r in exported["history"]} == {
+                g for (g,) in await sql(companion, "select distinct generation from archive_records "
+                                                   "where store = 'history'")}
+            assert [(r["archiveGeneration"], r["id"]) for r in exported["shots"]] == await sql(
+                companion, "select generation, id from archive_records where store = 'shots' order by generation, id")
+            assert not any("archiveKept" in r for r in exported["shots"])
             assert await post("/delete", {"store": "shots", "generation": -1, "id": 1}) == (200, {"ok": True})
-            assert exported["traces"][0]["generation"] == 2 and base64.b64decode(exported["traces"][0]["data"])
+            assert base64.b64decode(exported["traces"][0]["data"])
 
-            # --- Delete everything: what the controller keeps comes back ----------------
-            assert (await post("/erase", {}))[0] == 200
-            assert not await sql(companion, "select * from archive_records")
-            await fake.notice(companion)
-            await settled(companion)
-            assert await ids(companion, "shots", 1) == set(range(1, 13)) and await ids(companion, "history", 1) == {1, 2}
-
-            # --- A factory reset, then pairing again: every record stays, closed (S8) ----
+            # --- A factory reset, then pairing again: every record stays, closed (S8, D9) --
+            shots_open = (await companion.archive.store.sync_state(DEVICE, "shots"))[0]
+            history_open = (await companion.archive.store.sync_state(DEVICE, "history"))[0]
+            shots_before = await ids(companion, "shots", shots_open)
+            history_before = await ids(companion, "history", history_open)
             link_.close()
             fake.factory_reset()
             fake.boot = 8
             await link_.open()  # Paired again: the same controller id reattaches to its archive.
             await settled(companion)
-            assert await ids(companion, "shots", 1) == set(range(1, 13)), "an empty index changes nothing"
+            assert await ids(companion, "shots", shots_open) == shots_before, "an empty index changes nothing"
             fake.add_shot()
             fake.add_activation(duration=31.0)
             await fake.notice(companion)
             await settled(companion)
-            assert await ids(companion, "shots", 1) == set(range(1, 13)) and await ids(companion, "shots", 2) == {1}
-            assert await ids(companion, "history", 1) == {1, 2} and await ids(companion, "history", 2) == {1}
+            assert await ids(companion, "shots", shots_open) == shots_before
+            assert await ids(companion, "shots", shots_open + 1) == {1}
+            assert await ids(companion, "history", history_open) == history_before
+            assert await ids(companion, "history", history_open + 1) == {1}
+            shots_open += 1
 
             # --- A hold mid-sync stops both directions, timers included (S17) ------------
             new = {fake.add_shot() for _ in range(4)}
@@ -840,12 +800,12 @@ async def main():
             await fake.notice(companion)
             await asyncio.sleep(0.8)  # Past the 0.5 s re-ask: it is armed, not sent.
             assert len(fake.requests) == seen + 1 and fake.requests[-1]["t"] == "rx", fake.requests[seen:]
-            assert companion.sync_due and not await ids(companion, "shots", 2) >= new
+            assert companion.sync_due and not await ids(companion, "shots", shots_open) >= new
             await fake.release(companion)
             await settled(companion)
-            assert await ids(companion, "shots", 2) >= new
+            assert await ids(companion, "shots", shots_open) >= new
             assert await sql(companion, "select count(*) from archive_records where store = 'shots' and "
-                                        f"generation = 2 and id between {min(new)} and {max(new)}") == [(4,)], \
+                                        f"generation = {shots_open} and id between {min(new)} and {max(new)}") == [(4,)], \
                 "nothing lost, nothing doubled"
             assert (await companion.archive.store.sync_state(DEVICE, "shots"))[1] == fake.epochs["shots"]
 
@@ -959,14 +919,15 @@ async def main():
             fake.held = None
             assert await ids(companion, "shots", 1) == {1}, "no row of the new history lands in the closed one"
             assert await ids(companion, "shots", 2) == {2, 3} and said("restarted") == restarts + 1
-            assert await post("/delete", {"store": "shots", "id": 3}) == (200, {"ok": True})  # Before a full sync.
+            # Before a full sync the open generation's records may be the controller's: never the companion's.
+            assert await post("/delete", {"store": "shots", "id": 3}) == (404, {"error": "NOT_FOUND"})
             await link_.open()
             await settled(companion)
             archive.FETCH_MAX["shots"] = 50
-            assert await ids(companion, "shots", 2) == {1, 2}, "removed right after a restart: not copied again"
+            assert await ids(companion, "shots", 2) == {1, 2, 3}
             assert said("restarted") == restarts + 1
 
-            # --- The whole-history header still counts it while the controller holds it (C9) --
+            # --- A deletion on the controller leaves the whole-history header (C9) -------
             epoch = fake.epochs["shots"]
             assert (await get(f"/stats?window=10&active=1&epoch={epoch}"))["good"] == 4
             del fake.stores["shots"][3]
@@ -974,17 +935,16 @@ async def main():
             await fake.notice(companion)
             await settled(companion)
             assert (await get(f"/stats?window=10&active=1&epoch={fake.epochs['shots']}"))["good"] == 3
-            assert not await sql(companion, "select * from archive_exclusions")
 
             # --- A change the user makes mid-pass starts it again from the index (C3) ----
             fake.add_shot()
             fake.hold_next, seen = True, len(fake.requests)
             await fake.notice(companion)
             await asyncio.sleep(0.2)
-            assert await post("/delete", {"store": "shots", "id": 2}) == (200, {"ok": True})
+            assert await post("/rate", {"generation": 1, "id": 1, "rating": 2}) == (200, {"ok": True})
             await fake.release(companion)
             await settled(companion)
-            assert await ids(companion, "shots", 2) == {1, 4} and not said("archive sync stopped")
+            assert await ids(companion, "shots", 2) == {1, 2, 4} and not said("archive sync stopped")
             assert [f["t"] for f in fake.requests[seen:] if f.get("s") == "shots"].count("rx") == 2, \
                 "the pass started over from the index"
 
@@ -996,7 +956,7 @@ async def main():
                 fake.add_shot()
             await link_.open()
             await settled(companion)
-            assert await ids(companion, "shots", 2) == {1, 4} and await ids(companion, "shots", 3) == set(range(1, 11))
+            assert await ids(companion, "shots", 2) == {1, 2, 4} and await ids(companion, "shots", 3) == set(range(1, 11))
             assert said("restarted") == restarts + 2
 
             # --- A clockless clear with an identical record: the counters still see it ---
@@ -1026,19 +986,6 @@ async def main():
             await settled(companion)
             assert await ids(companion, "history", opened) == before and len(before) > 1, "nothing deleted"
             assert await ids(companion, "history", opened + 1) == {1}
-
-            # --- Clear with the companion's copy deleted: new records are copied (review C1) --
-            opened = (await companion.archive.store.sync_state(DEVICE, "shots"))[0]
-            fake.clear("shots")
-            assert (await post("/erase", {"store": "shots", "generation": opened}))[0] == 200
-            await fake.notice(companion)
-            await settled(companion)
-            for _ in range(3):
-                fake.add_shot()
-            await fake.notice(companion)
-            await settled(companion)
-            assert not await ids(companion, "shots", opened)
-            assert await ids(companion, "shots", opened + 1) == {1, 2, 3}, "the reused ids are copied"
 
             # --- Index deltas: `d` only after a `sum` in this link session, every answer checked ---------
             assert not any("d" in frame for frame in fake.requests), "a firmware without `sum` never sees `d`"
@@ -1109,6 +1056,68 @@ async def main():
             await link_.open()
             await settled(companion)
 
+            # --- D8: the controller names the user's deletions and Clears --------------------
+            link_.close()
+            await companion.erase("forgotten for the deletion marks")
+            fake = Controller(capacity=10)
+            fake.marks = True
+            link_ = Link(companion, fake)
+            for _ in range(12):  # 1 and 2 rotate out before the companion copies anything.
+                fake.add_shot()
+            await link_.open()
+            await settled(companion)
+            assert await ids(companion, "shots", 1) == set(range(3, 13))
+            fake.add_shot()
+            fake.add_shot()  # 13 and 14: 3 and 4 rotate out and stay.
+            fake.delete("shots", 5)  # The controller's oldest, deleted by the user: not rotation.
+            fake.delete("shots", 9)
+            await fake.notice(companion)
+            await settled(companion)
+            assert await ids(companion, "shots", 1) == {3, 4, 6, 7, 8, 10, 11, 12, 13, 14}
+            # While the companion is away: a record made and deleted before it was copied is never
+            # copied; the oldest deleted, then passed by rotation, is still a deletion.
+            link_.close()
+            made = fake.add_shot()
+            fake.delete("shots", made)
+            fake.delete("shots", min(fake.stores["shots"]))
+            for _ in range(4):  # 7 rotates out after 6 was deleted.
+                fake.add_shot()
+            await link_.open()
+            await settled(companion)
+            held = await ids(companion, "shots", 1)
+            assert made not in held and 6 not in held and {3, 4, 7, 8} <= held, held
+            # A Clear while away: every generation of that store goes, nothing of the other (AC5, AC6).
+            fake.add_activation()
+            await fake.notice(companion)
+            await settled(companion)
+            link_.close()
+            fake.clear("shots")
+            fake.add_shot()
+            await link_.open()
+            await settled(companion)
+            assert await sql(companion, "select generation, id from archive_records where store = 'shots'") == [(2, 1)]
+            assert await ids(companion, "history") == {1} and said("shot history was cleared on the controller") == 1
+            assert not await sql(companion, "select * from archive_traces where generation = 1")
+            # A factory reset keeps the count: the history closes and stays (D9)...
+            fake.factory_reset()
+            fake.add_shot()
+            await fake.notice(companion)
+            await settled(companion)
+            assert await sql(companion, "select generation, id from archive_records where store = 'shots' "
+                                        "order by generation") == [(2, 1), (3, 1)]
+            # ...and a Clear after it empties every generation, the one before the reset included.
+            fake.clear("shots")
+            fake.add_shot()
+            await fake.notice(companion)
+            await settled(companion)
+            assert await sql(companion, "select generation, id from archive_records where store = 'shots'") == [(4, 1)]
+            # A lower count (a rolled-back controller, a store it had to reset) deletes nothing.
+            fake.clears["shots"] = 0
+            fake.add_shot()
+            await fake.notice(companion)
+            await settled(companion)
+            assert await ids(companion, "shots", 4) == {1, 2} and said("cleared on the controller") == 2
+
             # --- The link-frame harness: a recorded session replays into the same archive (X1) --
             link_.close()
             fresh = Controller()
@@ -1147,8 +1156,8 @@ async def main():
 
             await pages.close()
             await companion.logs.close()
-    print("Companion archive: backfill, catch-up, ratings, deletions, rotation, holes, generations, "
-          "deletion scopes, keep setting, access, switch, bulk deletes, export and erase OK")
+    print("Companion archive: backfill, catch-up, ratings, deletions followed, rotation, holes, generations, "
+          "Clear and factory reset, Admin-gated delete, access, switch, export and erase OK")
 
 
 asyncio.run(main())

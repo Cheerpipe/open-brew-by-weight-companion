@@ -28,7 +28,7 @@ from companion import index_mirror, service  # noqa: E402
 from companion.service import Companion  # noqa: E402
 
 VECTORS = ROOT / "tests/fixtures/companion-records-v1.vectors.json"
-SHA256 = "a285700c7ecc4e33b664d05e21186fc62a76e546baf472fed9c5579c9493a63c"
+SHA256 = "6752f4196a71b34def405df95e5d770812f37a8ac763578ba35fc139f1fb1812"
 DEVICE = "AA:BB:CC:DD:EE:FF"
 
 
@@ -136,7 +136,8 @@ async def main():
             assert type(body["durationS"]) is float, "numbers keep their form: parsed from the frames' text"
             history = await sql(companion, "select id, kind from archive_records where store = 'history' order by id")
             assert [row[0] for row in history] == [1, 2, 3, 4, 5] and history[3][1] == "rinse"
-            for store, epoch, counters in (("shots", 7001, [2400, 13]), ("history", 7002, [1300, 6])):
+            # The index names the Clear count beside the counters (D8): the archive keeps all three.
+            for store, epoch, counters in (("shots", 7001, [2400, 13, 1]), ("history", 7002, [1300, 6, 0])):
                 state = await companion.archive.store.sync_state(DEVICE, store)
                 assert state[1] == epoch and state[4] == counters and state[2] == 1, state
             traces = dict(await sql(companion, "select id, data from archive_traces where id in (1, 2)"))
@@ -176,7 +177,7 @@ async def main():
                                               "where store = 'shots'"))
             assert sorted(shots) == [rid for rid in range(1, 14) if rid != 6] and shots[9] == 5, shots
             state = await companion.archive.store.sync_state(DEVICE, "shots")
-            assert state[1] == 7003 and state[4] == [2400, 14], state
+            assert state[1] == 7003 and state[4] == [2400, 14, 1], state
             # The same delta against another copy, or with another sum, rebuilds nothing.
             full, delta = (controller.frames(name)[0]["f"] for name in ("index_shots", "index_shots_delta"))
             mirror = index_mirror.IndexMirror("test index")

@@ -289,7 +289,8 @@ class LogStore:
         last = (rows[-1]["ordinal"], rows[-1]["sequence"])
         marks, boots = self._marks(device, last if has_more else (-1, -1), (before_ordinal, before_sequence)), \
             self._boots(device)
-        entries, newer = [], None if first else before_ordinal
+        # Restarts newer than the first row are named too: a filter can leave a newer boot without rows.
+        entries, newer = [], max(boots, default=None) if first and at is None else before_ordinal
 
         def flush(key):  # The markers newer than `key`.
             while marks and marks[0][0] > key:
