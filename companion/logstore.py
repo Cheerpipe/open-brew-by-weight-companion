@@ -104,7 +104,7 @@ ARCHIVE_TABLES = ("archive_records", "archive_traces", "archive_sync", "archive_
 # still list are set aside (a generation below every one holding that id),
 # the others only lose the flag. Exclusions go: the archive deletes only what
 # it alone holds now, and what one kept out is copied again while the
-# controller still holds it.
+# controller still holds it; so does the Keep records deleted switch.
 LOG_INDEXES = """
     create index log_events_wall on log_events (device_id, wall_sec);
     create index log_events_category on log_events (device_id, category);
@@ -125,6 +125,7 @@ V3_TO_V4 = f"""
         where {KEPT_OPEN};
     alter table archive_records drop column kept;
     drop table archive_exclusions;
+    delete from meta where key = 'archiveKeepDeleted';
 """
 
 

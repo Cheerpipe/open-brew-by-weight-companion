@@ -95,6 +95,7 @@ def version_3(path):
                            (DEVICE, generation, rid, kept))
     connection.execute("insert into archive_traces values (?, 2, 12, 7, 12017, x'01')", (DEVICE,))
     connection.execute("insert into archive_exclusions values (?, 'shots', 2, 14, null)", (DEVICE,))
+    connection.execute("insert into meta values ('archiveKeepDeleted', '1')")
     connection.close()
 
 
@@ -150,6 +151,7 @@ async def main():
         assert await sql(store, "select generation, id from archive_traces") == [(0, 12)], "with its trace"
         assert "kept" not in [row[1] for row in await sql(store, "pragma table_info(archive_records)")]
         assert not await sql(store, "select name from sqlite_master where name = 'archive_exclusions'")
+        assert await store.meta("archiveKeepDeleted") is None, "the retired switch goes too"
         await store.close()
 
         # --- A newer schema is refused, never relabeled -----------------------------
