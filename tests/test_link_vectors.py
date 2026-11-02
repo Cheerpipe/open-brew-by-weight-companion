@@ -34,7 +34,7 @@ from companion import archive, index_mirror, mux, service  # noqa: E402
 from companion.service import Companion  # noqa: E402
 
 VECTORS = ROOT / "tests/fixtures/companion-records-v1.vectors.json"
-SHA256 = "bf6e49994641a7975933f8c4370012ab4b36023648433c8910776287c931a0f4"
+SHA256 = "32f382137e9148b27597c8ec212ea4e9dd37494e8d4ec924508415b0dcb7d105"
 DEVICE = "AA:BB:CC:DD:EE:FF"
 
 

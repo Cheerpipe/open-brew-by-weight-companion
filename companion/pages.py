@@ -21,7 +21,7 @@ COLUMNS = ("id,bootId,endedAtMs,hasWallTime,endedAtLocalSec,endedAtUnixSec,timez
            "extractionGuardEnabled,extractionExtended,slowExtractionGuardEnabled,slowExtractionExtended,"
            "stopDetail,cutLineG,arrivalS,verdict,channeling,scaleLossSource,estimatedG,blind,fastBeforeS,"
            "slowAfterS,fastMarginG,slowMarginG,delayS,wallS,fastRampS,slowRampS,fastCurve,slowCurve,"
-           "fastCurveHardness,slowCurveHardness,dripDelayS,actualWeightSource,rating,badReason")
+           "fastCurveHardness,slowCurveHardness,dripDelayS,actualWeightSource,rating,badReason,number")
 NAMES = COLUMNS.split(",")
 FRAME_BYTES = 8192  # kStatsStreamFrameBytes
 # Decimals each number is printed with (%.1f, %.2f, FixedText(ms, 3)); every other number is an integer.
