@@ -142,7 +142,6 @@
       archiveSyncing: "Copying from the controller…",
       archiveHoles: "Up to {n} records made while the companion was away could not be copied.",
       archiveOff: "The controller is not sending its records here: Shot archive in the companion is off in Admin → Companion.",
-      archiveOld: "This controller's firmware cannot send its records yet. Update it to keep every shot here.",
       archiveExport: "Export everything",
       archiveRestart: "The controller's {store} history restarted on {date}; {n} records kept here.",
       shot: "shot", activation: "activation",
@@ -333,7 +332,7 @@
     if (total && last) lines.push(fill(t.archiveDates, { first: day(first), last: day(last) }));
     if (a.syncing) lines.push(t.archiveSyncing);
     else if (a.syncedAt) lines.push(fill(t.archiveSynced, { when: new Date(a.syncedAt * 1000).toLocaleString() }));
-    if (s.paired && s.link === "open") lines.push(!a.available ? t.archiveOld : !a.on ? t.archiveOff : "");
+    if (s.paired && s.link === "open") lines.push(a.available && !a.on ? t.archiveOff : "");
     $("archive-stats").textContent = lines.filter(Boolean).join(" · ");
     $("archive-holes").hidden = !a.holes;
     $("archive-holes").textContent = fill(t.archiveHoles, { n: a.holes });

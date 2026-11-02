@@ -156,7 +156,7 @@ class Controller:
         if self.silent:
             request.transport.abort()
             return web.Response()
-        if not self.relay:  # Before that, the controller has no relay: the link opens as ever.
+        if not self.relay:  # Before that, the relay handshake fails: the link opens as ever.
             return web.json_response({"error": "UNAVAILABLE"}, status=503)
         return web.json_response({"challenge": crypto.b64(self.RELAY_CHALLENGE), "protocol": 1})
 
@@ -582,6 +582,7 @@ async def main():
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
             await session.quiet(0.2, skip=("ping", "lm"))
             await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
+            await session.send({"t": "hold", "on": False, "sync": False})  # A ping's answer: sync may flow.
             sub = await session.next("logsub", skip=("ping", "lm"))
             assert sub["on"] is True and sub["boot"] == 0 and sub["after"] == 0
             assert await companion.logs.meta("device") == "AA:BB:CC:DD:EE:FF", "the id is kept for a restart"
@@ -642,6 +643,7 @@ async def main():
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
             await session.quiet(0.2, skip=("ping", "lm"))
             await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
+            await session.send({"t": "hold", "on": False, "sync": False})  # A ping's answer: sync may flow.
             sub = await session.next("logsub", skip=("ping", "lm"))
             assert sub["boot"] == 7 and sub["after"] == 9
             # A cursor the controller could not resume (a boot id it reused) is

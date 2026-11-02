@@ -86,7 +86,7 @@ def index_answer(baselines, store, held, delta, epoch, rows):
 class Controller:
     def __init__(self, secret, companion_id):
         self.secret, self.companion_id = secret, companion_id
-        self.mode = "ok"  # ok, none (phase-1 firmware), forgotten, bad_erase, unknown, bad_proof
+        self.mode = "ok"  # ok, none (no relay route answers), forgotten, bad_erase, unknown, bad_proof
         self.ui, self.link = True, False
         self.rb, self.kr, self.kb, self.high, self.mask = os.urandom(16), None, None, 0, 0
         self.responses = 0

@@ -236,7 +236,7 @@ async def main():
             async with browser.get(base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}) as reply:
                 assert reply.status == 204
 
-            # --- A controller without the relay (phase 1): passthrough, the link always on -------------
+            # --- A failed relay handshake: passthrough, the link always on ----------------------------
             fake.mode = "none"
             assert await relay.handshake() == "passthrough" and relay.link is True
             fake.active = B

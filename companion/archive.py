@@ -14,14 +14,13 @@ owns the database).
 
 Rows are keyed by generation. A Clear count above the one stored is a Clear
 the user made: every generation of that store is deleted and the next one
-opens. Any other restarted controller history (a factory reset, or a Clear
-on firmware without `clr`: ids start again) deletes nothing: it closes the
+opens. Any other restarted controller history (a factory reset: ids start
+again) deletes nothing: it closes the
 generation, whose rows all stay as archive-only, and opens the next. The
 store generation and next record id only grow and fall back only on a
 restart, so a decrease of either is one, decided from the index before any
 page is written. When both may have overtaken their old values (a long
-absence) or the controller does not name them (older firmware), the
-fallback compares identities of fetched records (a shot is
+absence), the fallback compares identities of fetched records (a shot is
 `bootId:endedAtMs`, an activation every immutable field): the index's newest
 id below the last sync's oldest, or every id it shares with the archive
 another record, is a restart; one shared id that differs sets the old record
@@ -449,7 +448,7 @@ class Archive:
         self.companion = companion
         self.store = ArchiveStore(companion.logs)
         self.store.changed.append(self._user_changed)
-        self.available = False  # The controller's firmware has the archive (its cfg names the switch).
+        self.available = False  # The archive switch is known: from a cfg, or remembered from the last.
         self.on = False  # ...and the switch is on.
         self.notified = {}  # The epochs of the controller's last `rs`, per store.
         self.subscribed = False  # This session's rx went out.
@@ -650,17 +649,17 @@ class Archive:
         rows, new_epoch = index.get("rows"), index.get("epoch")
         if rows is None or type(new_epoch) is not int:
             return  # Unchanged since the epoch this archive holds.
-        named = [index.get("gen"), index.get("next")] + ([index["clr"]] if "clr" in index else [])
-        named = named if all(type(value) is int for value in named) else None
-        marked = set(index["gone"]) if isinstance(index.get("gone"), list) and all(
-            type(rid) is int for rid in index["gone"]) else set()
-        listed, order = dict(zip(rows[0::2], rows[1::2])), rows[0::2]
+        named, gone = [index.get("gen"), index.get("next"), index.get("clr")], index.get("gone")
+        if not all(type(value) is int for value in named) or not isinstance(gone, list) or not all(
+                type(rid) is int for rid in gone):
+            raise ValueError("a record index without its counters or deletions")
+        marked, listed, order = set(gone), dict(zip(rows[0::2], rows[1::2])), rows[0::2]
         # Exact, and decided before anything is written (an empty index included, so the counters
         # stored never fall back): a Clear count above the stored one is a Clear the user made (a
         # lower one only restarts the count: rolled-back firmware, a store it had to reset), and
         # otherwise either counter falling back is a restarted history.
-        cleared = bool(named and counters and len(named) > 2 and len(counters) > 2 and named[2] > counters[2])
-        restarted = cleared or bool(named and counters and (named[0] < counters[0] or named[1] < counters[1]))
+        cleared = bool(counters) and len(counters) > 2 and named[2] > counters[2]
+        restarted = cleared or bool(counters) and (named[0] < counters[0] or named[1] < counters[1])
         if not listed:  # Nothing to compare ids with: everything stays until the store records again.
             if restarted:
                 generation, oldest, previous = await self._restart(store, generation, named, revision,

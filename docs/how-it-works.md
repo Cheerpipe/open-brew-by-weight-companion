@@ -424,8 +424,8 @@ the controller closes the screens plainly, so they show the out-of-reach
 notice and reconnect. A screen that falls 1 MiB behind is closed with
 `4002` and reconnects quietly.
 
-**Passthrough and the switch.** Before pairing, or with a controller that
-has no relay route (older firmware), the service is a plain proxy: each
+**Passthrough and the switch.** Before pairing, or while the relay handshake
+fails, the service is a plain proxy: each
 browser gets its own session with the controller, one at a time, as without
 the companion, and the link stays on as before. While the controller has
 the Web UI through the companion turned off, `/api/` answers
@@ -445,11 +445,9 @@ single disk thread as the secrets).
   `cfg` turned the stream on and `dev` named the controller's id, with that
   id's newest stored `(boot, sequence)`. The id is kept in the database, so a
   restarted companion resumes from its cursor instead of asking for the whole
-  ring again, and its pages show the history before any link opens. With a
-  controller that has the archive (its `cfg` names `archive`), `logsub` and
-  the resync after a failed write leave only right after a frame that shows
-  no hold, like the archive's requests; an older controller gets them as
-  before.
+  ring again, and its pages show the history before any link opens. `logsub`
+  and the resync after a failed write leave only right after a frame that
+  shows no hold, like the archive's requests.
 - **Rows and marks.** Boots are numbered in the order they arrive, and
   events are keyed by `(device id, that number, sequence)`: the controller
   streams only its current boot, so arrival order is time order, and a boot
@@ -524,34 +522,33 @@ while the controller is off still reports it and answers the reads below.
   300 s is sent again. The epoch, the controller's oldest id and the ids it
   listed are adopted only once every listed record is stored.
 - **Index deltas.** The archive keeps its own in-memory copy of each store's
-  index (every shot, bad ones included). Once an index
-  answer in the current link session carried `sum`, an `rx` from the epoch
-  that copy holds adds `d:1`, and the controller may answer with only the
+  index (every shot, bad ones included). Every listed index answer carries
+  `sum`; once the current link session answered with one, an `rx` from the
+  epoch that copy holds adds `d:1`, and the controller may answer with only the
   difference; the copy rebuilds the whole index, checks it against `sum` and
   the sync runs on it exactly as on a whole index. A difference that does
   not check out is logged and the whole index is asked once (`ep` 0, no `d`);
   a whole index that still does not check out stops that pass until the next
   notice. A new link session or a companion restart starts again from a
-  whole index, and an older controller never gets `d`.
+  whole index.
 - **Generations.** Rows are keyed `(device, store, generation, id)`. The
   index names the store's write counter, next record id and the user's Clear
-  count (`gen`, `next`, `clr`). A `clr` above the one kept per store is a
+  count (`gen`, `next`, `clr`); an index without them or without `gone` is
+  malformed and stops the pass. A `clr` above the one kept per store is a
   Clear the user made: every generation of that store is deleted, with its
   traces and holes, and the next opens; a lower one deletes nothing and is
   kept as the new baseline. Otherwise `gen` and `next` only grow and fall back
-  only on a restarted history (a factory reset, or a Clear on firmware
-  without `clr`), so a decrease of either is a restart, decided before any
+  only on a restarted history (a factory reset), so a decrease of either is
+  a restart, decided before any
   page is written. When both may have overtaken their old
-  values (a long absence) or the controller names neither (older firmware),
-  identities decide: the index's newest id below the last complete sync's
+  values (a long absence), identities decide: the index's newest id below the last complete sync's
   oldest, or every id it shares with the archive another record (all shared
   ids are fetched before deciding), is a restart; when only some differ, the
   old record is set aside in generation 0 or below (archive-only) instead of
   being overwritten, and that pass mirrors no deletion. A restart deletes
   nothing: it closes the generation (all its rows become archive-only) and
   opens the next one, noting when. An empty index restarts the generation
-  only when a counter fell back; otherwise (or from older firmware) it
-  changes nothing. Pairing the same controller again reattaches to its rows,
+  only when a counter fell back; otherwise it changes nothing. Pairing the same controller again reattaches to its rows,
   and erasing a pairing the controller no longer recognizes keeps them. A
   change the user makes during a pass makes it start again from the index.
 - **Identity and deletions.** A shot is `bootId:endedAtMs`, an activation

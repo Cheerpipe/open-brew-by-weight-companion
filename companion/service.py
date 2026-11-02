@@ -317,10 +317,10 @@ class Companion:
     def post_sync(self, frame, key):
         """A sync request (S17): sent only right after a controller frame that showed no hold, so none
         crosses Wi-Fi during a shot; otherwise it waits (one per `key`, the newest) for the next such
-        frame. A controller without the archive (older firmware, whose pings get no reply) is not held."""
+        frame."""
         if self.outbox is None:
             return False
-        if not self.archive.available or (self.clear_at is not None and time.monotonic() - self.clear_at < CLEAR_S):
+        if self.clear_at is not None and time.monotonic() - self.clear_at < CLEAR_S:
             return self.post(frame)
         self.sync_due[key] = frame
         return True

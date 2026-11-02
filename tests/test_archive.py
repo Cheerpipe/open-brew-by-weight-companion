@@ -81,19 +81,17 @@ class Controller:
         self.next = {"shots": 1, "history": 1}
         self.epochs = {"shots": 11, "history": 21}
         self.gen = {"shots": 1, "history": 1}  # The store header's write counter: Clear keeps it.
-        self.counters = True  # False: an older firmware that names neither counter.
-        # D8: the user's Clear count and newest deleted ids; `marks` False is a firmware that names neither,
-        # where a Clear reads as a restarted history.
-        self.clears, self.gone, self.marks = {"shots": 0, "history": 0}, {"shots": [], "history": []}, False
+        # D8: the user's Clear count and newest deleted ids.
+        self.clears, self.gone = {"shots": 0, "history": 0}, {"shots": [], "history": []}
         self.traces = {}  # shot id -> bytes, None (no trace) or "busy"
         self.requests = []
         self.ignore = 0  # Index requests left unanswered (a lost frame).
         self.held = None  # A list while a hold keeps the requests back (and the pings unanswered).
         self.hold_next = False  # A hold starts right after the next index answer.
         self.hold_page = False  # ...or right after the next page.
-        # A firmware with index deltas (`sum`, `d`): the link session's baselines, and the field the
-        # next delta answer corrupts.
-        self.deltas, self.baselines, self.tamper = False, {}, None
+        # Index deltas (`sum`, `d`): the link session's baselines, and the field the next delta answer
+        # corrupts.
+        self.baselines, self.tamper = {}, None
 
     def moved(self, store):
         self.epochs[store] += 1
@@ -192,20 +190,15 @@ class Controller:
             if self.ignore:
                 self.ignore -= 1
                 return
-            store, f = frame["s"], {"v": 1, "type": "records", "boot": self.boot, "store": frame["s"],
-                                    "epoch": self.epochs[frame["s"]]}
-            if self.counters:
-                f.update(gen=self.gen[store], next=self.next[store])
-            if self.marks:
-                f.update(clr=self.clears[store], gone=self.gone[store])
+            store = frame["s"]
+            f = {"v": 1, "type": "records", "boot": self.boot, "store": store, "epoch": self.epochs[store],
+                 "gen": self.gen[store],
+                 "next": self.next[store], "clr": self.clears[store], "gone": self.gone[store]}
             rows = [value for rid in self.newest_first(store) for value in (rid, self.rev(store, rid))]
-            if self.deltas:
-                f.update(index_answer(self.baselines, store, frame["ep"], frame.get("d"), f["epoch"], rows))
-                if "base" in f and self.tamper:
-                    f[self.tamper] ^= 1
-                    self.tamper = None
-            elif frame["ep"] != self.epochs[store]:
-                f["rows"] = rows
+            f.update(index_answer(self.baselines, store, frame["ep"], frame.get("d"), f["epoch"], rows))
+            if "base" in f and self.tamper:
+                f[self.tamper] ^= 1
+                self.tamper = None
             await companion._on_frame({"t": "rec", "f": f})
             if self.hold_next:  # A scaled shot starts: the controller tells the companion at once.
                 self.hold_next, self.held = False, []
@@ -462,14 +455,6 @@ async def main():
             def said(text):
                 return sum(text in line for line in lines.lines)
 
-            # --- An older controller: no `archive` in cfg, nothing asked, shown unavailable --
-            companion.outbox = outbox = asyncio.Queue()
-            await companion._on_frame({"t": "dev", "name": "Kitchen", "id": DEVICE})
-            await companion._on_frame({"t": "cfg", "ui": True, "log": False})
-            assert not any(outbox.get_nowait()["t"] in ("rx", "rf", "rt") for _ in range(outbox.qsize()))
-            assert (await companion.status())["archive"]["available"] is False
-            companion.outbox = None
-
             # --- Backfill after pairing: bad shots, traces ok / none / still saving -------
             for n in range(30):
                 fake.add_shot(bad="short" if n % 7 == 3 else None, trace=None if n == 5 else b"T")
@@ -651,9 +636,9 @@ async def main():
             async with http.post(base + "/rate", data="{}", headers=session) as reply:
                 assert reply.status == 415
 
-            # --- Clear on a firmware that names no Clear count: the generation closes, nothing goes (S4) --
+            # --- A restarted history (the Clear count unchanged): the generation closes, nothing goes (S4) --
             before = await ids(companion, "shots")
-            fake.clear("shots")
+            fake.clear("shots", user=False)
             for _ in range(5):
                 fake.add_shot()
             await fake.notice(companion)
@@ -672,7 +657,7 @@ async def main():
 
             # --- Activations: the controller's id counter fell back (S19) ---------------
             link_.close()
-            fake.clear("history")
+            fake.clear("history", user=False)
             for n in range(8):
                 fake.add_activation(clock=False, duration=20.0 + n)
             await link_.open()
@@ -681,35 +666,14 @@ async def main():
             assert await ids(companion, "history", 2) == set(range(1, 9))
             assert said("activation history restarted") == 1
 
-            # --- An older firmware: every shared id another record, without a clock (S2) --
-            fake.counters = False
-            fake.clear("history")
-            for n in range(8):
-                fake.add_activation(clock=False, duration=40.0 + n)
-            await fake.notice(companion)
-            await settled(companion)
-            assert await ids(companion, "history", 2) == set(range(1, 9)) == await ids(companion, "history", 3)
-            assert said("activation history restarted") == 2, "every immutable field tells clockless records apart"
-            assert (await row(companion, "history", 1, 3))["durationS"] == 40.0
-            assert (await row(companion, "history", 1, 2))["durationS"] == 20.0
-            fake.counters = True
-
-            # --- An older firmware's empty index after a clear keeps everything ----------
-            fake.counters = False
-            fake.clear("history")
-            await fake.notice(companion)
-            await settled(companion)
-            assert await ids(companion, "history", 3) == set(range(1, 9)) and said("activation history restarted") == 2
-            fake.counters = True
-
-            # --- A lost answer is asked again; the first new record closes the generation --
+            # --- A lost answer is asked again --------------------------------------------
             fake.ignore = 1
             fake.add_activation()
             await fake.notice(companion)
             await asyncio.sleep(0.8)
             await settled(companion)
             assert said("did not answer the archive's rx") >= 1
-            assert await ids(companion, "history", 4) == {1} and await ids(companion, "history", 3) == set(range(1, 9))
+            assert await ids(companion, "history", 2) == set(range(1, 10))
 
             # --- The link closes mid-sync: nothing doubled, the epoch waits -------------
             for _ in range(6):
@@ -857,7 +821,7 @@ async def main():
             # --- One history (S9, S12): the controller's filters and orders, ties included --
             await parity(companion, get)
 
-            # --- The log asks only outside a hold too; an older controller as before --
+            # --- The log asks only outside a hold too ----------------------------------------
             link_.close()
             fake.held = []  # A shot is on when the link opens: no ping is answered.
             seen = len(fake.requests)
@@ -875,12 +839,6 @@ async def main():
             await fake.release(companion)
             await asyncio.sleep(0.2)
             assert [f["t"] for f in fake.requests[seen:]].count("logsub") == 2
-            link_.close()
-            fake.held = []  # An older controller never answers a ping: its logsub goes as it always did.
-            seen = len(fake.requests)
-            await link_.open(cfg={"t": "cfg", "ui": True, "log": True})
-            await asyncio.sleep(0.1)
-            assert [f["t"] for f in fake.requests[seen:]] == ["logsub"], fake.requests[seen:]
             fake.held = None
 
             # --- Forget erases it all --------------------------------------------------------
@@ -908,7 +866,7 @@ async def main():
 
             # --- A counter decrease restarts before any page; the pass breaks off --------
             archive.FETCH_MAX["shots"] = 2
-            fake.clear("shots")
+            fake.clear("shots", user=False)
             fake.boot = 9
             for _ in range(3):
                 fake.add_shot()
@@ -950,7 +908,7 @@ async def main():
 
             # --- A long absence: both counters overtook; identities decide (fallback) ----
             link_.close()
-            fake.clear("shots")
+            fake.clear("shots", user=False)
             fake.boot = 10
             for _ in range(10):
                 fake.add_shot()
@@ -959,12 +917,12 @@ async def main():
             assert await ids(companion, "shots", 2) == {1, 2, 4} and await ids(companion, "shots", 3) == set(range(1, 11))
             assert said("restarted") == restarts + 2
 
-            # --- A clockless clear with an identical record: the counters still see it ---
+            # --- A clockless restart with an identical record: the counters still see it ---
             for _ in range(2):
                 fake.add_activation(clock=False, duration=20.0)
             await fake.notice(companion)
             await settled(companion)
-            fake.clear("history")
+            fake.clear("history", user=False)
             fake.add_activation(clock=False, duration=20.0)  # Identical to the cleared activation 1.
             await fake.notice(companion)
             await settled(companion)
@@ -976,7 +934,7 @@ async def main():
             await fake.notice(companion)
             await settled(companion)
             before = await ids(companion, "history", opened)
-            fake.clear("history")
+            fake.clear("history", user=False)
             await fake.notice(companion)
             await settled(companion)
             assert (await companion.archive.store.sync_state(DEVICE, "history"))[0] == opened + 1, \
@@ -987,10 +945,8 @@ async def main():
             assert await ids(companion, "history", opened) == before and len(before) > 1, "nothing deleted"
             assert await ids(companion, "history", opened + 1) == {1}
 
-            # --- Index deltas: `d` only after a `sum` in this link session, every answer checked ---------
-            assert not any("d" in frame for frame in fake.requests), "a firmware without `sum` never sees `d`"
+            # --- Index deltas: `d` only after a listed answer in this link session, every answer checked ---
             link_.close()
-            fake.deltas = True
             await link_.open()
             await settled(companion)
 
@@ -1045,7 +1001,6 @@ async def main():
             assert await change("new") == ([(before, None)], ["rows"])
             before = fake.epochs["shots"]
             assert await change("rating") == ([(before, 1)], ["delta"])
-            fake.deltas = False
 
             # --- The page's erase keeps the log history and the archive (review C2) -------
             kept = await sql(companion, "select count(*) from archive_records")
@@ -1060,7 +1015,6 @@ async def main():
             link_.close()
             await companion.erase("forgotten for the deletion marks")
             fake = Controller(capacity=10)
-            fake.marks = True
             link_ = Link(companion, fake)
             for _ in range(12):  # 1 and 2 rotate out before the companion copies anything.
                 fake.add_shot()

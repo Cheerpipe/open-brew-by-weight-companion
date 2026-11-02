@@ -181,7 +181,7 @@ async def main():
             # The same delta against another copy, or with another sum, rebuilds nothing.
             full, delta = (controller.frames(name)[0]["f"] for name in ("index_shots", "index_shots_delta"))
             mirror = index_mirror.IndexMirror("test index")
-            assert mirror.apply(full)["rows"] == full["rows"] and mirror.supported
+            assert mirror.apply(full)["rows"] == full["rows"] and mirror.answered
             assert mirror.apply({**delta, "sum": delta["sum"] ^ 1}) is None and mirror.pairs is None
             mirror.apply(full)
             assert mirror.apply({**delta, "base": 7000}) is None and not mirror.delta(7001)

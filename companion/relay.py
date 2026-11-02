@@ -6,8 +6,8 @@ Kr (signing) and Kb (sealing) from it. Each request then carries
 `X-OBBW-Relay: 2 <q> <addr> <screen> <mac>`, its body and credential headers
 sealed with AES-256-GCM under Kb (protocol 2): no password, session token or
 sign-in body crosses the hop in the clear. Without a relay session (not
-paired, a controller without the relay route, or one that turned the Web UI
-through the companion off) the companion forwards as a plain proxy
+paired, a failed handshake, or a controller that turned the Web UI through
+the companion off) the companion forwards as a plain proxy
 (passthrough) or refuses (disabled).
 """
 
@@ -116,10 +116,9 @@ class Relay:
         if status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED":
             await self._prove(url, pairing["secret"], bytes(16))  # Only to learn whether it forgot us.
         elif status != 200 or reply.get("protocol") != PROTOCOL:
-            self.reset(True)  # A controller without the relay: everything as before, link included.
-            self._note("the controller has no relay; the Web UI passes straight through, one screen at a time"
-                       if status in (200, 404) else
-                       f"the relay handshake answered HTTP {status}; the Web UI passes straight through")
+            self.reset(True)
+            self._note(f"the relay handshake answered HTTP {status} with protocol {reply.get('protocol')!r}; "
+                       "the Web UI passes straight through, one screen at a time")
         else:
             await self._prove(url, pairing["secret"], crypto.unb64(reply.get("challenge"), 16))
 
