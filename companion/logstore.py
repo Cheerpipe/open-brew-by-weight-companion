@@ -18,6 +18,9 @@ log's own tables, never the archive's beside them.
 This module owns the database: it opens it, migrates it, backs it up, erases
 it and closes it. Schema 3 adds the shot and activation archive's tables,
 whose queries live in archive.py on this same connection and disk thread.
+Schema 4 indexes events by wall time and subsystem, so a page can start at a
+moment and filters page through the history, and drops what the archive no
+longer keeps (records kept after deletion, exclusions).
 """
 
 import asyncio
@@ -26,7 +29,7 @@ import time
 
 from .store import offload
 
-SCHEMA = 3
+SCHEMA = 4
 PRUNE_ROUNDS = 3  # Proportional trims to the size budget, each measured once (dbstat walks the tables).
 GRANT_DAYS = 90  # A Web UI session the controller accepted stays usable this long unseen.
 FORMAT, EXPORT_VERSION = "openbrewbyweight-companion-log", 2
@@ -70,21 +73,17 @@ V1_TO_V2 = """
 """
 LOG_TABLES = ("log_boots", "log_events", "log_marks")
 RENAME = "".join(f"alter table {table}_v2 rename to {table};" for table in LOG_TABLES)
-# Version 3: the archive. Rows are keyed by generation: a restarted
-# controller history (Clear, a factory reset) closes one and opens the next,
-# so nothing it held is ever deleted by inference; generations 0 and below
-# hold records set aside when a replacement was ambiguous. Records keep the
-# row the Web UI rebuilds (`body`), whether the user kept it (`kept`) and
-# their wall-clock end (`ended_at`, 0 without one); a trace row without data
-# says the shot has none; `listed` is the last complete index's ids and
-# `counters` the controller's store generation and next record id it named;
-# an exclusion stops a record removed from the archive alone from being
-# copied again while the controller may hold it, and keeps the fields the
-# whole-history Stats header still counts it by (`body`).
+# The archive (version 3). Rows are keyed by generation: a factory reset (or
+# a Clear on a controller that does not say which it was) closes one and opens
+# the next; generations 0 and below hold records set aside when a replacement
+# was ambiguous. Records keep the row the Web UI rebuilds (`body`) and their
+# wall-clock end (`ended_at`, 0 without one); a trace row without data says
+# the shot has none; `listed` is the last complete index's ids and `counters`
+# the controller's store generation, next record id and Clear count it named.
 ARCHIVE = """
     create table archive_records (device_id text not null, store text not null,
         generation integer not null, id integer not null, ident text not null, rev integer not null,
-        kind text not null, bad integer not null, kept integer not null, ended_at integer not null,
+        kind text not null, bad integer not null, ended_at integer not null,
         body text not null, unique (device_id, store, generation, id));
     create table archive_traces (device_id text not null, generation integer not null,
         id integer not null, boot_id integer not null, ended_ms integer not null, data blob,
@@ -96,16 +95,44 @@ ARCHIVE = """
         generation integer not null, below integer not null, above integer not null,
         count integer not null, noted real not null,
         primary key (device_id, store, generation, below)) without rowid;
-    create table archive_exclusions (device_id text not null, store text not null,
-        generation integer not null, id integer not null, body text,
-        primary key (device_id, store, generation, id));
 """
-ARCHIVE_TABLES = ("archive_records", "archive_traces", "archive_sync", "archive_holes", "archive_exclusions")
+ARCHIVE_TABLES = ("archive_records", "archive_traces", "archive_sync", "archive_holes")
+# Version 4: pages start at a wall time and filter by subsystem through these
+# indexes (a WITHOUT ROWID index carries the key, so both keep the event
+# order). Records the user kept after deleting them on the controller become
+# ordinary archive-only rows: those of the open generation the controller may
+# still list are set aside (a generation below every one holding that id),
+# the others only lose the flag. Exclusions go: the archive deletes only what
+# it alone holds now, and what one kept out is copied again while the
+# controller still holds it.
+LOG_INDEXES = """
+    create index log_events_wall on log_events (device_id, wall_sec);
+    create index log_events_category on log_events (device_id, category);
+"""
+KEPT_OPEN = """kept = 1 and generation = (select coalesce(max(s.generation), 1) from archive_sync s
+        where s.device_id = archive_records.device_id and s.store = archive_records.store)
+    and not exists (select 1 from archive_sync s where s.device_id = archive_records.device_id
+        and s.store = archive_records.store and s.generation = archive_records.generation
+        and s.oldest is not null and archive_records.id < s.oldest)"""
+ASIDE = """(select min(min(o.generation), 1) - 1 from archive_records o where o.device_id = {row}.device_id
+        and o.store = {store} and o.id = {row}.id)"""
+V3_TO_V4 = f"""
+    update archive_traces set generation = {ASIDE.format(row="archive_traces", store="'shots'")}
+        where exists (select 1 from archive_records where archive_records.device_id = archive_traces.device_id
+            and archive_records.store = 'shots' and archive_records.generation = archive_traces.generation
+            and archive_records.id = archive_traces.id and {KEPT_OPEN});
+    update archive_records set generation = {ASIDE.format(row="archive_records", store="archive_records.store")}
+        where {KEPT_OPEN};
+    alter table archive_records drop column kept;
+    drop table archive_exclusions;
+"""
 
 
 def table_bytes(connection, tables):
     """The pages these tables and their indexes use, whatever else shares the file."""
-    names = list(tables) + [f"sqlite_autoindex_{table}_1" for table in tables]
+    names = list(tables) + [row[0] for row in connection.execute(
+        f"select name from sqlite_master where type = 'index' and tbl_name in ({','.join('?' * len(tables))})",
+        list(tables))]
     return connection.execute(f"select coalesce(sum(pgsize), 0) from dbstat where aggregate = 1 and name in "
                               f"({','.join('?' * len(names))})", names).fetchone()[0]
 
@@ -136,7 +163,8 @@ class LogStore:
             raise sqlite3.DatabaseError(f"its schema {version} is newer than this companion's {SCHEMA}")
         if version < SCHEMA:
             log = TABLES + (V1_TO_V2 if version == 1 else "") + RENAME if version < 2 else ""
-            connection.executescript(f"begin;{log}{ARCHIVE}pragma user_version = {SCHEMA}; commit;")
+            archive = V3_TO_V4 if version == 3 else ARCHIVE
+            connection.executescript(f"begin;{log}{archive}{LOG_INDEXES}pragma user_version = {SCHEMA}; commit;")
         self.connection = connection
 
     async def close(self):
@@ -206,68 +234,117 @@ class LogStore:
         return {row["ordinal"]: row["boot_id"] for row in
                 self.connection.execute("select ordinal, boot_id from log_boots where device_id = ?", (device,))}
 
-    def _marks(self, device, rows):
-        """The markers anchored to these rows, keyed by (ordinal, sequence)."""
-        if not rows:
-            return {}
-        keys = [(row["ordinal"], row["sequence"]) for row in rows]
-        marks = {}
-        for mark in self.connection.execute(
-                "select * from log_marks where device_id = ? and (ordinal, sequence) between (?, ?) and (?, ?) "
-                "order by kind", (device, *min(keys), *max(keys))):
-            marks.setdefault((mark["ordinal"], mark["sequence"]), []).append(
-                {"g": "gap", "count": mark["count"]} if mark["kind"] == "gap" else {"g": "reset"})
-        return marks
+    def _marks(self, device, low, high):
+        """The markers anchored in [low, high), newest first, as ((ordinal, sequence), entry)."""
+        return [((mark["ordinal"], mark["sequence"]),
+                 {"g": "gap", "count": mark["count"]} if mark["kind"] == "gap" else {"g": "reset"})
+                for mark in self.connection.execute(
+                    "select * from log_marks where device_id = ? and (ordinal, sequence) >= (?, ?) "
+                    "and (ordinal, sequence) < (?, ?) order by ordinal desc, sequence desc, kind",
+                    (device, *low, *high))]
 
-    async def page(self, device, before_ordinal, before_sequence, limit):
+    def _at(self, device, wall, newest):
+        """The newest event at or before `wall` (`newest`), or the oldest at or after it: its
+        (ordinal, sequence), or None. Events without a synced clock keep their place by order."""
+        row = self.connection.execute(
+            "select ordinal, sequence from log_events where device_id = ? and wall_sec != 0 and wall_sec "
+            + ("<= ? order by wall_sec desc, ordinal desc, sequence desc" if newest else
+               ">= ? order by wall_sec, ordinal, sequence") + " limit 1", (device, wall)).fetchone()
+        return (row["ordinal"], row["sequence"]) if row else None
+
+    async def page(self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None):
         """One page of the history, newest first, with its markers.
 
         Returns (entries, next, has_more): `next` is the opaque (ordinal,
-        sequence) the following page continues from, None at the end. Each
-        marker sits where it belongs in time: a gap or reset right below
+        sequence) the following page continues from, None at the end. `levels`
+        and `category` keep only matching events, so every page holds them;
+        `at` (wall seconds, first page only) starts at the newest event at or
+        before that moment. Each marker sits where it belongs in time, whether
+        or not the event it is anchored to matches: a gap or reset right below
         (older than) the event that follows it, and a restart between two
         boots, naming the newer.
         """
-        return await offload(self._page, device, before_ordinal, before_sequence, limit)
+        return await offload(self._page, device, before_ordinal, before_sequence, limit, levels, category, at)
 
-    def _page(self, device, before_ordinal, before_sequence, limit):
-        rows = self.connection.execute(
-            "select * from log_events where device_id = ? and (ordinal, sequence) < (?, ?) "
-            "order by ordinal desc, sequence desc limit ?",
-            (device, before_ordinal, before_sequence, limit + 1)).fetchall()
+    def _page(self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None):
+        first = before_sequence >= FIRST_PAGE
+        if at is not None and first:
+            start = self._at(device, at, True)
+            if start is None:
+                return [], None, False
+            before_ordinal, before_sequence = start[0], start[1] + 1
+        where, args = "device_id = ? and (ordinal, sequence) < (?, ?)", [device, before_ordinal, before_sequence]
+        if levels is not None:
+            where += f" and level in ({','.join('?' * len(levels))})"
+            args += list(levels)
+        if category is not None:
+            where += " and category = ?"
+            args.append(category)
+        rows = self.connection.execute(f"select * from log_events where {where} "
+                                       "order by ordinal desc, sequence desc limit ?", args + [limit + 1]).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
-        marks, boots = self._marks(device, rows), self._boots(device)
-        entries, newer = [], None if before_sequence >= FIRST_PAGE else before_ordinal
-        for row in rows:
-            if newer is not None and row["ordinal"] != newer:
-                entries.append({"g": "boot", "boot": boots.get(newer)})
-            entries.append(_entry(row))
-            entries.extend(marks.get((row["ordinal"], row["sequence"]), ()))
-            newer = row["ordinal"]
-        following = (rows[-1]["ordinal"], rows[-1]["sequence"]) if rows else None
-        return entries, (following if has_more else None), has_more
+        if not rows:
+            return [], None, False
+        last = (rows[-1]["ordinal"], rows[-1]["sequence"])
+        marks, boots = self._marks(device, last if has_more else (-1, -1), (before_ordinal, before_sequence)), \
+            self._boots(device)
+        entries, newer = [], None if first else before_ordinal
 
-    async def chunk(self, device, after_ordinal, after_sequence, limit=1000):
-        """The next oldest-first chunk of a streaming export, markers in place.
+        def flush(key):  # The markers newer than `key`.
+            while marks and marks[0][0] > key:
+                entries.append(marks.pop(0)[1])
+        for row in rows:
+            key = (row["ordinal"], row["sequence"])
+            for ordinal in range(newer, key[0], -1) if newer is not None else ():
+                flush((ordinal, -1))
+                if ordinal in boots:
+                    entries.append({"g": "boot", "boot": boots[ordinal]})
+            flush(key)
+            entries.append(_entry(row))
+            flush((key[0], key[1] - 1))
+            newer = key[0]
+        if not has_more:
+            flush((-1, -1))
+        return entries, (last if has_more else None), has_more
+
+    async def bounds(self, device, since, until):
+        """The export range for wall times `since`/`until` (either None: open) as (after, through)
+        cursors, or None when no event falls in it."""
+        def read():
+            low = (0, 0) if since is None else self._at(device, since, False)
+            high = (FIRST_PAGE, FIRST_PAGE) if until is None else self._at(device, until, True)
+            if low is None or high is None or low > high:
+                return None
+            return (low[0], low[1] - 1) if since is not None else low, high
+        return await offload(read)
+
+    async def chunk(self, device, after_ordinal, after_sequence, limit=1000, through=(FIRST_PAGE, FIRST_PAGE)):
+        """The next oldest-first chunk of a streaming export, markers in place, up to `through`.
 
         Returns (entries, cursor): the cursor continues the next chunk, None at the end.
         """
-        return await offload(self._chunk, device, after_ordinal, after_sequence, limit)
+        return await offload(self._chunk, device, after_ordinal, after_sequence, limit, through)
 
-    def _chunk(self, device, after_ordinal, after_sequence, limit):
+    def _chunk(self, device, after_ordinal, after_sequence, limit, through=(FIRST_PAGE, FIRST_PAGE)):
         rows = self.connection.execute(
             "select * from log_events where device_id = ? and (ordinal, sequence) > (?, ?) "
-            "order by ordinal asc, sequence asc limit ?",
-            (device, after_ordinal, after_sequence, limit)).fetchall()
-        marks, entries, older = self._marks(device, rows), [], after_ordinal if after_sequence else None
+            "and (ordinal, sequence) <= (?, ?) order by ordinal asc, sequence asc limit ?",
+            (device, after_ordinal, after_sequence, *through, limit)).fetchall()
+        if not rows:
+            return [], None
+        marks = {}
+        for key, entry in self._marks(device, (rows[0]["ordinal"], rows[0]["sequence"]),
+                                      (rows[-1]["ordinal"], rows[-1]["sequence"] + 1)):
+            marks.setdefault(key, []).append(entry)
+        entries, older = [], after_ordinal if after_sequence else None
         for row in rows:
             if older is not None and row["ordinal"] != older:
                 entries.append({"g": "boot", "boot": row["boot_id"]})
             entries.extend(marks.get((row["ordinal"], row["sequence"]), ()))
             entries.append(_entry(row))
             older = row["ordinal"]
-        return entries, ((rows[-1]["ordinal"], rows[-1]["sequence"]) if rows else None)
+        return entries, (rows[-1]["ordinal"], rows[-1]["sequence"])
 
     # --- Access --------------------------------------------------------------
     async def grants(self):

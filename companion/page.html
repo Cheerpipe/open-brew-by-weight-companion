@@ -72,7 +72,6 @@
     <p id="log-note" class="status warn" hidden></p>
     <pre id="log-view" style="max-height:24rem;overflow:auto;margin:0;font-size:.85em"></pre>
     <button id="log-more" type="button" hidden></button>
-    <button id="log-delete" type="button" hidden></button>
   </section>
 
   <section class="card">
@@ -81,15 +80,8 @@
     <p id="archive-holes" class="status warn" hidden></p>
     <p id="archive-note" class="status warn" hidden></p>
     <ul id="archive-restarts" class="muted"></ul>
-    <p><label><input type="checkbox" id="archive-keep"> <span id="archive-keep-label"></span></label><br>
-      <small id="archive-keep-hint" class="muted"></small></p>
     <p><a id="archive-export" href="#" hidden></a></p>
-    <p id="archive-bulk" hidden>
-      <label for="archive-scope" id="archive-scope-label"></label>
-      <select id="archive-scope"></select>
-      <span id="archive-range" hidden><input type="date" id="archive-from"> – <input type="date" id="archive-to"></span>
-      <button id="archive-delete" type="button"></button>
-    </p>
+    <p id="deleting" class="muted"></p>
   </section>
 </main>
 <footer>
@@ -135,8 +127,6 @@
       logTitle: "Diagnostic log", logEmpty: "Nothing stored yet",
       logStats: "{n} events · {mb} of {budget} MB · kept {days} days",
       logMore: "Show older", logExport: "Export everything",
-      logDelete: "Delete the log history",
-      logDeleteConfirm: "Delete the whole diagnostic log history kept on this companion? The controller keeps its own recent log.",
       logLevelC: "Critical", logLevelE: "Error", logLevelW: "Warning",
       logLevelI: "Info", logLevelD: "Debug",
       logLevelHint: "This severity and above",
@@ -153,26 +143,15 @@
       archiveHoles: "Up to {n} records made while the companion was away could not be copied.",
       archiveOff: "The controller is not sending its records here: Shot archive in the companion is off in Admin → Companion.",
       archiveOld: "This controller's firmware cannot send its records yet. Update it to keep every shot here.",
-      archiveExport: "Export everything", archiveDelete: "Delete",
+      archiveExport: "Export everything",
       archiveRestart: "The controller's {store} history restarted on {date}; {n} records kept here.",
       shot: "shot", activation: "activation",
-      archiveKeep: "Keep records deleted on the controller",
-      archiveKeepHint: "When a shot or activation is deleted in the Web UI opened directly on the controller, this companion keeps its copy.",
-      archiveScope: "Delete from the archive: ", scopeAll: "Everything", scopeShots: "All shots",
-      scopeHistory: "All activations", scopeRange: "Shots and activations from a date range",
-      archiveDeleteConfirm: "Delete {what} from this companion? Export everything first if you may want them back: records the controller no longer keeps cannot be recovered.",
-      archiveAllConfirm: "Delete every shot and activation kept on this companion? Export everything first if you may want them back: records the controller no longer keeps cannot be recovered, and the ones it still keeps are copied again.",
-      archiveRangeMissing: "Choose both dates first. Records without a date (made before the controller knew the time) are never part of a range.",
-      archiveAuth: "Sign in to the Web UI through this companion to export or delete the archive.",
+      archiveAuth: "Sign in to the Web UI through this companion to export the archive.",
       archiveController: "Turn the controller on so it can confirm your sign-in, then try again.",
       archiveStore: "The archive cannot be read right now. The companion's log says why.",
-      archiveHttps: "Open this page over HTTPS to export or delete the archive.",
-      archiveFailed: "The archive could not be changed. Try again.",
-      archiveFrom: "From", archiveTo: "To",
-      generationNow: "Current {store} history · {count} records",
-      generationUntil: "{Store} history until {date} · {count} records",
-      generationEarlier: "Earlier {store} history · {count} records",
-      generationAside: "Replaced {store} records · {count}"
+      archiveHttps: "Open this page over HTTPS to export the archive.",
+      archiveFailed: "The archive could not be exported. Try again.",
+      deleting: "To delete shots, activations or the log history, unlock Admin in the Web UI: delete one record from Stats or History, clear a whole list in Admin, and delete the log history in Diagnostic through this companion. What you delete there goes from here too."
     }
   };
   var t = T.en;
@@ -255,7 +234,6 @@
   $("log-title").textContent = t.logTitle;
   $("log-more").textContent = t.logMore;
   $("log-export").textContent = t.logExport;
-  $("log-delete").textContent = t.logDelete;
   ["c", "e", "w", "i", "d"].forEach(function (level, i) {
     $("log-level").options[i].text = t["logLevel" + level.toUpperCase()];
   });
@@ -310,7 +288,7 @@
       logBusy = false;
       $("log-note").hidden = true;
       $("log-more").hidden = !page.next;
-      $("log-export").hidden = $("log-delete").hidden = !logEntries.length;
+      $("log-export").hidden = !logEntries.length;
       renderLog();
     }, logRefused);
   }
@@ -332,15 +310,11 @@
     event.preventDefault();
     download("/__companion/log/export", "obbw-log.json", logRefused);
   });
-  $("log-delete").addEventListener("click", function () {
-    if (!confirm(t.logDeleteConfirm)) return;
-    logFetch("/__companion/log/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-      .then(function () { logRows = null; logPage(true); }, logRefused);
-  });
-  // The shot archive: what the companion keeps, its export and Delete all.
+  // The shot archive: what the companion keeps and its export. Deleting is the
+  // Web UI's, with Admin unlocked: this companion only follows.
   $("archive-title").textContent = t.archiveTitle;
   $("archive-export").textContent = t.archiveExport;
-  $("archive-delete").textContent = t.archiveDelete;
+  $("deleting").textContent = t.deleting;
   function archiveRefused(body) {
     var note = body && body.error === "AUTH_REQUIRED" ? t.archiveAuth : body && body.error === "HTTPS_REQUIRED" ? t.archiveHttps
       : body && body.error === "CONTROLLER_UNREACHABLE" ? t.archiveController
@@ -363,77 +337,27 @@
     $("archive-stats").textContent = lines.filter(Boolean).join(" · ");
     $("archive-holes").hidden = !a.holes;
     $("archive-holes").textContent = fill(t.archiveHoles, { n: a.holes });
-    $("archive-export").hidden = $("archive-bulk").hidden = !total;
-    $("archive-keep").checked = !!a.keepDeleted;
-    $("archive-keep").disabled = !s.paired || a.keepDeleted === undefined;
-    renderBulk(a);
+    $("archive-export").hidden = !total;
+    renderRestarts(a);
   }
   $("archive-export").addEventListener("click", function (event) {
     event.preventDefault();
     download("/__companion/archive/export", "obbw-archive.json", archiveRefused);
   });
-  // The keep setting and the bulk deletes: each confirmed, each suggesting an export first.
-  $("archive-keep-label").textContent = t.archiveKeep;
-  $("archive-keep-hint").textContent = t.archiveKeepHint;
-  $("archive-scope-label").textContent = t.archiveScope;
-  $("archive-from").setAttribute("aria-label", t.archiveFrom);
-  $("archive-to").setAttribute("aria-label", t.archiveTo);
-  function archivePost(path, body) {
-    return logFetch("/__companion/archive/" + path, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body) }).then(function () { $("archive-note").hidden = true; refresh(); }, function (body) {
-      archiveRefused(body);
-      refresh();
-    });
-  }
-  $("archive-keep").addEventListener("change", function () {
-    archivePost("settings", { keepDeleted: $("archive-keep").checked });
-  });
-  $("archive-scope").addEventListener("change", function () {
-    $("archive-range").hidden = $("archive-scope").value !== "range";
-  });
-  $("archive-delete").addEventListener("click", function () {
-    var option = $("archive-scope").selectedOptions[0], scope = JSON.parse(option.dataset.body || "{}");
-    if (option.value === "range") {
-      var from = $("archive-from").valueAsDate, to = $("archive-to").valueAsDate;
-      if (!from || !to) return alert(t.archiveRangeMissing);
-      scope.from = Math.floor(from.getTime() / 1000 + from.getTimezoneOffset() * 60);
-      scope.to = Math.floor(to.getTime() / 1000 + to.getTimezoneOffset() * 60) + 86399;
-    }
-    var text = option.value === "all" ? t.archiveAllConfirm : fill(t.archiveDeleteConfirm, { what: option.text.toLowerCase() });
-    if (confirm(text)) archivePost("erase", scope);
-  });
-  function renderBulk(a) {
-    var options = [["all", t.scopeAll, {}], ["shots", t.scopeShots, { store: "shots" }],
-      ["history", t.scopeHistory, { store: "history" }], ["range", t.scopeRange, {}]], restarts = [];
+  // Each restarted history (a factory reset): when, and how many records it left here.
+  function renderRestarts(a) {
+    var restarts = [];
     ["shots", "history"].forEach(function (store) {
       var list = (a.generations || {})[store] || [], name = store === "shots" ? t.shot : t.activation;
       list.forEach(function (g) {
         var older = list.filter(function (o) { return o.generation === g.generation - 1; })[0];
         if (g.restartedAt && older) restarts.push(fill(t.archiveRestart, { store: name, date: day(g.restartedAt), n: older.count }));
-        // A closed history ended when the next existing one opened; set-aside records sit below 1.
-        var until = list.filter(function (o) { return o.generation > g.generation; }).sort(function (x, y) {
-          return x.generation - y.generation; })[0];
-        var label = g.current ? t.generationNow : g.generation < 1 ? t.generationAside
-          : until && until.restartedAt ? t.generationUntil : t.generationEarlier;
-        if (list.length > 1 && g.count) options.push(["g" + store + g.generation, fill(label, {
-          store: name, Store: name.charAt(0).toUpperCase() + name.slice(1), count: g.count,
-          date: until && until.restartedAt ? day(until.restartedAt) : "" }), { store: store, generation: g.generation }]);
       });
     });
     $("archive-restarts").textContent = "";
     restarts.forEach(function (line) {
       $("archive-restarts").appendChild(document.createElement("li")).textContent = line;
     });
-    var chosen = $("archive-scope").value, select = $("archive-scope");
-    select.textContent = "";
-    options.forEach(function (o) {
-      var option = select.appendChild(document.createElement("option"));
-      option.value = o[0];
-      option.text = o[1];
-      option.dataset.body = JSON.stringify(o[2]);
-    });
-    if (options.some(function (o) { return o[0] === chosen; })) select.value = chosen;
-    $("archive-range").hidden = select.value !== "range";
   }
   function renderLogStats(s) {
     var log = s.log || {};
