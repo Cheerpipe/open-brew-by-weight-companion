@@ -391,6 +391,11 @@ async def main():
             # --- A sync hold (a shot): no ping at all until it ends, then one at once ---
             await session.send({"t": "hold", "on": False, "sync": True})
             await session.quiet(1.0, skip=())  # Two and a half ping intervals without a single frame.
+            # A controller that restarted mid-shot never ends the hold: its announcement (or relay
+            # handshake) still pings, the one frame that finds the dead socket.
+            companion.poke()
+            await session.next("ping", skip=(), timeout=0.3)
+            await session.quiet(0.5, skip=())
             await session.send({"t": "hold", "on": False, "sync": False})
             began = asyncio.get_running_loop().time()
             await session.next("ping", skip=(), timeout=0.3)

@@ -390,11 +390,14 @@ class View:
             self._queue(self.key(params), target=(screen, request))
 
     def refresh(self):
-        """The copy changed (or the active preset, for Stats): every page it serves is built again."""
+        """The copy changed (or the active preset, for Stats, or Home named the controller's boot): every
+        page it serves is built again, superseding one still being built; a screen with none yet gets
+        its snapshot."""
         for screen in self.mux.bound():
             record = screen.records[self.kind]
             if record.replica and record.group is not None:
-                self.mux.companion.spawn(self._serve(screen, record.request, record.params, False))
+                record.serial += 1
+                self.mux.companion.spawn(self._serve(screen, record.request, record.params, not record.synced))
 
     async def _serve(self, screen, request, params, snapshot, fetch=False, tag=0):
         """One page from the replica; when its store cannot catch up in time (link down, no answer
@@ -402,7 +405,10 @@ class View:
         archive, record = self.mux.companion.archive, screen.records[self.kind]
         serial = record.serial
         page = header = None
-        if await archive.ready(STORE[self.kind]) and self.mux.home.boot is not None:
+        ready = await archive.ready(STORE[self.kind])
+        if ready and self.mux.home.boot is None and not fetch:
+            return  # A page carries the controller's boot: it goes with Home's snapshot (Mux._on_home).
+        if ready and self.mux.home.boot is not None:
             try:
                 page = await archive.page(STORE[self.kind], self._query(params), params["offset"],
                                           params["limit"], self.mux.home.boot)
@@ -1011,10 +1017,12 @@ class Mux:
             self._resync_upstream()
 
     def _on_home(self, frame, text):
-        active = self.active_preset()
+        active, boot = self.active_preset(), self.home.boot
         if not self.home.apply(frame):
             return
-        if self.active_preset() != active:  # The controller sends its Stats page again; so does the replica.
+        if self.home.boot != boot:  # Replica pages carry the controller's boot: those waiting for it go now.
+            self.replica_changed()
+        elif self.active_preset() != active:  # The controller sends its Stats page again; so does the replica.
             self.views["stats"].refresh()
         snapshot = frame.get("snapshot") is True
         for screen in self.bound():

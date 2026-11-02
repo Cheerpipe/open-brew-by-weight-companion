@@ -196,8 +196,10 @@ class Companion:
     def poke(self):
         """Fresh evidence the controller answered (an announcement, a relay handshake):
         ping at once, so a link whose socket died with its restart — a reboot sends no
-        FIN or RST — is found now, not at the next ping cadence. Never during a shot."""
-        if self.ws is not None and not self.sync_hold:
+        FIN or RST — is found now, not at the next ping cadence. Also during a sync hold: a
+        controller that restarted mid-shot never sends the `hold` that ends it, so this ping
+        is the only one that finds its dead socket."""
+        if self.ws is not None:
             self.post({"t": "ping", "up": self.lm.up})
 
     # --- Link ----------------------------------------------------------------

@@ -143,6 +143,33 @@ async def pages_match(companion, cases):
     return len(names)
 
 
+async def waits_for_home(companion, cases):
+    """The first screen after an idle close binds before the session's Home snapshot: its page waits for
+    the controller's boot and then comes from the copy as a snapshot, nothing upstream; a new active
+    preset in Home sends the Stats page again, as the controller does."""
+    view_mux, sent = companion.screens.mux, []
+    view_mux.up = lambda op: sent.append(op) or True
+    fallbacks = companion.archive.counters["fallbacks"]
+    view_mux.home.clear()
+    screen = mux.Screen(view_mux, None, "192.168.1.9")
+    screen.bound = True
+    view_mux.screens.add(screen)
+    same = lambda frames: [IDENTITIES.sub(r'"\1":0', text) for text in frames]  # noqa: E731
+    view_mux._op(screen, {key: value for key, value in cases["page_stats"]["request"].items() if key != "active"})
+    await asyncio.sleep(0.2)
+    assert not screen.queue and not sent, "no page before the controller's boot is known"
+    view_mux._on_home({"snapshot": True, "boot": 43, "changes": {"presets": {"activeId": 1}}}, "home")
+    await asyncio.sleep(0.2)
+    assert same(list(screen.queue)[1:]) == same(cases["page_stats"]["frames"])
+    screen.queue.clear()
+    view_mux._on_home({"changes": {"presets.activeId": 2}}, "delta")
+    await asyncio.sleep(0.2)
+    assert same(list(screen.queue)[1:]) == same(text.replace('"snapshot":true', '"snapshot":false')
+                                                for text in cases["page_stats_active_2"]["frames"])
+    assert not sent and companion.archive.counters["fallbacks"] == fallbacks
+    view_mux.screens.discard(screen)
+
+
 async def replica_rules(companion, cases, serving):
     """Hold, catch-up, fallback, switch, relayed changes and traces, on the replica the vectors filled."""
     view_mux, copy = companion.screens.mux, companion.archive
@@ -275,6 +302,7 @@ async def main():
 
             assert companion.archive.state("shots") == companion.archive.state("history") == "current"
             pages = await pages_match(companion, cases)
+            await waits_for_home(companion, cases)
             await replica_rules(companion, cases, controller)
 
             # The notice names the epochs the archive holds: nothing is asked.

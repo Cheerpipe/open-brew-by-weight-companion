@@ -243,7 +243,10 @@ counted, and the page asks you to update the companion.
   hold (a shot, its drip delay, a scale connecting: the controller says so
   with `hold` and `sync` true, on every build), and one at once when the hold
   ends; both sides trust the link meanwhile, so only a missing answer to that
-  first ping finds a link that dropped during the shot. The controller
+  first ping finds a link that dropped during the shot. The one exception is
+  a controller that announces itself or answers a relay handshake during
+  the hold: it pings at once as always, since a controller that restarted
+  mid-shot never sends the `hold` that ends it. The controller
   answers a ping with both store epochs (`sh`, `hi`), the replica's
   heartbeat.
 - **Liveness is not symmetric.** The controller sends nothing on its own,
@@ -629,7 +632,8 @@ while the controller is off still reports it and answers the reads below.
   archive's state; the header reads only the fields it needs.
 - **No sync traffic during a shot.** The controller sends `hold` with
   `sync` true when a sync hold starts and `sync` false when it ends, on every
-  build. In between the companion sends nothing: no ping, `rx`, `rf`, `rt`,
+  build. In between the companion sends nothing (but the liveness exception
+  above): no ping, `rx`, `rf`, `rt`,
   `logsub`, re-ask or retry; anything due waits, one per kind, and leaves
   the moment the hold ends. Until a session's first `hold` arrives, sync
   requests wait too.
