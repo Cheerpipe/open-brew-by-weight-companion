@@ -99,7 +99,7 @@ class Controller:
         self.streams = []  # Open ui-stream sessions
         self.sessions = asyncio.Queue()
         self.require_relay_stream = True
-        self.epoch = 5  # The record stores' epoch in the answers below.
+        self.epoch, self.boot = 5, 7  # The record stores' epoch and the boot in the answers below.
         self.handler = None  # Optional override per test: async (session, op) -> handled?
 
     # --- Relay routes -------------------------------------------------------------
@@ -286,9 +286,11 @@ class Session:
         self.closed = asyncio.get_running_loop().create_future()
         self.history = self.stats = None
         self.seq = 0
+        self.sent = []  # Every frame this session sent, as text.
 
     async def send(self, frame):
-        await self.ws.send_str(dumps(frame))
+        self.sent.append(dumps(frame))
+        await self.ws.send_str(self.sent[-1])
 
     async def on_text(self, text):
         op = json.loads(text)
@@ -321,9 +323,11 @@ class Session:
             after = op.get("after", 0)
             await self.send(log_frame([event(n) for n in range(1, 6) if n > after]))
         elif name == "history" and op["on"]:
-            await self.send(history_frame(op, snapshot=not op.get("fetch"), epoch=self.controller.epoch))
+            await self.send(history_frame(op, snapshot=not op.get("fetch"), epoch=self.controller.epoch,
+                                          boot=self.controller.boot))
         elif name == "stats" and op["on"] and set(op) != {"op", "on", "window"}:
-            for frame in stats_page(self, op, snapshot=not op.get("fetch"), epoch=self.controller.epoch):
+            for frame in stats_page(self, op, snapshot=not op.get("fetch"), epoch=self.controller.epoch,
+                                    boot=self.controller.boot):
                 await self.send(frame)
         elif name == "resync":
             await self.send(home_snapshot())
@@ -360,23 +364,34 @@ def log_frame(events, **extra):
     return frame
 
 
-def history_frame(op, snapshot, epoch=5, request=None):
+def fingerprint(*parts):
+    """The standing page's tag: its epoch, window and content; a subscribe naming it gets bare ids."""
+    return zlib.crc32(dumps(parts).encode()) or 1
+
+
+def history_frame(op, snapshot, epoch=5, request=None, boot=7):
     limit, direction = op.get("limit", 20), op.get("dir", "desc")
     ids = list(range(1, 4)) if direction == "desc" else list(range(3, 0, -1))
-    return {"v": 1, "type": "history", "boot": 7, "snapshot": snapshot, "epoch": epoch,
-            "request": request if request is not None else op.get("request", 0), "tag": 77, "total": 3,
+    records = [{"id": n, "type": (op.get("types") or ["shot"])[0], "durationS": 1.0, "hasWallTime": False,
+                "endedAtUnixSec": 0, "endedAtLocalSec": 0} for n in ids]
+    tag = fingerprint(epoch, op.get("offset", 0), limit, direction, op.get("types"), records)
+    kept = snapshot and op.get("tag") == tag
+    return {"v": 1, "type": "history", "boot": boot, "snapshot": snapshot, "epoch": epoch,
+            "request": request if request is not None else op.get("request", 0), "tag": tag, "total": 3,
             "offset": op.get("offset", 0), "limit": limit, "hasMore": False,
-            "records": [{"id": n, "type": (op.get("types") or ["shot"])[0], "durationS": 1.0, "hasWallTime": False,
-                         "endedAtUnixSec": 0, "endedAtLocalSec": 0} for n in ids]}
+            "records": [record["id"] for record in records] if kept else records}
 
 
-def stats_page(session, op, snapshot, epoch=5, request=None):
-    """Two frames: a header frame and a continuation."""
+def stats_page(session, op, snapshot, epoch=5, request=None, boot=7):
+    """Two frames, a header frame and a continuation; a kept page's bare ids fit the first."""
     session.seq += 1
-    common = {"v": 1, "type": "stats", "boot": 7, "epoch": epoch, "seq": session.seq,
+    common = {"v": 1, "type": "stats", "boot": boot, "epoch": epoch, "seq": session.seq,
               "request": request if request is not None else op.get("request", 0), "total": 2,
               "offset": op.get("offset", 0), "limit": op.get("limit", 10), "hasMore": False}
-    header = {"window": op.get("window", 10)}
-    return [{**common, "snapshot": snapshot, "stats": header, "cols": "id", "tag": 88, "rows": [[1, {}]],
-             "rowBase": 0, "more": True},
-            {**common, "snapshot": False, "rows": [[2, {}]], "rowBase": 1, "more": False}]
+    header, rows = {"window": op.get("window", 10)}, [[1, {"wCg": [10]}], [2, {"wCg": [20]}]]
+    tag = fingerprint(epoch, *(op.get(name) for name in ("offset", "limit", "sort", "dir", "filter")), header, rows)
+    first = {**common, "snapshot": snapshot, "stats": header, "cols": "id", "tag": tag, "rowBase": 0}
+    if snapshot and op.get("tag") == tag:
+        return [{**first, "rows": [1, 2], "more": False}]
+    return [{**first, "rows": rows[:1], "more": True},
+            {**common, "snapshot": False, "rows": rows[1:], "rowBase": 1, "more": False}]

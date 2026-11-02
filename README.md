@@ -77,6 +77,12 @@ time: opening it on another device takes it over, and the first one offers
 - The controller still talks to one Web UI only, the companion's, so a second
   or third screen adds almost nothing to its Wi-Fi traffic. The companion
   keeps what each new screen needs and answers it itself.
+- Shots and History open again with little work for the controller. The
+  companion remembers the last page a screen showed and, when one opens it
+  again, only asks the controller whether anything changed. If nothing did,
+  the controller confirms it in one small message instead of sending every
+  shot and its curve again. You always see the controller's current page:
+  nothing appears until it has answered.
 - Commands from different screens reach the controller one at a time, in the
   order you gave them, each after the previous one has taken effect.
 - Each screen keeps its own Admin unlock: unlocking Admin on one screen locks

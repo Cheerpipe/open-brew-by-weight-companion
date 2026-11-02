@@ -88,6 +88,8 @@ scale, so the gateway avoids generating traffic toward it:
   which frees the controller's few sockets right away. At most two requests
   reach it at once: one command and one read. Live updates use one WebSocket
   for every screen, which closes 5 seconds after the last screen does.
+  Reopening History or Shots costs the controller one small frame when the
+  page has not changed ([screens and the relay](#screens-and-the-relay)).
 - Once paired, while La Marzocco is on, the companion keeps one link open to
   the controller and sends only what the protocol needs: a ping when the link opens, every 2
   minutes (15 seconds while it carries La Marzocco, replacing the
@@ -386,6 +388,19 @@ every op itself:
   Stats window of its own. When the standing
   group's last screen leaves, the most recently active other group takes
   the window.
+- When no screen holds History or Stats any more, the service still ends the
+  controller's window but parks its last whole page in memory: the rows by
+  id, the page's `tag`, boot and epoch, within the same bound. The next
+  subscribe to that group names the `tag`, and nothing reaches the screen
+  until the controller answers. An unchanged page comes back as bare ids
+  with current totals and, for Stats, a fresh header (one small frame, no
+  curve reads); the service puts
+  the parked rows back before the page enters the buffer, so every screen,
+  late ones included, gets whole rows. A changed page arrives whole as
+  before. Ids the parked page cannot resolve, or an answer from another
+  boot, ask for the page again without the `tag`. The parked page outlives
+  the session's idle close and goes on Forget, when the link or the session
+  is lost, and when an `rs` notice shows that its store moved.
 - Every Stats and History op, Home's last-shots fetch included, goes to the
   controller; the companion never answers one from its archive. A screen's
   `records` op (a record index an older Web UI asked for) is ignored: it

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Several screens on the companion's one controller session, against a fake controller.
 
-Home and the shot card, Settings, History and Stats groups (owner, fetches, promotion), Diagnostic
-and the log, an older page's ignored records op, liveness, the command queue, takeover, 4003, the 1 MiB
+Home and the shot card, Settings, History and Stats groups (owner, fetches, promotion, parked pages),
+Diagnostic and the log, an older page's ignored records op, liveness, the command queue, takeover, 4003, the 1 MiB
 bound, and the upstream op count for one screen against three. Offline, inside the image (see the README).
 """
 
@@ -463,6 +463,119 @@ async def main():
             assert [op["op"] for op in one] == [op["op"] for op in three], (one, three)
             assert len(one) == len(three) == 1, "the bind carries every view; nothing else reaches the controller"
 
+            # --- Parked pages: the last screen's page waits for the next one's revalidation by its tag ---
+            async def page_of(item, kind):
+                """A screen's next whole History or Stats page: its first frame and every row."""
+                first = frame = await item.next(kind)
+                rows = list(frame[mux.ROWS[kind]])
+                while kind == "stats" and frame["more"]:
+                    frame = await item.next(kind)
+                    rows += frame["rows"]
+                return first, rows
+
+            async def parked(item, view):
+                await item.send({"op": view.kind, "on": False})
+                await eventually(lambda: view.parked is not None)
+
+            for kind, view_op in (("history", HISTORY), ("stats", STATS)):
+                view, key = the_mux.views[kind], "sh" if kind == "stats" else "hi"
+                the_mux.unpark()
+                fake.epoch = 5
+                h = await screen(0).open()  # Keeps the session while the view has no screen.
+                session = await asyncio.wait_for(fake.sessions.get(), 2)
+                await h.next("home")
+                await h.next("card")
+                a = await screen(1).open([{**view_op, "request": 1}])
+                await a.next("home")
+                await a.next("card")
+                first, rows = await page_of(a, kind)
+                assert "tag" not in session.ops[-1] and all(type(row) is not int for row in rows)
+                await parked(a, view)
+                assert session.ops[-1] == {"op": kind, "on": False}, "the last screen still ends the upstream window"
+                assert view.parked["tag"] == first["tag"] and view.parked["epoch"] == 5
+
+                # The next screen: the parked tag goes up, and nothing reaches the screen before the answer.
+                held = []
+
+                async def hold(controller_session, op, kind=kind):
+                    if op["op"] == kind and "tag" in op:
+                        held.append(op)
+                        return True
+                    return False
+                fake.handler = hold
+                await a.send({**view_op, "request": 2})
+                await eventually(lambda: held)
+                assert held[0]["tag"] == first["tag"]
+                d = await screen(3).open([{**view_op, "request": 9}])  # Joins while the answer is pending.
+                await d.next("home")
+                await d.next("card")
+                await a.quiet()
+                await d.quiet()
+                fake.handler = None
+                sent = len(session.sent)
+                await session.answer(held[0])
+                kept = [json.loads(text) for text in session.sent[sent:]]
+                assert len(kept) == 1 and all(type(row) is int for row in kept[0][mux.ROWS[kind]]), \
+                    "the controller answers the tag with bare ids, in one frame"
+                again, whole = await page_of(a, kind)
+                assert again["request"] == 2 and again["snapshot"] is True and whole == rows, "made whole"
+                assert (await page_of(d, kind))[1] == rows and view.parked is None
+                await d.close()
+                await eventually(lambda: len(the_mux.bound()) == 2)
+                # A late screen joins from the buffer: whole rows, nothing upstream.
+                count = len(session.ops)
+                c = await screen(2).open([{**view_op, "request": 3}])
+                await c.next("home")
+                await c.next("card")
+                assert (await page_of(c, kind))[1] == rows and len(session.ops) == count
+
+                # A changed store (Clear, a new shot): the controller's page replaces the parked one.
+                await a.send({"op": kind, "on": False})
+                await parked(c, view)
+                fake.epoch = 6
+                await a.send({**view_op, "request": 4})
+                changed, fresh = await page_of(a, kind)
+                assert "tag" in session.ops[-1] and changed["epoch"] == 6 and changed["tag"] != first["tag"]
+                assert all(type(row) is not int for row in fresh) and view.parked is None
+
+                # An `rs` notice of the same epoch keeps the parked page; a moved one drops it.
+                await parked(a, view)
+                await companion._on_frame({"t": "rs", key: 6})
+                assert view.parked is not None
+                await companion._on_frame({"t": "rs", key: 7})
+                assert view.parked is None
+                await a.send({**view_op, "request": 5})
+                await page_of(a, kind)
+                assert "tag" not in session.ops[-1]
+
+                # Another boot: a kept answer is not trusted; the page comes again without the tag.
+                await parked(a, view)
+                fake.boot = 8
+                count = len(session.ops)
+                await a.send({**view_op, "request": 6})
+                rebooted, fresh = await page_of(a, kind)
+                ops = session.ops[count:]
+                assert len(ops) == 2 and "tag" in ops[0] and "tag" not in ops[1]
+                assert rebooted["boot"] == 8 and fresh == rows
+
+                # The idle close keeps the parked page for the next session; a lost session drops it.
+                fake.boot, fake.epoch = 7, 5
+                await parked(a, view)
+                await a.send({**view_op, "request": 7})
+                await page_of(a, kind)
+                await parked(a, view)
+                await all_closed(a, c, h)
+                a = await screen(1).open([{**view_op, "request": 8}])
+                session = await asyncio.wait_for(fake.sessions.get(), 2)
+                await a.next("home")
+                await a.next("card")
+                assert (await page_of(a, kind))[1] == rows and "tag" in session.ops[0]["ops"][0]
+                assert type(json.loads(session.sent[-1])[mux.ROWS[kind]][0]) is int
+                await parked(a, view)
+                await session.ws.close(code=1011)
+                assert await a.closed() == 1001 and view.parked is None
+                await eventually(lambda: the_mux.upstream.state == "closed")
+
             # --- No screens left: the session closes, the claim stays ------------------------------------
             assert fake.streams == [] and the_mux.claimed and fake.active == relay_id
             status = await companion.status()
@@ -470,8 +583,8 @@ async def main():
             await pages.close()
             await companion.relay.close()
     await server.close()
-    print("Companion screens: Home, card, Settings, History, Stats, Diagnostic, log, an ignored records op, "
-          "liveness, commands, takeover, 4003, bounds and op count OK")
+    print("Companion screens: Home, card, Settings, History, Stats, parked pages, Diagnostic, log, an ignored "
+          "records op, liveness, commands, takeover, 4003, bounds and op count OK")
 
 
 asyncio.run(main())

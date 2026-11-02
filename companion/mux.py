@@ -32,6 +32,7 @@ STATS_WINDOWS, FILTER_MAX = (10, 50, 100), 8
 FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
 DEFAULTS = {"history": {"offset": 0, "limit": 20, "dir": "desc", "types": ()},
             "stats": {"offset": 0, "limit": 10, "sort": "date", "dir": "desc", "filter": "{}", "window": 10}}
+ROWS = {"history": "records", "stats": "rows"}
 
 
 class Invalid(Exception):
@@ -49,6 +50,11 @@ def _newer(a, b):
 
 def _reject(_):
     raise ValueError("not a JSON number")
+
+
+def _row_id(row):
+    """A whole row's id: a History record names it, a Stats row starts with it."""
+    return row.get("id") if isinstance(row, dict) else row[0] if isinstance(row, list) and row else None
 
 
 # --- Op validation (the firmware's whitelists and ranges) -------------------------
@@ -247,16 +253,23 @@ class Fetch:
 
 
 class View:
-    """History or Stats: one standing upstream window for the owner group, fetches for the others."""
+    """History or Stats: one standing upstream window for the owner group, fetches for the others.
+
+    When no screen holds the view its last whole standing page stays parked: the next subscribe to
+    that group names the page's tag, and the controller's kept answer (rows as bare ids) is made
+    whole from it before any screen sees it.
+    """
 
     def __init__(self, mux, kind):
         self.mux, self.kind = mux, kind
-        self.next_id = 0
+        self.next_id, self.standing, self.parked = 0, None, None
         self.clear()
 
-    def clear(self):
+    def clear(self, park=True):
+        """Forget the standing window; with `park` its last whole page stays for the next subscribe."""
         if getattr(self, "inflight", None) and self.inflight.timer:
             self.inflight.timer.cancel()
+        self.parked = (self._page() or self.parked) if park else None
         self.standing, self.request, self.epoch, self.awaiting = None, 0, None, False
         self.buffer, self.buffer_bytes, self.buffer_pages, self.buffer_state = [], 0, 0, "waiting"
         self.pages = {}  # Non-owner group -> (frames of its last page, complete)
@@ -288,6 +301,13 @@ class View:
                 op["filter"] = json.loads(criteria)
             if window != 10 or fetch:  # A fetch names its window: its header follows it [D3].
                 op["window"] = window
+        return op
+
+    def standing_op(self):
+        """The standing subscribe: on the parked page's group it names that page's tag."""
+        op = self.op(self.standing, self.request)
+        if self.parked and self.parked["group"] == self.standing:
+            op["tag"], self.parked["request"] = self.parked["tag"], self.request
         return op
 
     def members(self, group):
@@ -411,7 +431,7 @@ class View:
         for screen in self.members(group):
             screen.records[self.kind].synced = False
         self.dropped()
-        self.mux.up(self.op(group, self.request))
+        self.mux.up(self.standing_op())
 
     def dropped(self):
         """An upstream subscribe or resync drops the controller's fetch: ask again after its snapshot."""
@@ -492,6 +512,10 @@ class View:
             self._fetched(frame)
 
     def _standing(self, frame):
+        if self.parked and self.parked.get("request") == self.request:
+            frame = self._unpark(frame)
+            if frame is None:
+                return
         start, snapshot = self._start(frame), frame.get("snapshot") is True
         if start and snapshot:
             self.buffer, self.buffer_bytes, self.buffer_pages, self.buffer_state = [], 0, 0, "valid"
@@ -515,6 +539,47 @@ class View:
                 self.deliver(screen, frame, record.request)
                 record.synced = True
         self.pump()
+
+    # Parked page
+    def _page(self):
+        """The last whole standing page as a parked page: its group, tag, boot, epoch and rows by id."""
+        if self.standing is None or self.buffer_state != "valid" or not self.buffer:
+            return None
+        known, page, done = {}, None, False
+        for frame in self.buffer:
+            if self._start(frame):
+                page = {"group": self.standing, "tag": frame.get("tag"), "boot": frame.get("boot"),
+                        "epoch": frame.get("epoch"), "rows": {}}
+            for row in frame.get(ROWS[self.kind]) or ():
+                row = known.get(row) if type(row) is int else row
+                rid = _row_id(row)
+                if type(rid) is not int:
+                    return None
+                known[rid] = page["rows"][rid] = row
+            done = self.kind == "history" or frame.get("more") is False
+        tag = page["tag"]
+        return page if done and type(tag) is int and 0 < tag <= U32 else None
+
+    def _unpark(self, frame):
+        """The answer to the parked page's tag, its bare ids whole again from that page. One answer
+        revalidates it; ids it cannot resolve (or another boot) ask for the page again without the tag."""
+        parked, name = self.parked, ROWS[self.kind]
+        rows = frame.get(name) if isinstance(frame.get(name), list) else []
+        if self.kind == "history" or frame.get("more") is False:
+            self.parked = None
+        if not any(type(row) is int for row in rows):
+            return frame
+        if frame.get("boot") == parked["boot"] and all(type(row) is not int or row in parked["rows"] for row in rows):
+            return {**frame, name: [parked["rows"][row] if type(row) is int else row for row in rows]}
+        self.parked = None
+        self._subscribe_upstream(self.standing)
+        return None
+
+    def unpark(self, epoch=None):
+        """Drop the parked page, or with `epoch` only when its store moved, unless a revalidation runs."""
+        parked = self.parked
+        if parked and parked.get("request") != self.request and (epoch is None or epoch != parked["epoch"]):
+            self.parked = None
 
     def _epoch_moved(self):
         """The store changed: every other group's page is out of date; one fetch per group."""
@@ -561,7 +626,7 @@ class Mux:
         self.attributed = collections.deque(maxlen=64)  # (time, screen) of ops sent upstream for a screen
         self._reset()
 
-    def _reset(self):
+    def _reset(self, park=True):
         self.home.clear()
         self.settings.clear()
         self.diagnostic.clear()
@@ -571,7 +636,7 @@ class Mux:
         self.ring, self.ring_bytes, self.log_meta, self.log_more = collections.deque(), 0, None, False
         self.alive_waiters = []
         for view in self.views.values():
-            view.clear()
+            view.clear(park)
 
     def bound(self):
         return [screen for screen in self.screens if screen.bound and not screen.closed]
@@ -611,7 +676,7 @@ class Mux:
         for view in self.views.values():
             if view.standing is not None:
                 view.awaiting = True
-                ops.append(view.op(view.standing, view.request))
+                ops.append(view.standing_op())
         return ops
 
     def upstream_opened(self):
@@ -639,7 +704,13 @@ class Mux:
             for screen in screens:
                 screen.close(4002 if code == 4002 else 1001)
         self.attributed.clear()
-        self._reset()
+        self._reset(park=deliberate)  # An idle close keeps the parked pages; a lost session may be a reboot.
+
+    def unpark(self, notice=None):
+        """Drop the parked pages (Forget, a link reset), or with an `rs` notice those whose store moved."""
+        for kind, key in (("stats", "sh"), ("history", "hi")):
+            if notice is None or type(notice.get(key)) is int:
+                self.views[kind].unpark(None if notice is None else notice[key])
 
     def takeover(self):
         """A relayed call answered UI_TAKEN_OVER: a direct browser holds the Web UI."""

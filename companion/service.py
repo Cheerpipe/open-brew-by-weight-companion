@@ -165,6 +165,7 @@ class Companion:
         self.pairing.state, self.pairing.auto = "unpaired", False
         self.relay.reset()
         self.archive.stop()
+        self.screens.mux.unpark()
         if history:
             await self.erase_log()
             log(f"{why}; its pairing, La Marzocco account, installation key, log history and archive are erased")
@@ -290,6 +291,7 @@ class Companion:
             writer.cancel()
             pinger.cancel()
             self.archive.stop()
+            self.screens.mux.unpark()
             self.ws = self.outbox = None
             self._set_route("direct")
             self.hold, self.held = False, []
@@ -414,6 +416,7 @@ class Companion:
             await self._on_log(frame)
         elif kind == "rs":
             self.archive.on_rs(frame)
+            self.screens.mux.unpark(frame)
         elif kind == "rec":
             self.archive.on_rec(frame)
         elif kind == "trc":
