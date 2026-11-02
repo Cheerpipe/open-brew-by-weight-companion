@@ -77,12 +77,17 @@ time: opening it on another device takes it over, and the first one offers
 - The controller still talks to one Web UI only, the companion's, so a second
   or third screen adds almost nothing to its Wi-Fi traffic. The companion
   keeps what each new screen needs and answers it itself.
-- Shots and History open again with little work for the controller. The
-  companion remembers the last page a screen showed and, when one opens it
-  again, only asks the controller whether anything changed. If nothing did,
-  the controller confirms it in one small message instead of sending every
-  shot and its curve again. You always see the controller's current page:
-  nothing appears until it has answered.
+- Shots and History cost the controller nothing with **Shot archive in the
+  companion** on: the companion answers every page, scroll, sort, filter,
+  export and shot chart from its own copy, which the controller keeps up to
+  date by telling it about each new shot, rating or deletion as soon as it is
+  saved. A page waits a moment when the copy is behind, and comes from the
+  controller when the copy cannot catch up within about three seconds, so
+  you never see an out-of-date list. They are ready before you open them,
+  too: the app loads them in the background once the page you opened has
+  settled (never during a shot). With the switch off, the companion
+  remembers the last page a screen showed and asks the controller only
+  whether anything changed.
 - Commands from different screens reach the controller one at a time, in the
   order you gave them, each after the previous one has taken effect.
 - Each screen keeps its own Admin unlock: unlocking Admin on one screen locks
@@ -163,9 +168,9 @@ controller's history fills up:
 - The companion's own page shows how much it keeps, with **Export
   everything** (one JSON file). It has no delete controls: deleting happens in
   the Web UI.
-- During a shot nothing about the archive or the log crosses Wi-Fi in
-  either direction: new records are copied after the shot, a couple of
-  minutes later, or at once while a screen shows Stats.
+- During a shot the controller and the companion do not talk at all, so the
+  scale has the radio to itself; the new shot and its trace are copied the
+  moment the shot and its drip delay end.
 - Pairing the same controller again, as after a factory reset, finds its
   archive again. Forgetting the companion in Admin deletes the archive with
   the log; export it first if you want to keep it.

@@ -88,15 +88,18 @@ scale, so the gateway avoids generating traffic toward it:
   which frees the controller's few sockets right away. At most two requests
   reach it at once: one command and one read. Live updates use one WebSocket
   for every screen, which closes 5 seconds after the last screen does.
-  Reopening History or Shots costs the controller one small frame when the
-  page has not changed ([screens and the relay](#screens-and-the-relay)).
+  With **Shot archive in the companion** on, History and Shots cost the
+  controller nothing: the companion answers them from its replica of the
+  history ([screens and the relay](#screens-and-the-relay)); with it off,
+  reopening one costs one small frame when the page has not changed.
 - Once paired, while La Marzocco is on, the companion keeps one link open to
   the controller and sends only what the protocol needs: a ping when the link opens, every 2
   minutes (15 seconds while it carries La Marzocco, replacing the
   controller's own La Marzocco WebSocket ping) and when its La Marzocco
   connection comes up or goes down, and machine updates of a few hundred
-  bytes as La Marzocco sends them. Pairing requests and polling happen only
-  while you pair.
+  bytes as La Marzocco sends them. During a shot nothing crosses the link at
+  all, in either direction: no ping, no record, no log. Pairing requests and
+  polling happen only while you pair.
 
 ## Publishing the name
 
@@ -236,7 +239,13 @@ counted, and the page asks you to update the companion.
   every 15 seconds while the controller uses the companion for La Marzocco
   (and one right when it starts to), and one at once whenever its La
   Marzocco connection comes up or goes down (`up`), so the controller can
-  move the route without waiting for the next interval.
+  move the route without waiting for the next interval. None during a sync
+  hold (a shot, its drip delay, a scale connecting: the controller says so
+  with `hold` and `sync` true, on every build), and one at once when the hold
+  ends; both sides trust the link meanwhile, so only a missing answer to that
+  first ping finds a link that dropped during the shot. The controller
+  answers a ping with both store epochs (`sh`, `hi`), the replica's
+  heartbeat.
 - **Liveness is not symmetric.** The controller sends nothing on its own,
   so it notices a silent companion after two ping intervals, while the
   companion notices a vanished controller through its own pings: the link
@@ -401,8 +410,10 @@ every op itself:
   boot, ask for the page again without the `tag`. The parked page outlives
   the session's idle close and goes on Forget, when the link or the session
   is lost, and when an `rs` notice shows that its store moved.
-- Every Stats and History op, Home's last-shots fetch included, goes to the
-  controller; the companion never answers one from its archive. A screen's
+- With **Shot archive in the companion** off, every Stats and History op,
+  Home's last-shots fetch included, goes to the controller. With it on, the
+  companion answers each one from its [replica](#the-replica) and sends
+  nothing upstream for it. A screen's
   `records` op (a record index an older Web UI asked for) is ignored: it
   goes nowhere and the screen stays open, so a page cached before an update
   never loops on 4003. With the controller off the Web UI reads the
@@ -446,8 +457,8 @@ single disk thread as the secrets).
   id's newest stored `(boot, sequence)`. The id is kept in the database, so a
   restarted companion resumes from its cursor instead of asking for the whole
   ring again, and its pages show the history before any link opens. `logsub`
-  and the resync after a failed write leave only right after a frame that
-  shows no hold, like the archive's requests.
+  and the resync after a failed write leave only outside a sync hold, like
+  the archive's requests.
 - **Rows and marks.** Boots are numbered in the order they arrive, and
   events are keyed by `(device id, that number, sequence)`: the controller
   streams only its current boot, so arrival order is time order, and a boot
@@ -513,8 +524,10 @@ while the controller is off still reports it and answers the reads below.
 
 - **Sync.** Once per session, after `cfg` and `dev`, it asks each store's
   index (`rx` with the epoch it holds), activations first, then shots, then
-  traces. Afterwards the controller's `rs` notice names both epochs, and only
-  a store whose epoch moved is asked again. Missing or changed records come
+  traces. Afterwards the controller's `rs` notice (sent as soon as a change
+  is saved, one second after the last of a run of ratings, and right after a
+  shot) and the epochs in each ping answer name both stores' epochs, and
+  only a store whose epoch moved is asked again, at once. Missing or changed records come
   through fetch windows (`rf`, newest first, every shot including bad ones,
   contiguous positions joined across small gaps), traces through `rt`, once
   each (`none` is stored, so it is never asked again; `saving` is skipped and
@@ -614,13 +627,52 @@ while the controller is off still reports it and answers the reads below.
   and 100 only, and asks again every 15 s while Stats are open. With the
   controller off (the link down) the header comes from the copy as it is. Headers and the status facts are cached by the
   archive's state; the header reads only the fields it needs.
-- **No sync traffic during a shot.** The controller answers each companion
-  ping with `{"t":"hold","on":…,"sync":false}` while nothing holds its radio
-  (and sends `"sync":true` on a change where it can). The companion sends
-  `rx`, `rf`, `rt`, a re-ask or a retry only within a second of a frame that
-  shows no hold (that reply, or a `log`, `rs`, `rec` or `trc` frame, which
-  the controller sends only then); anything due otherwise waits, one per
-  kind, for the next such frame.
+- **No sync traffic during a shot.** The controller sends `hold` with
+  `sync` true when a sync hold starts and `sync` false when it ends, on every
+  build. In between the companion sends nothing: no ping, `rx`, `rf`, `rt`,
+  `logsub`, re-ask or retry; anything due waits, one per kind, and leaves
+  the moment the hold ends. Until a session's first `hold` arrives, sync
+  requests wait too.
+
+### The replica
+
+With **Shot archive in the companion** on, the archive is the replica the
+mux serves Shots and History from (`companion/mux.py`, `companion/pages.py`).
+
+- **Current or catching up.** A store is current once a pass ended at the
+  epoch the controller last named (its `rs`, its ping answer, an index
+  answer) with nothing changed since. A notice of another epoch, a rating,
+  deletion or Clear the relay forwards (`POST /api/v1/stats/rate`,
+  `/stats/delete`, `/stats/clear`, `/history/delete`, `/history/clear`: not
+  current from the moment it leaves, caught up once the controller
+  answered), or a new link session makes it catch up at once: the index (a
+  delta when it can), then the changed records and new traces, back to back,
+  paused only by a sync hold. Ratings, deletions and Clears made elsewhere
+  (another screen opened directly, Home Assistant, the USB console) arrive
+  as an `rs` notice.
+- **Pages.** Every History and Stats subscribe, fetch and export window
+  comes from the replica: the whole history, the controller's records and
+  the ones only the companion keeps, filtered, ordered and sliced as the
+  controller does, with `total`, `hasMore`, `good` and, for Stats, the
+  header over the whole history for the active preset in Home's model. The
+  frames match the controller's member for member (`tests/test_link_vectors.py`
+  replays the firmware's `page_*` golden cases) except `tag`, `seq` and
+  `request`, which the companion assigns; a screen that resubscribes with
+  the page's own `tag` gets its rows as bare ids. Rows only the companion
+  keeps carry `archiveOnly`, `archiveGeneration` and, for shots,
+  `archiveTrace` (in a Stats row's last object), and that page's first
+  frame adds `archive` (`generations`, `holes`) for the Web UI's markers and
+  lines. A change to the copy (a catch-up that moved an epoch, a rating or
+  deletion of an archive-only record) or a new active preset sends every
+  open page again.
+- **Waiting and falling back.** A page whose store is not current waits for
+  its catch-up; when it cannot finish within 3 seconds (the link is down or
+  the controller does not answer), that page comes whole from the controller
+  through the shared session, as with the switch off, never mixed. During a
+  sync hold the replica serves what it holds and nothing goes upstream.
+- **Traces.** `GET /api/v1/diagnostic/shot-trace` for a shot whose trace the
+  replica holds is answered by the companion (for a browser the controller
+  lets in, as for the archive's reads); any other goes to the controller.
 - **Tables.** `archive_records`, `archive_traces`, `archive_sync` and
   `archive_holes`, in schema 4 of `companion.db`; the log's size budget
   counts only the log's own tables. Schema 4 turned the records an earlier
@@ -646,7 +698,10 @@ an unknown type in this session), `laMarzocco` (`enabled`, `account`,
 `connection`, `subscribed`, `up`) and `log` (`enabled`, `days`, `mb`,
 `dropped`, and the store's `rows`, `bytes`, `oldestBoot`, `newestBoot`,
 `marks`, `missed` for the controller's id, or `error`) and `archive` (`on`,
-`available`, `syncing`, `syncedAt`, `error`, `generations`
+`available`, `syncing`, `syncedAt`, `error`, `replica` (per store `off`,
+`current` or `catchingUp`), the counters `served` (pages and traces the
+replica answered), `fallbacks` (pages it left to the controller) and
+`catchUpFetches` (requests it sent the controller to catch up), `generations`
 per store, and per store the archive-only count `shots`/`history`,
 `shotsTotal`/`historyTotal` and the first and last end times, plus `traces`,
 `bytes` and `holes`). `POST /__companion/pair` with a JSON

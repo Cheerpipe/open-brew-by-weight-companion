@@ -191,7 +191,9 @@ Until you choose one, your La Marzocco account stays on the companion.
 
 **The controller and this companion use different versions of their
 connection** means the link was refused because the two speak different
-versions; everything stays on the controller's own connection. **The
+versions; everything stays on the controller's own connection, and the Web
+UI still opens through the companion, so you can update the controller from
+there (Admin → Firmware update). **The
 controller sent messages this companion does not understand** means the
 controller is newer: the link keeps working with what both know. In both
 cases update the companion (`git pull && ./setup --yes`) and the controller
