@@ -182,8 +182,8 @@ the controller. Then choose on the companion's page:
   the pairing, your La Marzocco account and the companion's La Marzocco
   installation key. The archive of your shots and activations and the log
   history stay; pairing the same controller again brings them back, and the
-  companion's page can delete them. Open the page over HTTPS for this;
-  over plain HTTP it asks you to.
+  Web UI can then delete them. Open the page over HTTPS for this; over plain
+  HTTP it asks you to.
 
 Until you choose one, your La Marzocco account stays on the companion.
 
@@ -252,20 +252,25 @@ page:
   keeps.
 - **"Up to N records … could not be copied":** the companion was away while
   more records than the controller keeps were made; those never reached it.
-- **"The controller's history restarted":** Clear history or a factory reset
-  started the controller's numbering again. Nothing was deleted; the earlier
-  records are listed with grey numbers and can be deleted on the companion's
-  page, one section at a time.
+- **"The controller's history restarted":** a factory reset (or a Clear made
+  with an older controller firmware) started the controller's numbering
+  again. Nothing was deleted; the earlier records are listed with grey
+  numbers. Delete them one by one with Admin unlocked, or all at once with
+  **Clear shot history** in Admin.
 - **A shot is listed twice, once with a grey number:** while the companion
   was away for a long time, a shot number was reused and the companion could
   not tell for sure whether it was the same shot, so it kept both. Delete the
   one you do not want.
-- **A deleted shot is still listed:** **Keep records deleted on the
-  controller** is on, or the shot was removed with **keep in the archive**.
-  Delete it from the companion's copy in its menu.
+- **A deleted shot is still listed:** the companion removes it the next time
+  it copies from the controller, usually within a few minutes. With an older
+  controller firmware it cannot tell a deleted shot from one that left by
+  itself: update the controller, or delete it again in the Web UI.
 - **Changing the archive says to turn the controller on:** changes need the
   controller to confirm your sign-in at that moment. Reading and exporting
   work with it off.
+- **Deleting says Admin is locked:** unlock Admin in the Web UI opened
+  through the companion, on the screen you delete from; each screen has its
+  own unlock. The companion's own page cannot delete anything.
 
 ## Start the pairing over
 

@@ -467,30 +467,39 @@ single disk thread as the secrets).
   schema, read-only volume) disables the history only; the status names why.
 - **Retention.** On start and daily: events older than
   `COMPANION_LOG_RETENTION_DAYS` (events without a clock stay), then the
-  oldest until the log tables' pages fit `COMPANION_LOG_RETENTION_MB` —
-  other controllers' rows first, the excess's share of them at a time,
-  measured before and after; the archive's tables in the same file never
-  count (SQLite's `dbstat`). Freed pages are reused, so the log settles near
+  oldest until the log tables' pages, their indexes included, fit
+  `COMPANION_LOG_RETENTION_MB` — other controllers' rows first, the excess's
+  share of them at a time, measured before and after; the archive's tables in
+  the same file never count (SQLite's `dbstat`). Freed pages are reused, so the log settles near
   the budget without a vacuum. Each round then writes `companion.db.backup`
   with SQLite's online backup, on its own connections and thread.
 - **Access.** `GET /__companion/log` (newest-first pages: `?boot=&before=&limit=`
-  taken from the previous answer's opaque `next`, answering `entries`, `next`,
-  `hasMore`), `GET /__companion/log/export` and
+  taken from the previous answer's opaque `next`, `limit` 1–500, answering
+  `entries`, `next`, `hasMore`; optional `level`, the levels kept as letters
+  of `cewid`, `category` (one subsystem) and, on a first page, `at`: wall
+  seconds, starting at the newest event at or before it, found through the
+  `(device_id, wall_sec)` index; events without a clock keep their place by
+  order), `GET /__companion/log/export` (optional `from` and `to`, wall
+  seconds: the events from the oldest at or after `from` to the newest at or
+  before `to`, with those in between in order) and
   `POST /__companion/log/delete` answer only over HTTPS (nginx refuses them
   on plain HTTP with `403 HTTPS_REQUIRED`) and only for a browser the
   controller lets open the Web UI: the companion asks `GET /api/v1/auth`
   through the relay with the browser's `X-WebUI-Session`, at most every five
   minutes per session, and answers `401 AUTH_REQUIRED` otherwise. Accepted
   sessions are remembered (their SHA-256, for 90 days unseen), so they keep
-  reading while the controller is off; Delete history needs the controller's
-  answer at that moment (`503 CONTROLLER_UNREACHABLE` otherwise). Forget
+  reading while the controller is off. Delete history (Diagnostic in the Web
+  UI) needs the controller's answer at that moment
+  (`503 CONTROLLER_UNREACHABLE` otherwise) with `adminUnlocked` true for the
+  screen asking (`401 ADMIN_LOCKED` otherwise; see Changes below). Forget
   erases the history, the id and every remembered session; Delete history
   erases only the history.
 - **Entries.** An event is `{"b","s","ms","w","l","c","m"}` (boot, sequence,
   uptime ms, wall-clock seconds or 0, level `c/e/w/i/d`, category, text). A
   marker is `{"g":"gap","count":N}`, `{"g":"reset"}` or
   `{"g":"boot","boot":B}` (a restart into boot B). Pages put a marker below
-  the event it precedes; the export
+  the event it precedes, by time, so it stays in place when a filter leaves
+  that event out; the export
   (`{"format":"openbrewbyweight-companion-log","version":2,"device":…,"entries":[…]}`,
   oldest first) puts it before.
 
@@ -525,10 +534,14 @@ while the controller is off still reports it and answers the reads below.
   notice. A new link session or a companion restart starts again from a
   whole index, and an older controller never gets `d`.
 - **Generations.** Rows are keyed `(device, store, generation, id)`. The
-  index names the store's write counter and next record id (`gen`, `next`);
-  both only grow, and fall back only on Clear history or a factory reset, so
-  a decrease of either (against the pair kept per store) is a restart,
-  decided before any page is written. When both may have overtaken their old
+  index names the store's write counter, next record id and the user's Clear
+  count (`gen`, `next`, `clr`). A `clr` above the one kept per store is a
+  Clear the user made: every generation of that store is deleted, with its
+  traces and holes, and the next opens; a lower one deletes nothing and is
+  kept as the new baseline. Otherwise `gen` and `next` only grow and fall back
+  only on a restarted history (a factory reset, or a Clear on firmware
+  without `clr`), so a decrease of either is a restart, decided before any
+  page is written. When both may have overtaken their old
   values (a long absence) or the controller names neither (older firmware),
   identities decide: the index's newest id below the last complete sync's
   oldest, or every id it shares with the archive another record (all shared
@@ -546,22 +559,14 @@ while the controller is off still reports it and answers the reads below.
   both end times), so a controller without a clock still tells records
   apart. Another identity under the same id replaces that record alone. In
   the open generation, a record missing from the index is deleted when its
-  id is at least the index's oldest, unless it is `kept` (Remove from the
-  controller, keep in the archive) or **Keep records deleted on the
-  controller** is on (`meta` key `archiveKeepDeleted`), which marks it kept
-  instead; below the oldest it stays (rotation, or a deleted oldest record).
-  Removing a record the controller may still hold (at or above the synced
-  oldest, or any before the first complete sync, but not a kept record the
-  last index no longer lists) leaves an exclusion, so it is not copied
-  again, and the whole-history Stats header keeps counting it while the
-  controller holds it; a record not copied yet gets the exclusion too (the
-  header then leaves it out). The exclusion goes when the id leaves the
-  index or a new generation opens. A hole row says how many records
+  id is at least the index's oldest, or when the index's `gone` (the ids the
+  user deleted last, at most 16) names it; below the oldest and not named it
+  stays (rotation). A record deleted before it was copied is never listed
+  again, so it is never copied. A hole row says how many records
   could not be copied. A refetched row whose curve is empty (the controller
   recycled it) keeps the stored curve.
-- **Archive-only rows** are those of closed generations, those below the open
-  generation's oldest id, and kept rows (while the controller's delete is on
-  its way, the Web UI shows the controller's row instead of both).
+- **Archive-only rows** are those of closed generations and those below the
+  open generation's oldest id (records the controller no longer holds).
   `GET /__companion/archive/shots` and `/history` answer them with the
   controller's own semantics, so the Web UI merges them with the
   controller's list: `sort=date|rating` (shots), `dir=desc|asc`, `bad=1`,
@@ -576,17 +581,18 @@ while the controller is off still reports it and answers the reads below.
   `archiveGeneration` (shots also `archiveTrace`);
   the answer adds `holes`, `generations` (`generation`, `count`,
   `restartedAt`, `current`) and, for shots, `presets` found among those rows.
-- **Changes.** `POST /__companion/archive/delete` (`store`, `id`, optional
-  `generation`), `/keep` (`store`, `id`, optional `kept` false to undo a mark
-  when the controller refused the delete; `409 NOT_COPIED` when the archive
-  has no copy yet, so the Web UI leaves the record on the controller),
-  `/rate` (archive-only shots; a `generation` may be 0 or below for records
-  set aside), `/erase` (everything,
-  or a `store`, a `generation` or `current`, a `from`/`to` range on
-  `endedAtUnixSec`; records without a clock are never in a range; deleting
-  everything copies what the controller keeps again) and `/settings`
-  (`keepDeleted`) need the controller's answer at that moment
-  (`503 CONTROLLER_UNREACHABLE` otherwise). Reads, `GET .../trace` and
+- **Changes.** The archive is a copy that follows the controller; the only
+  changes the Web UI makes on it are `POST /__companion/archive/rate`
+  (archive-only shots; a `generation` may be 0 or below for records set
+  aside) and `/delete` (`store`, `id`, optional `generation`; archive-only
+  rows only, `404 NOT_FOUND` for any other: the controller deletes its own
+  records and the archive follows). Both need the controller's answer at that
+  moment (`503 CONTROLLER_UNREACHABLE` otherwise). `/delete`, like the log's
+  Delete history, also needs `adminUnlocked` true: the companion asks
+  `GET /api/v1/auth` through the relay signing the browser's own
+  `X-WebUI-Client` as the screen, so the controller answers for that screen's
+  unlock, never the companion's shared client; without a relay session or a
+  valid client id it is locked (`401 ADMIN_LOCKED`, logged). Reads, `GET .../trace` and
   `GET .../export` (every generation:
   `{"format":"openbrewbyweight-companion-archive","version":1,"device",
   "shots","history","traces","holes"}`) follow the log's rules (HTTPS only, a
@@ -606,8 +612,10 @@ while the controller is off still reports it and answers the reads below.
   screen receives show a new shot. While the controller holds sync (or a
   request waits for it), the newest complete header answers at once with its
   own `epoch`. A real failure answers `503 STATS_UNAVAILABLE` (the cause in
-  the companion's log, at most every five minutes), and the browser keeps the
-  controller's header. Headers and the status facts are cached by the
+  the companion's log, at most every five minutes); the browser then shows
+  the controller's header, labelled as covering only its shots, offers 10, 50
+  and 100 only, and asks again every 15 s while Stats are open. With the
+  controller off (the link down) the header comes from the copy as it is. Headers and the status facts are cached by the
   archive's state; the header reads only the fields it needs.
 - **No sync traffic during a shot.** The controller answers each companion
   ping with `{"t":"hold","on":…,"sync":false}` while nothing holds its radio
@@ -616,9 +624,13 @@ while the controller is off still reports it and answers the reads below.
   shows no hold (that reply, or a `log`, `rs`, `rec` or `trc` frame, which
   the controller sends only then); anything due otherwise waits, one per
   kind, for the next such frame.
-- **Tables.** `archive_records`, `archive_traces`, `archive_sync`,
-  `archive_holes`, `archive_exclusions`, schema 3 of `companion.db`; the
-  log's size budget counts only the log's own tables.
+- **Tables.** `archive_records`, `archive_traces`, `archive_sync` and
+  `archive_holes`, in schema 4 of `companion.db`; the log's size budget
+  counts only the log's own tables. Schema 4 turned the records an earlier
+  companion kept after a deletion into ordinary archive-only rows (setting
+  aside those of the open generation the controller may still list) and
+  dropped the exclusions, so a record one kept out is copied again while the
+  controller holds it.
 
 ### Status page and JSON
 
@@ -637,7 +649,7 @@ an unknown type in this session), `laMarzocco` (`enabled`, `account`,
 `connection`, `subscribed`, `up`) and `log` (`enabled`, `days`, `mb`,
 `dropped`, and the store's `rows`, `bytes`, `oldestBoot`, `newestBoot`,
 `marks`, `missed` for the controller's id, or `error`) and `archive` (`on`,
-`available`, `syncing`, `syncedAt`, `error`, `keepDeleted`, `generations`
+`available`, `syncing`, `syncedAt`, `error`, `generations`
 per store, and per store the archive-only count `shots`/`history`,
 `shotsTotal`/`historyTotal` and the first and last end times, plus `traces`,
 `bytes` and `holes`). `POST /__companion/pair` with a JSON

@@ -106,14 +106,16 @@ or a busy stretch loses the oldest lines. With **Diagnostic log through the
 companion** on (Admin → Companion, on by default), the companion keeps a copy
 of every line, so you can look back days or weeks:
 
-- On the Diagnostic page opened through the companion, **Show older** pages
-  back through earlier restarts, and **Export** downloads the whole history.
+- On the Diagnostic page opened through the companion, scrolling up loads
+  older lines by themselves, back through earlier restarts; the level and
+  category filters apply to the whole history; **Go to** jumps to a date and
+  time and **Latest** comes back; **Export** downloads the whole history or a
+  date range. While Admin is unlocked, the same page offers **Delete the log
+  history**, which needs the controller on, to confirm the unlock.
 - The companion's own page (`https://openbrewbyweight-secure.local/__companion/`)
-  shows the same history with a severity filter, an export and **Delete the
-  log history**.
+  shows the same history with a severity filter and an export.
 - Both work even while the controller is off, for a browser that was signed
-  in to the Web UI through the companion before; deleting the history needs
-  the controller on, to confirm your sign-in. Lines the controller could
+  in to the Web UI through the companion before. Lines the controller could
   not copy, for example while the companion was off for long, are marked as
   a gap instead of silently missing.
 - During a shot the controller sends nothing: lines wait and are copied when
@@ -137,14 +139,17 @@ controller's history fills up:
 - In **History** and **Stats** opened through the companion, the controller's
   records and the older ones the companion keeps form one list: filters,
   sorting and scrolling cover both. Older shots carry a grey number, since
-  numbers start again after a Clear or a factory reset.
+  numbers start again after a factory reset.
 - **Stats** opened through the companion count your whole history too: the
   averages, the arrival and consistency charts and the filters cover every
   shot it keeps, and you can choose 500 shots or all of them besides 10, 50
-  and 100 once you have that many.
-- Ratings and deletions you make on the controller reach the archive too.
-  Through the companion, a shot's menu also offers **Remove from the
-  controller, keep in the archive** and **Remove from the archive only**.
+  and 100 once you have that many. Until the companion has the controller's
+  newest shot, Stats show the controller's own figures and say so.
+- Ratings and deletions reach the archive, however you open the Web UI: the
+  companion is a copy that follows the controller. Deleting a shot (or
+  clearing a whole history in Admin) needs Admin unlocked in the Web UI, and
+  removes it from the companion too; a shot only the companion still keeps is
+  deleted with the same **Delete**.
 - With the controller off, the app opened through the companion still shows
   your shots and activations: the screen that says the controller is out of
   reach offers **Browse shots and activations**, which opens Shots and
@@ -152,16 +157,13 @@ controller's history fills up:
   controls it: with the switch off, nothing is offered. It works on a phone
   or computer that signed in through the companion while the controller was
   on (any device, with the Web UI password off).
-- **Clear history** and a factory reset never delete the archive: the
-  companion keeps everything it copied and starts a new section for what
-  comes next ("The controller's shot history restarted on …"). Clear history
-  opened through the companion can also delete the companion's copy.
-- **Keep records deleted on the controller** (on the companion's page, off by
-  default) keeps the companion's copy when a shot is deleted in the Web UI
-  opened directly on the controller.
+- A factory reset never deletes the archive: the companion keeps everything
+  it copied and starts a new section for what comes next ("The controller's
+  shot history restarted on …"). **Clear shot history** in Admin deletes the
+  companion's copy too, older shots and earlier sections included.
 - The companion's own page shows how much it keeps, with **Export
-  everything** (one JSON file) and deletes for everything, one kind of
-  record, one section or a date range.
+  everything** (one JSON file). It has no delete controls: deleting happens in
+  the Web UI.
 - During a shot nothing about the archive or the log crosses Wi-Fi in
   either direction: new records are copied after the shot, a couple of
   minutes later, or at once while a screen shows Stats.
@@ -342,8 +344,9 @@ live only in memory and change every time it starts.
   they never show account details.
 - The log history and the shot archive are the exception: they open only over
   HTTPS, and only for a browser the controller lets open the Web UI.
-  Changing the archive (rating, deleting, its setting) also needs the
-  controller on, so it can confirm the sign-in at that moment. With the Web UI password on,
+  Changing the archive (rating, deleting) also needs the controller on, so it
+  can confirm the sign-in at that moment; deleting a record or the log history
+  also needs Admin unlocked on that very screen. With the Web UI password on,
   that means a browser signed in through the companion; a browser it accepted
   keeps reading while the controller is off, and a change of the password
   setting applies within five minutes of the controller being back.
