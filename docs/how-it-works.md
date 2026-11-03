@@ -389,7 +389,10 @@ every op itself:
   clock (`timeUtcSec`) moves on by the time since it arrived: the
   controller sends it only when it rebases and every page runs it locally,
   so a late screen would otherwise count warm-up and other times from an
-  old clock.
+  old clock. The firmware lists every such per-session field in its
+  `src/tests/fixtures/companion_replay_v1.json`; the screens test holds
+  `CLOCKS` in `mux.py` to a checksum-pinned copy, so a new one fails until
+  the companion handles it.
 - The shot card is kept from its last snapshot (at most 512 frames or
   256 KiB) and replayed to a new screen.
 - The log keeps a ring of the last 1,024 events (512 KiB) and serves each

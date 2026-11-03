@@ -34,6 +34,9 @@ HISTORY_TYPES = ("shot", "rinse", "other", "power_on", "no_scale_guard_aborted",
 STATS_RESULTS = ("on_recipe", "fast", "slow")
 HISTORY_CAPACITY, HISTORY_PAGE_MAX, SHOT_LOG_CAPACITY = 1000, 120, 1000
 STATS_WINDOWS, FILTER_MAX = (10, 50, 100), 8
+# Home fields the controller computes per stream session and every page runs locally: a replay
+# moves them on (the firmware's src/tests/fixtures/companion_replay_v1.json lists them).
+CLOCKS = ("timeUtcSec",)
 FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
 DEFAULTS = {"history": {"offset": 0, "limit": 20, "dir": "desc", "types": ()},
             "stats": {"offset": 0, "limit": 10, "sort": "date", "dir": "desc", "filter": "{}", "window": 10}}
@@ -153,7 +156,7 @@ class Merged:
     """
 
     def __init__(self):
-        self.boot, self.changes, self.ready, self.clock_at = None, {}, False, 0.0
+        self.boot, self.changes, self.ready, self.clock_at = None, {}, False, {}
 
     def apply(self, frame):
         changes = frame.get("changes")
@@ -168,8 +171,7 @@ class Merged:
             for stale in [name for name in self.changes if name.startswith(prefix)]:
                 del self.changes[stale]
             self.changes[key] = value
-        if "timeUtcSec" in changes:  # Home's controller clock, which every page runs locally.
-            self.clock_at = _now()
+        self.clock_at.update((key, _now()) for key in CLOCKS if key in changes)
         return True
 
     def clear(self):
@@ -1000,8 +1002,8 @@ class Mux:
             screen.home = False
             return
         changes = self.home.changes
-        if type(changes.get("timeUtcSec")) is int:  # The controller sends its clock only on a rebase.
-            changes = {**changes, "timeUtcSec": changes["timeUtcSec"] + int(_now() - self.home.clock_at)}
+        changes = {**changes, **{key: changes[key] + int(_now() - self.home.clock_at[key])
+                                 for key in CLOCKS if type(changes.get(key)) is int}}
         if presets and screen.presets_tag is not None and changes.get("presetsTag") == screen.presets_tag:
             changes = {key: value for key, value in changes.items() if key != "presets"}
         screen.send(dumps({"v": 1, "type": "home", "boot": self.home.boot, "snapshot": True, "changes": changes}))

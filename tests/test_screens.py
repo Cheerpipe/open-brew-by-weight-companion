@@ -3,10 +3,12 @@
 
 Home and the shot card, Settings, History and Stats groups (owner, fetches, promotion, parked pages),
 Diagnostic and the log, an older page's ignored records op, liveness, the command queue, takeover, 4003, the 1 MiB
-bound, and the upstream op count for one screen against three. Offline, inside the image (see the README).
+bound, the upstream op count for one screen against three, and the replayed clock against the firmware's
+per-session fields. Offline, inside the image (see the README).
 """
 
 import asyncio
+import hashlib
 import json
 import sys
 import tempfile
@@ -31,6 +33,9 @@ SECRET = bytes.fromhex(V["pairingSecret"])
 ID = "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b"
 CLIENTS = ["0123456789abcdef", "1123456789abcdef", "2123456789abcdef", "3123456789abcdef"]
 DIRECT = "aaaaaaaaaaaaaaaaaaaaaaaa"
+# The firmware's per-session fields (src/tests/fixtures/ there); its checksum pins the copy.
+REPLAY = ROOT / "tests/fixtures/companion_replay_v1.json"
+REPLAY_SHA256 = "10c1609c9b253db1750db426e76d923a42acb5d65aa0ba865ff5d1061b26d076"
 
 mux.IDLE_S = mux.DIAGNOSTIC_LINGER_S = 0.3
 mux.ATTRIBUTION_S = 0.3
@@ -136,6 +141,10 @@ async def ops_after(session, count, timeout=2):
 
 
 async def main():
+    assert hashlib.sha256(REPLAY.read_bytes()).hexdigest() == REPLAY_SHA256, \
+        "the replay fixture differs from the firmware's: copy its file again"
+    assert json.loads(REPLAY.read_text())["sessionFields"] == {"home": dict.fromkeys(mux.CLOCKS, "clock")}, \
+        "a per-session field of the controller is not handled on a replay (mux.CLOCKS)"
     fake = fake_controller.Controller(SECRET, ID)
     server = TestServer(fake.app(), host="127.0.0.1")
     await server.start_server()
@@ -185,7 +194,7 @@ async def main():
             await a.send({"op": "activity", "seconds": 0, "hidden": False})
             assert (await a.next("alive"))["type"] == "alive"
             count = len(session.ops)
-            the_mux.home.clock_at -= 5  # Five seconds after the controller's clock arrived.
+            the_mux.home.clock_at["timeUtcSec"] -= 5  # Five seconds after the controller's clock arrived.
 
             b = await screen(1).open([{"op": "settings", "on": True, "tag": 55}, {**HISTORY, "request": 7}],
                                      presetsTag=9)
