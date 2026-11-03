@@ -227,6 +227,8 @@
             lmConnected: "Connected",
             lmRefused:
               "Connected, but the cloud refuses its reads; correct the account in the Web UI",
+            lmPolicy:
+              "Connected, but La Marzocco asks the account to accept its latest terms; accept them in the La Marzocco app or on the controller",
             routeCompanion: "the controller uses this connection",
             routeDirect: "the controller uses its own",
             versionLine: "Companion {v} · {name}",
@@ -371,11 +373,13 @@
               ? t.lmOff
               : !lm.account
                 ? t.lmWaiting
-                : lm.refused
-                  ? t.lmRefused
-                  : (lm.up ? t.lmConnected : t.lmConnecting) +
-                    " · " +
-                    (s.route === "companion" ? t.routeCompanion : t.routeDirect);
+                : lm.policy
+                  ? t.lmPolicy
+                  : lm.refused
+                    ? t.lmRefused
+                    : (lm.up ? t.lmConnected : t.lmConnecting) +
+                      " · " +
+                      (s.route === "companion" ? t.routeCompanion : t.routeDirect);
           renderLogStats(s);
           renderArchive(s);
           clearTimeout(timer);

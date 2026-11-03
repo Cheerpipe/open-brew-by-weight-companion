@@ -63,7 +63,7 @@ class Upstream:
     def __init__(self, _store: Store, events: Companion) -> None:
         self.events = events
         self.sub, self.ep, self.up, self.tok = False, 0, False, 0
-        self.refused = False
+        self.refused = self.policy = False
         self.account: tuple[str, str, str] | None = None
         self.signed, self.rejected = False, False
         self.reads = 0
@@ -645,9 +645,17 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             assert refusal["err"] == "auth"
             assert refusal["sub"]
             assert refusal["tok"] == 3000
-            upstream.refused = False
+            assert "policy" not in refusal, "`policy` is present only for a pending policy"
+            upstream.policy = True  # auth -> policy is a change of state, reported at once.
             upstream.events.upstream()
-            assert "err" not in await session.next("lm")
+            refusal = await session.next("lm")
+            assert refusal["err"] == "auth"
+            assert refusal["policy"] is True
+            upstream.refused = upstream.policy = False
+            upstream.events.upstream()
+            cleared = await session.next("lm")
+            assert "err" not in cleared
+            assert "policy" not in cleared
 
             # --- A newer controller's frame type is ignored and counted ------------
             await session.send({"t": "webhook", "id": 1})

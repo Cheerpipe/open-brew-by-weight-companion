@@ -82,6 +82,8 @@ class Cloud:
         self.subscribed = asyncio.Event()
         self.command_status = 200
         self.refuse_dashboard = 0
+        # The JSON body of a refused dashboard or command, when one is sent.
+        self.refusal: dict[str, object] | None = None
 
     def verify(self, request: web.Request) -> None:
         headers = request.headers
@@ -149,6 +151,8 @@ class Cloud:
         assert request.match_info["serial"] == ACCOUNT["serial"]
         self.calls.append("dashboard")
         if self.refuse_dashboard:
+            if self.refusal is not None:
+                return web.json_response(self.refusal, status=self.refuse_dashboard)
             return web.Response(status=self.refuse_dashboard)
         return (
             web.json_response(D["read"]) if self.authorized(request) else web.Response(status=401)
@@ -159,7 +163,8 @@ class Cloud:
         self.commands.append(
             (request.match_info["name"], await request.text(), request.content_type)
         )
-        return web.json_response({}, status=self.command_status)
+        body = {} if self.refusal is None else self.refusal
+        return web.json_response(body, status=self.command_status)
 
     async def ws(self, request: web.Request) -> web.WebSocketResponse:
         self.verify(request)
@@ -394,6 +399,8 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             assert any("answers 401/403" in line for line in lines.lines), (
                 "a refused data plane is logged"
             )
+            assert lm.access is None, "a plain 403 drops the token"
+            assert not lm.policy
             cloud.refuse_dashboard = 0
             assert (await lm.read())[1] is not None
             await events.wait(lambda: not lm.refused)
@@ -405,7 +412,63 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             cloud.command_status = 403
             assert await lm.command(13, "on") == 403
             assert lm.refused
+            assert lm.access is None
+            assert not lm.policy
+            cloud.command_status = 401
+            assert (await lm.read())[1] is not None
+            assert not lm.refused
+            assert await lm.command(14, "on") == 401
+            assert lm.refused
+            assert lm.access is None
+            assert not lm.policy
             cloud.command_status = 200
+            assert (await lm.read())[1] is not None
+            assert not lm.refused
+
+            # A pending policy (403 USER_MUST_ACCEPT_POLICY) is a refusal of its own that keeps
+            # the valid token.
+            policy = {
+                "success": False,
+                "message": "User must accept latest policy",
+                "code": "USER_MUST_ACCEPT_POLICY",
+            }
+            cloud.refuse_dashboard, cloud.refusal = 403, policy
+            token, signins = lm.access, cloud.calls.count("signin")
+            upstreams = events.log.count(("upstream",))
+            assert (await lm.read())[:2] == (403, None)
+            assert lm.refused
+            assert lm.policy
+            assert lm.access == token, "a pending policy keeps the token"
+            assert events.log.count(("upstream",)) == upstreams + 1
+            assert any("accept its latest terms" in line for line in lines.lines), (
+                "a pending policy is logged"
+            )
+            assert (await lm.read())[0] == 403
+            assert cloud.calls.count("signin") == signins, "and never signs in again"
+            assert events.log.count(("upstream",)) == upstreams + 1, (
+                "an unchanged refusal is reported once"
+            )
+            # Policy -> plain refusal is a change, and drops the token.
+            cloud.refusal = {"code": "SOMETHING_ELSE"}
+            assert (await lm.read())[0] == 403
+            assert lm.refused
+            assert not lm.policy
+            assert lm.access is None
+            assert events.log.count(("upstream",)) == upstreams + 2
+            cloud.refuse_dashboard, cloud.refusal = 0, None
+            assert (await lm.read())[1] is not None
+            assert not lm.refused
+            assert not lm.policy
+            cloud.command_status, cloud.refusal = 403, policy
+            token = lm.access
+            assert await lm.command(15, "on") == 403
+            assert lm.refused
+            assert lm.policy
+            assert lm.access == token
+            cloud.command_status, cloud.refusal = 200, None
+            assert await lm.command(16, "on") == 200
+            assert not lm.refused
+            assert not lm.policy
 
             # The installation survives a restart: no second registration, same id.
             events = Events()

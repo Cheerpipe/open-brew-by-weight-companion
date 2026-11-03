@@ -300,6 +300,16 @@ the dashboard every 30 seconds. Only its renewal loop refreshes a valid
 token; a token it needs at start or after a `401` is reported to the
 controller at once with its new life.
 
+When the cloud accepts the sign-in but answers `401` or `403` to the
+dashboard or a command, the companion tells the controller that reads and
+commands are refused while the subscription lives, and signs in again on the
+next request. A `403` with the code `USER_MUST_ACCEPT_POLICY` is told apart:
+the account only has to accept La Marzocco's latest terms, so the token is
+kept and the controller is told the refusal is a pending policy. The
+companion never accepts the terms itself; the La Marzocco app or the
+controller does, and the companion's next successful read clears the
+refusal.
+
 It runs while it holds the account, the controller's La Marzocco switch is
 on and **Show power state** is on, whether the controller uses it or not.
 With **Show power state** off the controller keeps La Marzocco on its own

@@ -125,7 +125,7 @@ class Lines(logging.Handler):
 class Upstream:
     """No La Marzocco in these tests."""
 
-    sub = up = refused = False
+    sub = up = refused = policy = False
     ep = tok = 0
 
     def __init__(self, store: Store, events: Companion) -> None:

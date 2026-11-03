@@ -59,7 +59,7 @@ class Vectors(TypedDict):
 class Upstream:
     """No La Marzocco here."""
 
-    sub = up = refused = False
+    sub = up = refused = policy = False
     ep = tok = 0
 
     def __init__(self, store: Store, events: Companion) -> None:

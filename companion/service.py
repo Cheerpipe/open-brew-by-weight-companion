@@ -125,6 +125,8 @@ class LaMarzoccoClient(Protocol):
     def tok(self) -> int: ...
     @property
     def refused(self) -> bool: ...
+    @property
+    def policy(self) -> bool: ...
     def configure(self, account: Account | None, conn: str, observe: bool, /) -> None: ...
     def erase(self) -> None: ...
     def stop(self) -> None: ...
@@ -893,10 +895,13 @@ class Companion:
             _ = self.spawn(self._read_and_forward())
 
     def _report(self, force: bool = False) -> None:
-        state = (self.lm.sub, self.lm.ep, self.lm.refused)
+        state = (self.lm.sub, self.lm.ep, self.lm.refused, self.lm.policy)
         frame: Frame = {"t": "lm", "sub": self.lm.sub, "ep": self.lm.ep, "tok": self.lm.tok}
         if self.lm.refused:
             frame["err"] = "auth"  # The subscription lives, but reads and commands answer 401/403.
+        if self.lm.policy:
+            # ...only because the account has not accepted La Marzocco's latest terms.
+            frame["policy"] = True
         if (force or state != self.reported) and self.post(frame):
             self.reported = state
 
@@ -1038,6 +1043,7 @@ class Companion:
                 "subscribed": self.lm.sub,
                 "up": self.lm.up,
                 "refused": self.lm.refused,
+                "policy": self.lm.policy,
             },
             "log": log_facts,
             "archive": archive_facts,

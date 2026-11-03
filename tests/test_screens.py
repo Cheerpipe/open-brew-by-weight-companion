@@ -82,7 +82,7 @@ class Idle:
 
     sub = up = False
     ep = tok = 0
-    refused = False
+    refused = policy = False
 
     def __init__(self, store: Store, events: Companion) -> None:
         pass

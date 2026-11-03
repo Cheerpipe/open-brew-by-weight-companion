@@ -45,6 +45,7 @@ RETRY_S = (
     9,
     60,
 )  # An immediate first retry, then the controller's delays and cooldown.
+POLICY_PENDING = "USER_MUST_ACCEPT_POLICY"  # The 403 code while the latest terms are not accepted.
 COMMANDS = {
     "temp": "CoffeeMachineSettingCoffeeBoilerTargetTemperature",
     "standby": "CoffeeMachineChangeMode",
@@ -74,6 +75,20 @@ class Events(Protocol):
 def _answered(what: str, status: int, text: str = "") -> str:
     """`<what> answered <status>`, with a trimmed excerpt of the body when there is one."""
     return f"{what} answered {status} {clip(text)}".rstrip()
+
+
+def _policy_pending(status: int, text: str) -> bool:
+    """Whether a 403 is La Marzocco's pending-policy refusal.
+
+    The token is valid; the account must accept La Marzocco's latest terms.
+    """
+    if status != 403:
+        return False
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("code") == POLICY_PENDING
 
 
 def _uuid(raw: bytes) -> str:
@@ -196,7 +211,7 @@ class LaMarzocco:
         self.rejected = False
         self.sub, self.ep, self.alive_at = False, 0, 0.0
         self.last_message_at = 0.0
-        self.refused = False
+        self.refused = self.policy = False
         self.last_command = 0
         self.tasks: set[asyncio.Task[None]] = set()
         self.renewal: asyncio.Task[None] | None = None
@@ -236,7 +251,7 @@ class LaMarzocco:
         for task in self.tasks:
             task.cancel()
         self.tasks.clear()
-        self.refused = False
+        self.refused = self.policy = False
         self._set_subscribed(False)
 
     def _usable(self) -> bool:
@@ -250,7 +265,7 @@ class LaMarzocco:
         self.configure(None, *self.wanted[1:])
         self.installation = None
         self.access = self.refresh = None
-        self.refused = False
+        self.refused = self.policy = False
 
     def _spawn(self, coroutine: Coroutine[object, object, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(coroutine)
@@ -271,16 +286,35 @@ class LaMarzocco:
             self.sub = subscribed
             self.events.upstream()
 
-    def _refused(self, refused: bool) -> None:
-        """Reads or commands answered 401/403: the subscription lives, the data plane does not."""
-        if refused != self.refused:
-            self.refused = refused
+    def _refused(self, refused: bool, policy: bool = False) -> None:
+        """Reads or commands answered 401/403: the subscription lives, the data plane does not.
+
+        `policy` marks the refusal that only waits for the account to accept the latest terms.
+        """
+        policy = refused and policy
+        if (refused, policy) != (self.refused, self.policy):
+            self.refused, self.policy = refused, policy
             log(
-                "La Marzocco answers 401/403 to reads and commands; the subscription still lives"
+                "La Marzocco needs the account to accept its latest terms; "
+                "reads and commands are refused until then"
+                if policy
+                else "La Marzocco answers 401/403 to reads and commands; "
+                "the subscription still lives"
                 if refused
                 else "La Marzocco accepts reads and commands again"
             )
             self.events.upstream()
+
+    def _answered_refusal(self, status: int, text: str) -> None:
+        """Mark a 401/403 to a read or command.
+
+        A pending policy keeps the token, which is valid; any other refusal drops it as
+        stale, so the next request signs in again.
+        """
+        policy = _policy_pending(status, text)
+        if not policy:
+            self.access = None
+        self._refused(True, policy)
 
     async def _run(self) -> None:
         attempt = 0
@@ -447,8 +481,7 @@ class LaMarzocco:
             log(f"La Marzocco read failed ({error})")
             return 0, None, ac
         if status in (401, 403):
-            self.access = None  # A stale token: the next request signs in again.
-            self._refused(True)
+            self._answered_refusal(status, text)
         elif status == 200:
             self._refused(False)
         else:
@@ -475,7 +508,7 @@ class LaMarzocco:
         self.last_command = command_id
         try:
             await self._session()
-            status, _ = await self._request(
+            status, text = await self._request(
                 "POST", f"/things/{self.account[2]}/command/{COMMANDS[op]}", body
             )
         except AuthRejectedError:
@@ -485,8 +518,7 @@ class LaMarzocco:
             log(f"La Marzocco command failed ({error})")
             return 0
         if status in (401, 403):
-            self.access = None
-            self._refused(True)
+            self._answered_refusal(status, text)
         elif status == 200:
             self._refused(False)
         return status
