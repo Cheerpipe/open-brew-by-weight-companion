@@ -195,7 +195,7 @@ class Companion:
         self.expect: tuple[str, int | None] | None = None
         self.confirm_timer: asyncio.TimerHandle | None = None
         self.command_lock = asyncio.Lock()
-        self.reported: tuple[bool, int, bool] | None = None
+        self.reported: tuple[bool, int, bool, bool] | None = None
         self.lm = upstream(self.store, self)
         self.relay = Relay(self)
         self.screens = Screens(self, self.relay)

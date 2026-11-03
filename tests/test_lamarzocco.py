@@ -392,7 +392,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             cloud.refuse_dashboard = 403
             upstreams = events.log.count(("upstream",))
             assert (await lm.read())[:2] == (403, None)
-            assert lm.refused
+            assert (lm.refused, lm.policy) == (True, False)
             assert events.log.count(("upstream",)) == upstreams + 1, (
                 "the refusal is reported at once"
             )
@@ -400,7 +400,6 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
                 "a refused data plane is logged"
             )
             assert lm.access is None, "a plain 403 drops the token"
-            assert not lm.policy
             cloud.refuse_dashboard = 0
             assert (await lm.read())[1] is not None
             await events.wait(lambda: not lm.refused)
@@ -411,19 +410,17 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             cloud.refuse_dashboard = 0
             cloud.command_status = 403
             assert await lm.command(13, "on") == 403
-            assert lm.refused
+            assert (lm.refused, lm.policy) == (True, False)
             assert lm.access is None
-            assert not lm.policy
             cloud.command_status = 401
             assert (await lm.read())[1] is not None
-            assert not lm.refused
+            assert (lm.refused, lm.policy) == (False, False)
             assert await lm.command(14, "on") == 401
-            assert lm.refused
+            assert (lm.refused, lm.policy) == (True, False)
             assert lm.access is None
-            assert not lm.policy
             cloud.command_status = 200
             assert (await lm.read())[1] is not None
-            assert not lm.refused
+            assert (lm.refused, lm.policy) == (False, False)
 
             # A pending policy (403 USER_MUST_ACCEPT_POLICY) is a refusal of its own that keeps
             # the valid token.
@@ -436,8 +433,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             token, signins = lm.access, cloud.calls.count("signin")
             upstreams = events.log.count(("upstream",))
             assert (await lm.read())[:2] == (403, None)
-            assert lm.refused
-            assert lm.policy
+            assert (lm.refused, lm.policy) == (True, True)
             assert lm.access == token, "a pending policy keeps the token"
             assert events.log.count(("upstream",)) == upstreams + 1
             assert any("accept its latest terms" in line for line in lines.lines), (
@@ -451,24 +447,20 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             # Policy -> plain refusal is a change, and drops the token.
             cloud.refusal = {"code": "SOMETHING_ELSE"}
             assert (await lm.read())[0] == 403
-            assert lm.refused
-            assert not lm.policy
+            assert (lm.refused, lm.policy) == (True, False)
             assert lm.access is None
             assert events.log.count(("upstream",)) == upstreams + 2
             cloud.refuse_dashboard, cloud.refusal = 0, None
             assert (await lm.read())[1] is not None
-            assert not lm.refused
-            assert not lm.policy
+            assert (lm.refused, lm.policy) == (False, False)
             cloud.command_status, cloud.refusal = 403, policy
             token = lm.access
             assert await lm.command(15, "on") == 403
-            assert lm.refused
-            assert lm.policy
+            assert (lm.refused, lm.policy) == (True, True)
             assert lm.access == token
             cloud.command_status, cloud.refusal = 200, None
             assert await lm.command(16, "on") == 200
-            assert not lm.refused
-            assert not lm.policy
+            assert (lm.refused, lm.policy) == (False, False)
 
             # A refusal is probed by itself, with nothing else reading (the direct route): terms
             # accepted elsewhere.
@@ -476,12 +468,14 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             lm.stop()  # Ends the probes the refusals above left asleep for the full five minutes.
             cloud.refuse_dashboard, cloud.refusal = 403, policy
             assert (await lm.read())[0] == 403
-            assert lm.refused
+            assert (lm.refused, lm.policy) == (True, True)
             assert lm.probe in lm.tasks
             reads = cloud.calls.count("dashboard")
             await asyncio.sleep(0.5)
             assert cloud.calls.count("dashboard") > reads, "a probe reads with nothing else reading"
-            assert lm.refused, "a probe keeps a refusal the cloud keeps"
+            assert (lm.refused, lm.policy) == (True, True), (
+                "a probe keeps a refusal the cloud keeps"
+            )
             cloud.refuse_dashboard, cloud.refusal = 0, None
             await events.wait(lambda: not lm.refused)
             await asyncio.sleep(0.05)
