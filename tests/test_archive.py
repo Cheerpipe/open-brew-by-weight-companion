@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """The shot and activation archive against a scripted controller.
 
 The controller's side follows the firmware's link record frames (`rx`, `rf`,
@@ -13,22 +12,25 @@ import asyncio
 import base64
 import json
 import logging
-import sys
 import tempfile
 import zlib
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, TypeIs, cast
 
-if not __debug__:
-    raise SystemExit("assertions are disabled (PYTHONOPTIMIZE); these checks would not run")
+import aiohttp
+import pytest
+from aiohttp.test_utils import TestServer
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import aiohttp  # noqa: E402
-from aiohttp.test_utils import TestServer  # noqa: E402
+from companion import archive, index_mirror, link, stats
+from companion.service import Companion, web_app
+from companion.store import offload
+from fake_controller import index_answer
 
-from companion import archive, index_mirror, link, service, stats  # noqa: E402
-from companion.service import Companion, web_app  # noqa: E402
-from fake_controller import index_answer  # noqa: E402
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
+    from companion.service import Frame
+    from companion.store import Store
 
 DEVICE = "AA:BB:CC:DD:EE:FF"
 COLS = [
@@ -55,16 +57,68 @@ COLS = [
     "shotType",
     "stopDetail",
 ]
-archive.REQUEST_S = 0.5
-archive.TRACE_RETRY_S = 0.2
+
+type StoreName = Literal["shots", "history"]
+type Shot = tuple[dict[str, object], dict[str, object]]  # The record and its curve.
+STORE_NAMES: tuple[StoreName, ...] = ("shots", "history")
+
+
+def is_store(value: object) -> TypeIs[StoreName]:
+    return value in STORE_NAMES
+
+
+class Stores(TypedDict):
+    shots: dict[int, Shot]
+    history: dict[int, dict[str, object]]
+
+
+class Row(TypedDict, total=False):
+    """An archive row as the page lists it (the members these checks read)."""
+
+    id: int
+    archiveGeneration: int
+    archiveOnly: bool
+    archiveTrace: bool
+    rating: int
+    badReason: str | None
+    arrivalS: float | None
+    verdict: str
+    presetId: int
+    scaleName: str
+
+
+class PageJson(TypedDict, total=False):
+    """A page's answer: Shots or History rows, or the Stats header (the members read here)."""
+
+    rows: list[Row]
+    next: str | None
+    holes: list[dict[str, int]]
+    generations: list[dict[str, int | bool | None]]
+    presets: list[list[int | str]]
+    stats: stats.Header
+    good: int
+    epoch: int
+
+
+class Filter(TypedDict):
+    bad: bool
+    result: list[str]
+    preset: list[int]
+    scale: list[int]
+
+
+class Receiver(Protocol):
+    """Whoever takes the controller's frames: the companion, or a recorder in its place."""
+
+    async def _on_frame(self, frame: Frame) -> None: ...
 
 
 class Lines(logging.Handler):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(level=logging.INFO)
-        self.lines = []
+        self.lines: list[str] = []
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         self.lines.append(record.getMessage())
 
 
@@ -74,51 +128,64 @@ class Upstream:
     sub = up = refused = False
     ep = tok = 0
 
-    def __init__(self, store, events):
+    def __init__(self, store: Store, events: Companion) -> None:
         pass
 
-    def configure(self, *_):
+    def configure(self, *_: object) -> None:
         pass
 
-    def stop(self):
+    def stop(self) -> None:
         pass
 
-    def erase(self):
+    def erase(self) -> None:
         pass
 
-    def rejected_for(self, _):
+    def rejected_for(self, _: object) -> bool:
         return False
 
-    def signed_in_for(self, _):
+    def signed_in_for(self, _: object) -> bool:
         return False
+
+    async def read(self) -> tuple[int, dict[str, object] | None, int]:
+        raise AssertionError("no La Marzocco in these tests")
+
+    async def command(self, *_: object) -> int:
+        raise AssertionError("no La Marzocco in these tests")
 
 
 class Controller:
     """The controller's two record stores and its answers to the archive's requests."""
 
-    def __init__(self, capacity=40):
+    def __init__(self, capacity: int = 40) -> None:
         self.capacity, self.boot, self.clock = capacity, 7, 1789000000
-        self.stores = {"shots": {}, "history": {}}
+        self.stores: Stores = {"shots": {}, "history": {}}
         self.next = {"shots": 1, "history": 1}
         self.epochs = {"shots": 11, "history": 21}
         self.gen = {"shots": 1, "history": 1}  # The store header's write counter: Clear keeps it.
         # D8: the user's Clear count and newest deleted ids.
-        self.clears, self.gone = {"shots": 0, "history": 0}, {"shots": [], "history": []}
-        self.traces = {}  # shot id -> bytes, None (no trace) or "busy"
-        self.requests = []
+        self.clears = {"shots": 0, "history": 0}
+        self.gone: dict[str, list[int]] = {"shots": [], "history": []}
+        self.traces: dict[
+            int, bytes | str | None
+        ] = {}  # shot id -> bytes, None (no trace) or "busy"
+        self.requests: list[Frame] = []
         self.ignore = 0  # Index requests left unanswered (a lost frame).
-        self.held = None  # A list while a hold keeps the requests back (and the pings unanswered).
+        # A list while a hold keeps the requests back (and the pings unanswered).
+        self.held: list[Frame] | None = None
         self.hold_next = False  # A hold starts right after the next index answer.
         self.hold_page = False  # ...or right after the next page.
-        # Index deltas (`sum`, `d`): the link session's baselines, and the field the next delta answer
-        # corrupts.
-        self.baselines, self.tamper = {}, None
+        # Index deltas (`sum`, `d`): the link session's baselines, and the field the next delta
+        # answer corrupts.
+        self.baselines: dict[str, tuple[int, list[int]]] = {}
+        self.tamper: str | None = None
 
-    def moved(self, store):
+    def moved(self, store: StoreName) -> None:
         self.epochs[store] += 1
         self.gen[store] += 1
 
-    def add_shot(self, bad=None, trace=b"T", clock=True):
+    def add_shot(
+        self, bad: str | None = None, trace: bytes | None = b"T", clock: bool = True
+    ) -> int:
         rid = self.next["shots"]
         self.next["shots"] += 1
         end = rid * 1000 + 17
@@ -153,7 +220,7 @@ class Controller:
         self._rotate("shots")
         return rid
 
-    def add_activation(self, kind="shot", clock=True, duration=25.0):
+    def add_activation(self, kind: str = "shot", clock: bool = True, duration: float = 25.0) -> int:
         rid = self.next["history"]
         self.next["history"] += 1
         self.stores["history"][rid] = {
@@ -167,38 +234,38 @@ class Controller:
         self._rotate("history")
         return rid
 
-    def _rotate(self, store):
+    def _rotate(self, store: StoreName) -> None:
         while len(self.stores[store]) > self.capacity:
             del self.stores[store][min(self.stores[store])]
         self.moved(store)
 
-    def delete(self, store, rid):
+    def delete(self, store: StoreName, rid: int) -> None:
         """The user deletes a record: named in `gone`, newest first, at most 16."""
         del self.stores[store][rid]
         self.gone[store] = ([rid] + self.gone[store])[:16]
         self.moved(store)
 
-    def clear(self, store, user=True):
-        """Clear history: the records and the id counter go; the write counter keeps counting. A user's
-        Clear raises the Clear count; a factory reset's keeps it."""
+    def clear(self, store: StoreName, user: bool = True) -> None:
+        """Clear history: the records and the id counter go; the write counter keeps counting. A
+        user's Clear raises the Clear count; a factory reset's keeps it."""
         self.stores[store], self.next[store], self.gone[store] = {}, 1, []
         self.clears[store] += int(user)
         self.moved(store)
 
-    def factory_reset(self):
+    def factory_reset(self) -> None:
         """Every record and both counters start again."""
-        for store in self.stores:
+        for store in STORE_NAMES:
             self.clear(store, user=False)
             self.gen[store] = 1
 
-    def rev(self, store, rid):
+    def rev(self, store: StoreName, rid: int) -> int:
         record = self.stores[store][rid]
         return zlib.crc32(json.dumps(record, sort_keys=True).encode()) & 0xFFFFFF
 
-    def newest_first(self, store):
+    def newest_first(self, store: StoreName) -> list[int]:
         return sorted(self.stores[store], reverse=True)
 
-    async def serve(self, companion, outbox):
+    async def serve(self, companion: Receiver, outbox: asyncio.Queue[Frame]) -> None:
         while True:
             frame = await outbox.get()
             if frame["t"] in ("rx", "rf", "rt", "logsub"):
@@ -209,35 +276,38 @@ class Controller:
                 if frame["t"] != "logsub":
                     await self.answer(companion, frame)
 
-    async def _page_hold(self, companion):
+    async def _page_hold(self, companion: Receiver) -> None:
         if self.hold_page:
             self.hold_page, self.held = False, []
             await companion._on_frame({"t": "hold", "on": False, "sync": True})
 
-    async def release(self, companion):
-        """The hold ends: the controller says so at once, answers what arrived meanwhile, then the pings
-        are answered again."""
+    async def release(self, companion: Receiver) -> None:
+        """The hold ends: the controller says so at once, answers what arrived meanwhile, then the
+        pings are answered again."""
         held, self.held = self.held, None
+        assert held is not None
         await companion._on_frame({"t": "hold", "on": False, "sync": False})
         for frame in held:
             if frame["t"] != "logsub":
                 await self.answer(companion, frame)
 
-    async def beat(self, companion):
-        """The controller's reply to each companion ping: the hold frame, `sync` false while clear."""
+    async def beat(self, companion: Receiver) -> None:
+        """The controller's reply to each companion ping: the hold frame, `sync` false while
+        clear."""
         while True:
             await asyncio.sleep(0.05)
             if self.held is None:
                 await companion._on_frame({"t": "hold", "on": False, "sync": False})
 
-    async def answer(self, companion, frame):
+    async def answer(self, companion: Receiver, frame: Frame) -> None:
         kind = frame["t"]
         if kind == "rx":
             if self.ignore:
                 self.ignore -= 1
                 return
             store = frame["s"]
-            f = {
+            assert is_store(store)
+            f: Frame = {
                 "v": 1,
                 "type": "records",
                 "boot": self.boot,
@@ -252,20 +322,25 @@ class Controller:
                 value for rid in self.newest_first(store) for value in (rid, self.rev(store, rid))
             ]
             f.update(
-                index_answer(self.baselines, store, frame["ep"], frame.get("d"), f["epoch"], rows)
+                index_answer(
+                    self.baselines, store, frame["ep"], frame.get("d"), self.epochs[store], rows
+                )
             )
             if "base" in f and self.tamper:
-                f[self.tamper] ^= 1
+                value = f[self.tamper]
+                assert isinstance(value, int)
+                f[self.tamper] = value ^ 1
                 self.tamper = None
             await companion._on_frame({"t": "rec", "f": f})
             if self.hold_next:  # A scaled shot starts: the controller tells the companion at once.
                 self.hold_next, self.held = False, []
                 await companion._on_frame({"t": "hold", "on": False, "sync": True})
         elif kind == "rf":
-            store, ids = (
-                frame["s"],
-                self.newest_first(frame["s"])[frame["o"] : frame["o"] + frame["n"]],
-            )
+            store, offset, count = frame["s"], frame["o"], frame["n"]
+            assert is_store(store)
+            assert isinstance(offset, int)
+            assert isinstance(count, int)
+            ids = self.newest_first(store)[offset : offset + count]
             if store == "history":
                 await companion._on_frame(
                     {
@@ -283,12 +358,12 @@ class Controller:
                 )
                 await self._page_hold(companion)
                 return
-            rows = [
+            shots = [
                 [self.stores[store][rid][0][key] for key in COLS] + [self.stores[store][rid][1]]
                 for rid in ids
             ]
             seq = len(self.requests)
-            for base in range(0, max(len(rows), 1), 2):  # Two rows a frame: a page across frames.
+            for base in range(0, max(len(shots), 1), 2):  # Two rows a frame: a page across frames.
                 f = {
                     "v": 1,
                     "type": "stats",
@@ -298,12 +373,12 @@ class Controller:
                     "seq": seq,
                     "request": frame["r"],
                     "total": len(self.stores[store]),
-                    "offset": frame["o"],
-                    "limit": frame["n"],
+                    "offset": offset,
+                    "limit": count,
                     "hasMore": False,
-                    "rows": rows[base : base + 2],
+                    "rows": shots[base : base + 2],
                     "rowBase": base,
-                    "more": base + 2 < len(rows),
+                    "more": base + 2 < len(shots),
                 }
                 if base == 0:
                     f.update(cols=",".join(COLS), tag=1)
@@ -311,78 +386,90 @@ class Controller:
             await self._page_hold(companion)
         else:
             identity = (frame["id"], frame["b"], frame["e"])
-            record = self.stores["shots"].get(frame["id"])
+            rid = frame["id"]
+            assert isinstance(rid, int)
+            record = self.stores["shots"].get(rid)
             trace = (
-                self.traces.get(frame["id"])
+                self.traces.get(rid)
                 if record
                 and (record[0]["id"], record[0]["bootId"], record[0]["endedAtMs"]) == identity
                 else None
             )
-            answer = {"t": "trc", "id": frame["id"], "b": frame["b"], "e": frame["e"]}
+            answer: Frame = {"t": "trc", "id": frame["id"], "b": frame["b"], "e": frame["e"]}
             if trace in ("busy", "saving"):
                 answer["r"] = trace
             elif trace:
+                assert isinstance(trace, bytes)
                 answer.update(r="ok", d=base64.b64encode(trace).decode())
             else:
                 answer["r"] = "none"
             await companion._on_frame(answer)
 
-    async def notice(self, companion):
+    async def notice(self, companion: Receiver) -> None:
         await companion._on_frame(
             {"t": "rs", "sh": self.epochs["shots"], "hi": self.epochs["history"]}
         )
 
 
-async def sql(companion, statement, *args):
-    return await service.offload(
-        lambda: [tuple(row) for row in companion.logs.connection.execute(statement, args)]
-    )
+async def sql(companion: Companion, statement: str, *args: object) -> list[tuple[object, ...]]:
+    return await offload(lambda: [tuple(row) for row in companion.logs.db.execute(statement, args)])
 
 
-async def ids(companion, store, generation=None):
+async def ids(companion: Companion, store: str, generation: int | None = None) -> set[int]:
     """The ids of one store: of every generation, or of one."""
-    return {
-        row[0]
-        for row in await sql(
-            companion,
-            "select id from archive_records where store = ? and "
-            "generation = coalesce(?, generation)",
-            store,
-            generation,
+    found: set[int] = set()
+    for (rid,) in await sql(
+        companion,
+        "select id from archive_records where store = ? and generation = coalesce(?, generation)",
+        store,
+        generation,
+    ):
+        assert isinstance(rid, int)
+        found.add(rid)
+    return found
+
+
+def text(value: object) -> str:
+    """A TEXT column's value."""
+    assert isinstance(value, str)
+    return value
+
+
+async def row(companion: Companion, store: str, rid: int, generation: int = 1) -> dict[str, object]:
+    body: dict[str, object] = json.loads(
+        text(
+            (
+                await sql(
+                    companion,
+                    "select body from archive_records where store = ? and id = ? "
+                    "and generation = ?",
+                    store,
+                    rid,
+                    generation,
+                )
+            )[0][0]
         )
-    }
-
-
-async def row(companion, store, rid, generation=1):
-    return json.loads(
-        (
-            await sql(
-                companion,
-                "select body from archive_records where store = ? and id = ? and generation = ?",
-                store,
-                rid,
-                generation,
-            )
-        )[0][0]
     )
+    return body
 
 
-async def settled(companion):
+def quiet(copy: archive.Archive) -> bool:
+    """No pass runs and none is due."""
+    return copy.syncing is None and not copy.wake.is_set()
+
+
+async def settled(companion: Companion) -> None:
     """The sync has nothing left to do."""
     for _ in range(300):
         await asyncio.sleep(0.02)
-        if (
-            not companion.archive.wake.is_set()
-            and companion.archive.syncing is None
-            and not companion.archive.wanted
-        ):
+        if quiet(companion.archive) and not companion.archive.wanted:
             await asyncio.sleep(0.05)
-            if companion.archive.syncing is None and not companion.archive.wake.is_set():
+            if quiet(companion.archive):
                 return
     raise AssertionError("the archive sync did not settle")
 
 
-def firmware_key(row, sort, direction):
+def firmware_key(row: Row, sort: str, direction: str) -> tuple[int, ...]:
     """The controller's comparators, written from its code: date is (generation, id); rating puts
     unrated shots last whatever the direction, then the rating, then the newest first."""
     g, rid = row["archiveGeneration"], row["id"]
@@ -392,7 +479,7 @@ def firmware_key(row, sort, direction):
     return (g, rid) if direction == "asc" else (-g, -rid)
 
 
-def firmware_match(row, query):
+def firmware_match(row: Row, query: Filter) -> bool:
     """shotListFilterMatches: AND across groups, OR within; a result needs an arrival."""
     if not query.get("bad") and row["badReason"] is not None:
         return False
@@ -406,12 +493,16 @@ def firmware_match(row, query):
     )
 
 
-async def parity(companion, get):
-    """A fixture of archive-only shots: a closed generation and the open one below its oldest, plus rows
-    that are not archive-only."""
+async def parity(
+    companion: Companion,
+    get: Callable[[str], Awaitable[PageJson]],
+    refused: Callable[[str, int], Awaitable[None]],
+) -> None:
+    """A fixture of archive-only shots: a closed generation and the open one below its oldest, plus
+    rows that are not archive-only."""
 
-    def fixture():
-        connection = companion.logs.connection
+    def fixture() -> None:
+        connection = companion.logs.db
         with connection:
             connection.execute("delete from archive_records")
             connection.execute("delete from archive_sync")
@@ -438,7 +529,8 @@ async def parity(companion, get):
                         "endedAtUnixSec": 1789000000 + rid,
                     }
                     connection.execute(
-                        "insert into archive_records values (?, 'shots', ?, ?, '', 0, 'good', ?, 0, ?)",
+                        "insert into archive_records "
+                        "values (?, 'shots', ?, ?, '', 0, 'good', ?, 0, ?)",
                         (
                             DEVICE,
                             generation,
@@ -448,7 +540,7 @@ async def parity(companion, get):
                         ),
                     )
 
-    await service.offload(fixture)
+    await offload(fixture)
     everything = (await get("/shots?limit=50&bad=1&sort=date&dir=asc"))["rows"]
     only = {(r["archiveGeneration"], r["id"]) for r in everything}
     expected_only = {(1, rid) for rid in range(1, 21)} | {(2, rid) for rid in range(5, 15)}
@@ -456,7 +548,7 @@ async def parity(companion, get):
     history = (await get("/shots?limit=50&bad=1&all=1&sort=date&dir=asc"))["rows"]
     assert len(history) == 46, "both generations, the controller's rows included"
     lunar = zlib.crc32(b"Lunar") ^ 0xFFFFFFFF
-    filters = [
+    filters: list[dict[str, str]] = [
         {},
         {"bad": "1"},
         {"result": "fast,slow"},
@@ -467,7 +559,7 @@ async def parity(companion, get):
     for sort in ("date", "rating"):
         for direction in ("desc", "asc"):
             for given in filters:
-                query = {
+                query: Filter = {
                     "bad": given.get("bad") == "1",
                     "result": given.get("result", "").split(",") if given.get("result") else [],
                     "preset": [int(v) for v in given.get("preset", "").split(",") if v],
@@ -484,7 +576,8 @@ async def parity(companion, get):
                 assert [(r["archiveGeneration"], r["id"]) for r in whole] == [
                     (r["archiveGeneration"], r["id"]) for r in want
                 ], (sort, direction, given)
-                paged, cursor = [], None
+                paged: list[Row] = []
+                cursor = None
                 while True:
                     page = await get(
                         f"/shots?limit=3&{params}" + (f"&cursor={cursor}" if cursor else "")
@@ -494,8 +587,9 @@ async def parity(companion, get):
                     if cursor is None:
                         break
                 assert paged == whole, (sort, direction, given)
-                # The replica's page (the mux serves it): the whole history in the controller's order,
-                # the rows only the archive keeps marked, the window sliced like shotLogPageSlice.
+                # The replica's page (the mux serves it): the whole history in the controller's
+                # order, the rows only the archive keeps marked, the window sliced like
+                # shotLogPageSlice.
                 listed = sorted(
                     (r for r in history if firmware_match(r, query)),
                     key=lambda r: firmware_key(r, sort, direction),
@@ -519,7 +613,8 @@ async def parity(companion, get):
                 ], (sort, direction, given)
                 assert (meta is None) == (not any(only for *_, only, _ in rows))
     presets = (await get("/shots?limit=1"))["presets"]
-    assert len(presets) == 3 and all(name.endswith("g2") for _, name in presets), (
+    assert len(presets) == 3, "the newest name per preset"
+    assert all(isinstance(name, str) and name.endswith("g2") for _, name in presets), (
         "the newest name per preset"
     )
     for bad in (
@@ -529,54 +624,69 @@ async def parity(companion, get):
         "cursor=1",
         "scale=" + ",".join(["1"] * 9),
     ):
-        assert (await get(f"/shots?limit=5&{bad}", 400)) is None, bad
-    history = await get("/history?limit=5&sort=rating", 400)
-    assert history is None, "History has no rating order"
+        await refused(f"/shots?limit=5&{bad}", 400)
+    await refused("/history?limit=5&sort=rating", 400)  # History has no rating order.
+
+
+class Recorded(TypedDict):
+    request: Frame
+    frames: list[Frame]
 
 
 class Recorder:
-    """Stands in for the companion while the scripted controller answers, keeping each answer: the
-    shape of the firmware's link vectors (the request, then the controller's frames)."""
+    """Stands in for the companion while the scripted controller answers, keeping each answer:
+    the shape of the firmware's link vectors (the request, then the controller's frames)."""
 
-    def __init__(self, companion):
-        self.companion, self.cases = companion, []
+    def __init__(self, companion: Companion) -> None:
+        self.companion = companion
+        self.cases: list[Recorded] = []
 
-    async def _on_frame(self, frame):
+    async def _on_frame(self, frame: Frame) -> None:
         self.cases[-1]["frames"].append(frame)
         await self.companion._on_frame(frame)
 
 
 class Replay:
-    """A controller made of recorded cases (the firmware's companion-records vectors when they come):
-    each request the companion sends is answered with its case's frames, its own request id put in."""
+    """A controller made of recorded cases (the firmware's companion-records vectors when they
+    come): each request the companion sends is answered with its case's frames, its own request id
+    put in."""
 
-    def __init__(self, cases):
+    def __init__(self, cases: list[Recorded]) -> None:
         self.cases, self.answered = cases, 0
 
     @staticmethod
-    def same(sent, recorded):
+    def same(sent: Mapping[str, object], recorded: Mapping[str, object]) -> bool:
         return {k: v for k, v in sent.items() if k not in ("q", "r")} == {
             k: v for k, v in recorded.items() if k not in ("q", "r")
         }
 
-    async def serve(self, companion, outbox):
+    async def serve(self, companion: Companion, outbox: asyncio.Queue[Frame]) -> None:
         while True:
             frame = await outbox.get()
             if frame["t"] not in ("rx", "rf", "rt"):
                 continue
             case = next(c for c in self.cases if self.same(frame, c["request"]))
-            for answer in case["frames"]:
-                answer = json.loads(json.dumps({k: v for k, v in answer.items() if k != "q"}))
-                if answer.get("t") == "rec" and "request" in answer["f"] and "r" in frame:
-                    answer["f"]["request"] = frame["r"]
+            for recorded in case["frames"]:
+                answer: Frame = json.loads(
+                    json.dumps({k: v for k, v in recorded.items() if k != "q"})
+                )
+                inner = answer.get("f")
+                if (
+                    answer.get("t") == "rec"
+                    and isinstance(inner, dict)
+                    and "request" in inner
+                    and "r" in frame
+                ):
+                    inner["request"] = frame["r"]
                 await companion._on_frame(answer)
             self.answered += 1
 
 
-async def replayed(companion, cases):
+async def replayed(companion: Companion, cases: list[Recorded]) -> int:
     """The archive a recorded session leaves, from those frames alone."""
     replay = Replay(cases)
-    companion.outbox = outbox = asyncio.Queue()
+    outbox: asyncio.Queue[Frame] = asyncio.Queue()
+    companion.outbox = outbox
     task = asyncio.create_task(replay.serve(companion, outbox))
     await companion._on_frame({"t": "dev", "name": "Kitchen", "id": DEVICE})
     await companion._on_frame({"t": "cfg", "ui": True, "log": False, "archive": True})
@@ -591,10 +701,16 @@ async def replayed(companion, cases):
 class Link:
     """A session: the companion's outbox and the controller answering it."""
 
-    def __init__(self, companion, fake):
+    outbox: asyncio.Queue[Frame]
+    task: asyncio.Task[None]
+    pings: asyncio.Task[None]
+
+    def __init__(self, companion: Companion, fake: Controller) -> None:
         self.companion, self.fake = companion, fake
 
-    async def open(self, archive_on=True, log=False, cfg=None):
+    async def open(
+        self, archive_on: bool = True, log: bool = False, cfg: Frame | None = None
+    ) -> None:
         self.fake.baselines = {}  # A new link session: the controller's baselines start again.
         self.outbox = asyncio.Queue()
         self.companion.outbox = self.outbox
@@ -605,7 +721,7 @@ class Link:
             cfg or {"t": "cfg", "ui": True, "log": log, "archive": archive_on}
         )
 
-    def close(self):
+    def close(self) -> None:
         self.task.cancel()
         self.pings.cancel()
         self.companion.sync_due, self.companion.sync_hold = (
@@ -619,7 +735,9 @@ class Link:
         self.companion.outbox = None
 
 
-async def main():
+async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(archive, "REQUEST_S", 0.5)
+    monkeypatch.setattr(archive, "TRACE_RETRY_S", 0.2)
     lines = Lines()
     logging.getLogger("obbw").addHandler(lines)
     fake = Controller()
@@ -628,29 +746,35 @@ async def main():
         async with aiohttp.ClientSession() as http:
             companion = Companion("Kitchen server", data, http, Upstream)
             await companion.open_log()
-            verdict, admin = {"value": True}, {"value": True}
+            verdict: dict[str, bool | None] = {"value": True}
+            admin = {"value": True}
 
-            async def allows(
-                headers,
-            ):  # (signed in, Admin unlocked for that screen), None when unreachable
+            # (signed in, Admin unlocked for that screen), None when unreachable
+            async def allows(_headers: Mapping[str, str]) -> tuple[bool, bool] | None:
                 return None if verdict["value"] is None else (verdict["value"], admin["value"])
 
-            companion._web_ui_allows = allows
+            monkeypatch.setattr(companion, "_web_ui_allows", allows)
             pages = TestServer(web_app(companion), host="127.0.0.1")
             await pages.start_server()
             base = f"http://127.0.0.1:{pages.port}/__companion/archive"
             session = {"X-WebUI-Session": "token"}
 
-            async def post(path, body, headers=session):
+            async def post(
+                path: str, body: Mapping[str, object], headers: Mapping[str, str] = session
+            ) -> tuple[int, object]:
                 async with http.post(base + path, json=body, headers=headers) as reply:
                     return reply.status, await reply.json()
 
-            async def get(path, status=200):
+            async def get(path: str) -> PageJson:
+                async with http.get(base + path, headers=session) as reply:
+                    assert reply.status == 200, (path, reply.status)
+                    return cast("PageJson", await reply.json())
+
+            async def refused(path: str, status: int) -> None:
                 async with http.get(base + path, headers=session) as reply:
                     assert reply.status == status, (path, reply.status)
-                    return await reply.json() if status == 200 else None
 
-            def said(text):
+            def said(text: str) -> int:
                 return sum(text in line for line in lines.lines)
 
             # --- Backfill after pairing: bad shots, traces ok / none / still saving -------
@@ -663,15 +787,16 @@ async def main():
             await settled(companion)
             assert await ids(companion, "shots") == set(range(1, 31))
             assert await ids(companion, "history") == set(range(1, 31))
-            stores = [frame.get("s", "trace") for frame in fake.requests]
+            stores = [str(frame.get("s", "trace")) for frame in fake.requests]
             assert stores == sorted(stores, key=["history", "shots", "trace"].index), (
                 "activations, shots, traces"
             )
             assert fake.requests[0] == {"t": "rx", "s": "history", "ep": 0}
-            traces = dict(await sql(companion, "select id, data from archive_traces"))
-            assert len(traces) == 29 and traces[6] is None, (
-                "a shot without a trace is never asked again"
-            )
+            traces = {
+                r[0]: r[1] for r in await sql(companion, "select id, data from archive_traces")
+            }
+            assert len(traces) == 29, "a shot without a trace is never asked again"
+            assert traces[6] is None, "a shot without a trace is never asked again"
             assert 30 not in traces, "a trace still being saved is asked again later"
             seen = len(fake.requests)
             companion.archive.wake.set()  # Another pass before the deadline does not ask again.
@@ -680,15 +805,17 @@ async def main():
             fake.traces[30] = b"late"
             await asyncio.sleep(0.4)
             await settled(companion)
-            assert dict(await sql(companion, "select id, data from archive_traces"))[30] == b"late"
+            assert {
+                r[0]: r[1] for r in await sql(companion, "select id, data from archive_traces")
+            }[30] == b"late"
             bad = await sql(
                 companion, "select id, kind from archive_records where store = 'shots' and bad = 1"
             )
-            assert {rid for rid, _ in bad} == {4, 11, 18, 25} and all(
-                kind == "short" for _, kind in bad
-            )
+            assert {rid for rid, _ in bad} == {4, 11, 18, 25}
+            assert all(kind == "short" for _, kind in bad)
             state = await companion.archive.store.sync_state(DEVICE, "shots")
-            assert state[:3] == (1, fake.epochs["shots"], 1) and state[3] == list(range(30, 0, -1))
+            assert state[:3] == (1, fake.epochs["shots"], 1)
+            assert state[3] == list(range(30, 0, -1))
 
             # --- An unchanged store costs nothing; a new shot fetches only itself -------
             fake.requests.clear()
@@ -711,7 +838,8 @@ async def main():
             await fake.notice(companion)
             await settled(companion)
             body = await row(companion, "shots", 5)
-            assert body["rating"] == 4 and body["wD"] == "curve5", body
+            assert body["rating"] == 4, body
+            assert body["wD"] == "curve5", body
 
             # --- Deletions mirror: one inside, and the newest, which is not a restart ---
             del fake.stores["shots"][12]
@@ -720,9 +848,9 @@ async def main():
             await fake.notice(companion)
             await settled(companion)
             held = await ids(companion, "shots")
-            assert 12 not in held and 31 not in held and len(held) == 29, (
-                "deleting the newest is not a restart"
-            )
+            assert 12 not in held, "deleting the newest is not a restart"
+            assert 31 not in held, "deleting the newest is not a restart"
+            assert len(held) == 29, "deleting the newest is not a restart"
             assert not await sql(companion, "select 1 from archive_traces where id in (12, 31)")
             assert not said("restarted")
 
@@ -743,18 +871,21 @@ async def main():
             fake.moved("shots")
             await fake.notice(companion)
             await settled(companion)
-            assert len(await ids(companion, "shots", 1)) == 29 and not said("restarted")
+            assert len(await ids(companion, "shots", 1)) == 29
+            assert not said("restarted")
             assert await sql(
                 companion,
                 "select generation, ident from archive_records where store = 'shots' "
                 "and id = 20 order by generation",
             ) == [(0, "7:20017"), (1, "99:20017")]
-            assert dict(
-                await sql(companion, "select generation, data from archive_traces where id = 20")
-            ) == {0: b"T\x14", 1: b"new20"}, "the old record keeps its trace aside"
-            assert said("shot 20 may be a different record now") == 1 and 19 in await ids(
-                companion, "shots", 1
-            )
+            assert {
+                r[0]: r[1]
+                for r in await sql(
+                    companion, "select generation, data from archive_traces where id = 20"
+                )
+            } == {0: b"T\x14", 1: b"new20"}, "the old record keeps its trace aside"
+            assert said("shot 20 may be a different record now") == 1
+            assert 19 in await ids(companion, "shots", 1)
             fake.moved("shots")
             await fake.notice(companion)
             await settled(companion)
@@ -770,9 +901,8 @@ async def main():
             await link_.open()
             await settled(companion)
             held = await ids(companion, "shots")
-            assert set(range(52, 92)) <= held and set(range(2, 31)) - {12, 19} <= held, (
-                "rotation is not deletion"
-            )
+            assert set(range(52, 92)) <= held, "rotation is not deletion"
+            assert set(range(2, 31)) - {12, 19} <= held, "rotation is not deletion"
             assert not said("restarted"), "everything missing is below the controller's oldest"
             assert await sql(
                 companion, "select generation, below, above, count from archive_holes"
@@ -785,7 +915,8 @@ async def main():
                 {"generation": 1, "count": 68, "restartedAt": None, "current": True},
                 {"generation": 0, "count": 1, "restartedAt": None, "current": False},
             ]
-            assert [r["id"] for r in tail["rows"]][:3] == [30, 29, 28] and tail["next"] is None
+            assert [r["id"] for r in tail["rows"]][:3] == [30, 29, 28]
+            assert tail["next"] is None
             assert all(r["archiveTrace"] is (r["id"] != 6) for r in tail["rows"])
             assert [(r["archiveGeneration"], r["id"]) for r in tail["rows"]][-1] == (0, 20), (
                 "the set-aside copy"
@@ -794,9 +925,8 @@ async def main():
                 "bad shots only with bad=1"
             )
             page = await get("/shots?limit=5&cursor=-1:-20&bad=1")
-            assert [r["id"] for r in page["rows"]] == [18, 17, 16, 15, 14] and page[
-                "next"
-            ] == "-1:-14"
+            assert [r["id"] for r in page["rows"]] == [18, 17, 16, 15, 14]
+            assert page["next"] == "-1:-14"
 
             # --- Archive-only edits are the companion's; controller-held ones are not ---
             assert await post("/rate", {"id": 30, "rating": 5}) == (200, {"ok": True})
@@ -810,9 +940,11 @@ async def main():
                 {"error": "NOT_FOUND"},
             )
             async with http.get(base + "/trace?id=29&boot=7&end=29017", headers=session) as reply:
-                assert reply.status == 200 and await reply.read() == b"T\x1d"
+                assert reply.status == 200
+                assert await reply.read() == b"T\x1d"
             async with http.get(base + "/trace?id=6&boot=7&end=6017", headers=session) as reply:
-                assert reply.status == 404 and (await reply.json())["error"] == "NO_SHOT_TRACE"
+                assert reply.status == 404
+                assert (await reply.json())["error"] == "NO_SHOT_TRACE"
 
             # --- A record the controller holds is the controller's to delete (AC8) ----------
             assert await post("/delete", {"store": "shots", "id": 60}) == (
@@ -855,28 +987,19 @@ async def main():
                     {"loginRequired": False, "signedIn": False, "adminUnlocked": True}
                 ).encode()
 
-                def release(self):
+                def release(self) -> None:
                     pass
 
-            async def passthrough(*_):
+            async def passthrough(*_: object) -> Reply:
                 return Reply()
 
-            relay, controller = (
-                (companion.relay.mode, companion.relay.passthrough),
-                companion.controller,
-            )
-            companion.relay.mode, companion.relay.passthrough, companion.controller = (
-                "disabled",
-                passthrough,
-                object(),
-            )
-            assert await Companion._web_ui_allows(
-                companion, {"X-WebUI-Client": "0123456789abcdef"}
-            ) == (True, False)
-            (companion.relay.mode, companion.relay.passthrough), companion.controller = (
-                relay,
-                controller,
-            )
+            with monkeypatch.context() as patch:
+                patch.setattr(companion.relay, "mode", "disabled")
+                patch.setattr(companion.relay, "passthrough", passthrough)
+                patch.setattr(companion, "controller", ("Kitchen", ("127.0.0.1", 9)))
+                assert await Companion._web_ui_allows(
+                    companion, {"X-WebUI-Client": "0123456789abcdef"}
+                ) == (True, False)
             assert 30 in await ids(companion, "shots")
 
             # --- Access: reads keep a remembered grant; changes need the controller now --
@@ -885,7 +1008,8 @@ async def main():
             async with http.get(
                 base + "/history?limit=5", headers={"X-WebUI-Session": "other"}
             ) as reply:
-                assert reply.status == 401 and (await reply.json())["error"] == "AUTH_REQUIRED"
+                assert reply.status == 401
+                assert (await reply.json())["error"] == "AUTH_REQUIRED"
             assert (await post("/rate", {"id": 30, "rating": 1}, {"X-WebUI-Session": "other"}))[
                 0
             ] == 401
@@ -901,10 +1025,8 @@ async def main():
                 for r in (await get("/shots?limit=50&bad=1"))["rows"]
             }
             every = (await get("/shots?limit=50&bad=1&all=1"))["rows"]
-            assert (
-                every[0]["id"] == max(await ids(companion, "shots", 1))
-                and every[0]["archiveOnly"] is False
-            )
+            assert every[0]["id"] == max(await ids(companion, "shots", 1))
+            assert every[0]["archiveOnly"] is False
             assert all(
                 r["archiveOnly"] is ((r["archiveGeneration"], r["id"]) in only) for r in every
             )
@@ -919,7 +1041,8 @@ async def main():
             async with http.post(base + "/rate", data="{}", headers=session) as reply:
                 assert reply.status == 415
 
-            # --- A restarted history (the Clear count unchanged): the generation closes, nothing goes (S4) --
+            # --- A restarted history (the Clear count unchanged): the generation closes, nothing
+            # goes (S4) --
             before = await ids(companion, "shots")
             fake.clear("shots", user=False)
             for _ in range(5):
@@ -930,19 +1053,22 @@ async def main():
                 "the closed generation keeps every record"
             )
             assert await ids(companion, "shots", 2) == set(range(1, 6))
-            assert said("shot history restarted") == 1 and not await sql(
-                companion, "select * from archive_holes where generation = 2"
-            )
-            generations = (await companion.status())["archive"]["generations"]["shots"]
+            assert said("shot history restarted") == 1
+            assert not await sql(companion, "select * from archive_holes where generation = 2")
+            facts = (await companion.status())["archive"]
+            assert isinstance(facts, dict)
+            generations = facts["generations"]["shots"]
             assert [(g["generation"], g["count"], g["current"]) for g in generations] == [
                 (2, 5, True),
                 (1, len(before), False),
                 (0, 1, False),
-            ] and generations[0]["restartedAt"] > 0
+            ]
+            assert generations[0]["restartedAt"] > 0
             tail = await get("/shots?limit=50&bad=1")
-            assert tail["rows"][0]["archiveGeneration"] == 1 and tail["rows"][0]["id"] == max(
-                before
-            ), "the closed generation is archive-only"
+            assert tail["rows"][0]["archiveGeneration"] == 1, (
+                "the closed generation is archive-only"
+            )
+            assert tail["rows"][0]["id"] == max(before), "the closed generation is archive-only"
             assert (
                 len(await sql(companion, "select * from archive_traces where generation = 2")) == 5
             )
@@ -991,13 +1117,17 @@ async def main():
             fake.add_shot()
             await fake.notice(companion)
             await asyncio.sleep(0.2)
-            assert fake.requests == [] and await ids(companion, "shots", 2) == set(range(1, 12))
-            # ...and the controller-off view (every copied row) follows the switch; the merged rows stay.
+            assert fake.requests == []
+            assert await ids(companion, "shots", 2) == set(range(1, 12))
+            # ...and the controller-off view (every copied row) follows the switch; the merged rows
+            # stay.
             async with http.get(base + "/shots?limit=5&all=1", headers=session) as reply:
-                assert reply.status == 409 and (await reply.json())["error"] == "ARCHIVE_OFF"
+                assert reply.status == 409
+                assert (await reply.json())["error"] == "ARCHIVE_OFF"
             await get("/shots?limit=5")
 
-            async def kept():  # The switch as a companion restarted now, with the controller off, knows it.
+            # The switch as a companion restarted now, with the controller off, knows it.
+            async def kept() -> tuple[bool, bool]:
                 restarted = Companion("Kitchen server", data, http, Upstream)
                 await restarted.open_log()
                 await restarted.logs.close()
@@ -1007,11 +1137,15 @@ async def main():
             assert await kept() == (True, False)
             await companion._on_frame({"t": "cfg", "ui": True, "log": False, "archive": True})
             await settled(companion)
-            assert 12 in await ids(companion, "shots", 2) and await kept() == (True, True)
+            assert 12 in await ids(companion, "shots", 2)
+            assert await kept() == (True, True)
 
             # --- Status and an export across generations -------------------------------
             facts = (await companion.status())["archive"]
-            assert facts["on"] and facts["available"] and facts["bytes"] > 0
+            assert isinstance(facts, dict)
+            assert facts["on"]
+            assert facts["available"]
+            assert facts["bytes"] > 0
             assert (
                 facts["shotsTotal"]
                 == (
@@ -1035,10 +1169,8 @@ async def main():
             )
             async with http.get(base + "/export", headers=session) as reply:
                 exported = json.loads(await reply.read())
-            assert (
-                exported["format"] == "openbrewbyweight-companion-archive"
-                and exported["device"] == DEVICE
-            )
+            assert exported["format"] == "openbrewbyweight-companion-archive"
+            assert exported["device"] == DEVICE
             assert {r["archiveGeneration"] for r in exported["history"]} == {
                 g
                 for (g,) in await sql(
@@ -1048,7 +1180,8 @@ async def main():
             }
             assert [(r["archiveGeneration"], r["id"]) for r in exported["shots"]] == await sql(
                 companion,
-                "select generation, id from archive_records where store = 'shots' order by generation, id",
+                "select generation, id from archive_records where store = 'shots' "
+                "order by generation, id",
             )
             assert not any("archiveKept" in r for r in exported["shots"])
             assert await post("/delete", {"store": "shots", "generation": -1, "id": 1}) == (
@@ -1086,10 +1219,10 @@ async def main():
             seen = len(fake.requests)
             await fake.notice(companion)
             await asyncio.sleep(0.8)  # Past the 0.5 s re-ask: it is armed, not sent.
-            assert len(fake.requests) == seen + 1 and fake.requests[-1]["t"] == "rx", fake.requests[
-                seen:
-            ]
-            assert companion.sync_due and not await ids(companion, "shots", shots_open) >= new
+            assert len(fake.requests) == seen + 1, fake.requests[seen:]
+            assert fake.requests[-1]["t"] == "rx", fake.requests[seen:]
+            assert companion.sync_due
+            assert not await ids(companion, "shots", shots_open) >= new
             await fake.release(companion)
             await settled(companion)
             assert await ids(companion, "shots", shots_open) >= new
@@ -1107,55 +1240,58 @@ async def main():
             async with http.get(
                 base + f"/stats?window=10&active=2&epoch={synced}", headers=session
             ) as reply:
-                answer = await reply.json()
+                answer = cast("PageJson", await reply.json())
             merged = [
-                json.loads(body)
+                json.loads(text(body))
                 for (body,) in await sql(
                     companion,
-                    "select body from archive_records where store = 'shots' order by generation desc, id desc",
+                    "select body from archive_records where store = 'shots' "
+                    "order by generation desc, id desc",
                 )
             ]
-            assert reply.status == 200 and answer["epoch"] == synced
-            assert (
-                answer["stats"] == stats.header(merged, 10, 2)
-                and answer["stats"]["shotCount"] == 10
-            )
+            assert reply.status == 200
+            assert answer["epoch"] == synced
+            assert answer["stats"] == stats.header(merged, 10, 2)
+            assert answer["stats"]["shotCount"] == 10
             assert answer["good"] == stats.good(merged, (), (), ()) > 10
             for window in (50, 100, 500, 1000):
                 assert (await get(f"/stats?window={window}&active=2&epoch={synced}"))[
                     "stats"
                 ] == stats.header(merged, window, 2)
             fast = await get(f"/stats?window=10&active=2&epoch={synced}&result=fast&preset=1,2")
-            assert (
-                fast["good"] == stats.good(merged, (1,), (1, 2), ())
-                and fast["stats"] == answer["stats"]
-            ), "filters choose the windows; the header covers every shot, as the controller's"
-            for bad in (
+            assert fast["good"] == stats.good(merged, (1,), (1, 2), ()), (
+                "filters choose the windows; the header covers every shot, as the controller's"
+            )
+            assert fast["stats"] == answer["stats"], (
+                "filters choose the windows; the header covers every shot, as the controller's"
+            )
+            for wrong in (
                 "window=20&epoch=1",
                 "window=10",
                 "window=10&epoch=1&result=early",
                 "window=10&epoch=x",
             ):
-                await get(f"/stats?{bad}", 400)
+                await refused(f"/stats?{wrong}", 400)
             fake.add_shot()  # A new shot the copy has not seen: the header waits for it.
             answer = await get(f"/stats?window=10&active=2&epoch={fake.epochs['shots']}")
-            assert (
-                answer["epoch"] == fake.epochs["shots"]
-                and answer["good"] == stats.good(merged, (), (), ()) + 1
-            )
-            archive.FRESH_S = 0.4
+            assert answer["epoch"] == fake.epochs["shots"]
+            assert answer["good"] == stats.good(merged, (), (), ()) + 1
+            monkeypatch.setattr(archive, "FRESH_S", 0.4)
             complete = answer
             fake.held = []
             await companion._on_frame({"t": "hold", "on": False, "sync": True})
             fake.add_shot()
             began = asyncio.get_running_loop().time()
-            held = await get(f"/stats?window=10&active=2&epoch={fake.epochs['shots']}")
-            assert held == complete and asyncio.get_running_loop().time() - began < 0.3, (
+            held_header = await get(f"/stats?window=10&active=2&epoch={fake.epochs['shots']}")
+            assert held_header == complete, (
+                "during a hold the newest complete header answers at once, with its own epoch"
+            )
+            assert asyncio.get_running_loop().time() - began < 0.3, (
                 "during a hold the newest complete header answers at once, with its own epoch"
             )
             await companion._on_frame({"t": "cfg", "ui": True, "log": False, "archive": False})
             for _ in range(2):
-                await get(f"/stats?window=10&active=2&epoch={fake.epochs['shots']}", 503)
+                await refused(f"/stats?window=10&active=2&epoch={fake.epochs['shots']}", 503)
             assert said("the Stats header over the whole history is unavailable") == 1, (
                 "rate-limited"
             )
@@ -1184,7 +1320,7 @@ async def main():
             ]
 
             # --- One history (S9, S12): the controller's filters and orders, ties included --
-            await parity(companion, get)
+            await parity(companion, get, refused)
 
             # --- The log asks only outside a hold too ----------------------------------------
             link_.close()
@@ -1215,9 +1351,8 @@ async def main():
             # --- Forget erases it all --------------------------------------------------------
             link_.close()
             await companion.erase("forgotten for the test")
-            assert not await sql(companion, "select * from archive_records") and not await sql(
-                companion, "select * from archive_sync"
-            )
+            assert not await sql(companion, "select * from archive_records")
+            assert not await sql(companion, "select * from archive_sync")
 
             # --- S19 on a small store: the controller's counters decide restarts ----------
             fake = Controller()
@@ -1239,7 +1374,7 @@ async def main():
             assert said("restarted") == restarts
 
             # --- A counter decrease restarts before any page; the pass breaks off --------
-            archive.FETCH_MAX["shots"] = 2
+            monkeypatch.setitem(archive.FETCH_MAX, "shots", 2)
             fake.clear("shots", user=False)
             fake.boot = 9
             for _ in range(3):
@@ -1252,15 +1387,17 @@ async def main():
             assert await ids(companion, "shots", 1) == {1}, (
                 "no row of the new history lands in the closed one"
             )
-            assert await ids(companion, "shots", 2) == {2, 3} and said("restarted") == restarts + 1
-            # Before a full sync the open generation's records may be the controller's: never the companion's.
+            assert await ids(companion, "shots", 2) == {2, 3}
+            assert said("restarted") == restarts + 1
+            # Before a full sync the open generation's records may be the controller's: never the
+            # companion's.
             assert await post("/delete", {"store": "shots", "id": 3}) == (
                 404,
                 {"error": "NOT_FOUND"},
             )
             await link_.open()
             await settled(companion)
-            archive.FETCH_MAX["shots"] = 50
+            monkeypatch.setitem(archive.FETCH_MAX, "shots", 50)
             assert await ids(companion, "shots", 2) == {1, 2, 3}
             assert said("restarted") == restarts + 1
 
@@ -1286,9 +1423,8 @@ async def main():
             )
             await fake.release(companion)
             await settled(companion)
-            assert await ids(companion, "shots", 2) == {1, 2, 4} and not said(
-                "archive sync stopped"
-            )
+            assert await ids(companion, "shots", 2) == {1, 2, 4}
+            assert not said("archive sync stopped")
             assert [f["t"] for f in fake.requests[seen:] if f.get("s") == "shots"].count(
                 "rx"
             ) == 2, "the pass started over from the index"
@@ -1301,9 +1437,8 @@ async def main():
                 fake.add_shot()
             await link_.open()
             await settled(companion)
-            assert await ids(companion, "shots", 2) == {1, 2, 4} and await ids(
-                companion, "shots", 3
-            ) == set(range(1, 11))
+            assert await ids(companion, "shots", 2) == {1, 2, 4}
+            assert await ids(companion, "shots", 3) == set(range(1, 11))
             assert said("restarted") == restarts + 2
 
             # --- A clockless restart with an identical record: the counters still see it ---
@@ -1317,9 +1452,8 @@ async def main():
             )  # Identical to the cleared activation 1.
             await fake.notice(companion)
             await settled(companion)
-            assert await ids(companion, "history", 1) == {1, 2} and await ids(
-                companion, "history", 2
-            ) == {1}
+            assert await ids(companion, "history", 1) == {1, 2}
+            assert await ids(companion, "history", 2) == {1}
 
             # --- An empty pass between a clockless clear and an identical record (review C1) --
             opened = (await companion.archive.store.sync_state(DEVICE, "history"))[0]
@@ -1338,47 +1472,51 @@ async def main():
             )  # Identical to the cleared activation 1.
             await fake.notice(companion)
             await settled(companion)
-            assert await ids(companion, "history", opened) == before and len(before) > 1, (
-                "nothing deleted"
-            )
+            assert await ids(companion, "history", opened) == before, "nothing deleted"
+            assert len(before) > 1, "nothing deleted"
             assert await ids(companion, "history", opened + 1) == {1}
 
-            # --- Index deltas: `d` only after a listed answer in this link session, every answer checked ---
+            # --- Index deltas: `d` only after a listed answer in this link session, every answer
+            # checked ---
             link_.close()
             await link_.open()
             await settled(companion)
 
-            async def change(*kinds):
-                """Shots change; the index the notice brings in, as the requests and answers went."""
-                answers, requests = [], len(fake.requests)
+            async def change(*kinds: str) -> tuple[list[tuple[object, object]], list[str]]:
+                """Shots change; the index the notice brings in, as the requests and answers
+                went."""
+                answers: list[str] = []
+                requests = len(fake.requests)
                 original = companion.archive.on_rec
 
-                def seen(frame):
-                    if frame["f"].get("type") == "records":
+                def seen(frame: Mapping[str, object]) -> None:
+                    inner = frame["f"]
+                    assert isinstance(inner, dict)
+                    if inner.get("type") == "records":
                         answers.append(
-                            "delta"
-                            if "base" in frame["f"]
-                            else "rows"
-                            if "rows" in frame["f"]
-                            else "same"
+                            "delta" if "base" in inner else "rows" if "rows" in inner else "same"
                         )
                     original(frame)
 
-                companion.archive.on_rec = seen
-                for kind in kinds:
-                    if kind == "new":
-                        fake.add_shot()
-                    elif kind == "rating":
-                        record = fake.stores["shots"][sorted(fake.stores["shots"])[-3]][0]
-                        record["rating"] = (record["rating"] + 1) % 6
-                    else:
-                        del fake.stores["shots"][sorted(fake.stores["shots"])[-2]]
-                fake.moved("shots")
-                await fake.notice(companion)
-                await settled(companion)
-                companion.archive.on_rec = original
+                with monkeypatch.context() as patch:
+                    patch.setattr(companion.archive, "on_rec", seen)
+                    for kind in kinds:
+                        if kind == "new":
+                            fake.add_shot()
+                        elif kind == "rating":
+                            record = fake.stores["shots"][sorted(fake.stores["shots"])[-3]][0]
+                            rating = record["rating"]
+                            assert isinstance(rating, int)
+                            record["rating"] = (rating + 1) % 6
+                        else:
+                            del fake.stores["shots"][sorted(fake.stores["shots"])[-2]]
+                    fake.moved("shots")
+                    await fake.notice(companion)
+                    await settled(companion)
                 expected = {rid: fake.rev("shots", rid) for rid in fake.stores["shots"]}
-                assert dict(companion.archive.mirrors["shots"].pairs) == expected
+                pairs = companion.archive.mirrors["shots"].pairs
+                assert pairs is not None
+                assert dict(pairs) == expected
                 for rid, (record, _) in fake.stores["shots"].items():
                     assert (await row(companion, "shots", rid, generation))["rating"] == record[
                         "rating"
@@ -1391,41 +1529,39 @@ async def main():
                 return asked, answers
 
             generation = (await companion.archive.store.sync_state(DEVICE, "shots"))[0]
-            before = fake.epochs["shots"]
-            assert await change("new") == ([(before, None)], ["rows"]), (
+            since = fake.epochs["shots"]
+            assert await change("new") == ([(since, None)], ["rows"]), (
                 "the session's first index is whole"
             )
-            before = fake.epochs["shots"]
-            assert await change("new", "rating", "gone") == ([(before, 1)], ["delta"])
-            gone, before = sorted(fake.stores["shots"])[-2], fake.epochs["shots"]
-            assert await change("gone") == ([(before, 1)], ["delta"])
+            since = fake.epochs["shots"]
+            assert await change("new", "rating", "gone") == ([(since, 1)], ["delta"])
+            gone, since = sorted(fake.stores["shots"])[-2], fake.epochs["shots"]
+            assert await change("gone") == ([(since, 1)], ["delta"])
             assert gone not in await ids(companion, "shots")
             for field in (
                 "sum",
                 "base",
             ):  # Rebuilt wrong, or against another index: the whole index, once.
                 fake.tamper = field
-                before = fake.epochs["shots"]
-                assert await change("rating") == ([(before, 1), (0, None)], ["delta", "rows"]), (
-                    field
-                )
+                since = fake.epochs["shots"]
+                assert await change("rating") == ([(since, 1), (0, None)], ["delta", "rows"]), field
             assert said("archive's shots index did not match") == 2
             link_.close()  # A new link session, then a companion restart (its copy is memory only).
             await link_.open()
             await settled(companion)
-            before = fake.epochs["shots"]
-            assert await change("new") == ([(before, None)], ["rows"])
+            since = fake.epochs["shots"]
+            assert await change("new") == ([(since, None)], ["rows"])
             companion.archive.mirrors["shots"] = index_mirror.IndexMirror("archive's shots index")
-            before = fake.epochs["shots"]
-            assert await change("new") == ([(before, None)], ["rows"])
-            before = fake.epochs["shots"]
-            assert await change("rating") == ([(before, 1)], ["delta"])
+            since = fake.epochs["shots"]
+            assert await change("new") == ([(since, None)], ["rows"])
+            since = fake.epochs["shots"]
+            assert await change("rating") == ([(since, 1)], ["delta"])
 
             # --- The page's erase keeps the log history and the archive (review C2) -------
-            kept = await sql(companion, "select count(*) from archive_records")
+            records_kept = await sql(companion, "select count(*) from archive_records")
             link_.close()
             await companion.erase("erased on the page", history=False)
-            assert await sql(companion, "select count(*) from archive_records") == kept
+            assert await sql(companion, "select count(*) from archive_records") == records_kept
             assert await companion.logs.meta("device") == DEVICE, (
                 "the log store keeps the controller and its history"
             )
@@ -1460,8 +1596,11 @@ async def main():
             await link_.open()
             await settled(companion)
             held = await ids(companion, "shots", 1)
-            assert made not in held and 6 not in held and {3, 4, 7, 8} <= held, held
-            # A Clear while away: every generation of that store goes, nothing of the other (AC5, AC6).
+            assert made not in held, held
+            assert 6 not in held, held
+            assert {3, 4, 7, 8} <= held, held
+            # A Clear while away: every generation of that store goes, nothing of the other (AC5,
+            # AC6).
             fake.add_activation()
             await fake.notice(companion)
             await settled(companion)
@@ -1473,10 +1612,8 @@ async def main():
             assert await sql(
                 companion, "select generation, id from archive_records where store = 'shots'"
             ) == [(2, 1)]
-            assert (
-                await ids(companion, "history") == {1}
-                and said("shot history was cleared on the controller") == 1
-            )
+            assert await ids(companion, "history") == {1}
+            assert said("shot history was cleared on the controller") == 1
             assert not await sql(companion, "select * from archive_traces where generation = 1")
             # A factory reset keeps the count: the history closes and stays (D9)...
             fake.factory_reset()
@@ -1501,10 +1638,8 @@ async def main():
             fake.add_shot()
             await fake.notice(companion)
             await settled(companion)
-            assert (
-                await ids(companion, "shots", 4) == {1, 2}
-                and said("cleared on the controller") == 2
-            )
+            assert await ids(companion, "shots", 4) == {1, 2}
+            assert said("cleared on the controller") == 2
 
             # --- The link-frame harness: a recorded session replays into the same archive (X1) --
             link_.close()
@@ -1515,11 +1650,11 @@ async def main():
             recorder = Recorder(companion)
             original = fresh.answer
 
-            async def answer(_, frame):
+            async def recording(_: Receiver, frame: Frame) -> None:
                 recorder.cases.append({"request": dict(frame), "frames": []})
                 await original(recorder, frame)
 
-            fresh.answer = answer
+            monkeypatch.setattr(fresh, "answer", recording)
             await companion.erase("forgotten for the replay")
             link_ = Link(companion, fresh)
             await link_.open()
@@ -1541,23 +1676,24 @@ async def main():
                 == expected
             )
 
-            # --- The codec takes the controller's larger record frames only ---------------
-            key = bytes(32)
-            controller, mine = link.FrameCodec(key, send=b"f", receive=b"c"), link.FrameCodec(key)
-            big = {"t": "rec", "f": {"rows": "x" * 20000}}
-            assert mine.decode(controller.encode(big))["f"]["rows"] == big["f"]["rows"]
-            try:
-                mine.encode({"t": "rx", "pad": "x" * 5000})
-                raise AssertionError("a companion frame over 4096 bytes was encoded")
-            except ValueError:
-                pass
-
             await pages.close()
             await companion.logs.close()
-    print(
-        "Companion archive: backfill, catch-up, ratings, deletions followed, rotation, holes, generations, "
-        "Clear and factory reset, Admin-gated delete, access, switch, export and erase OK"
-    )
 
 
-asyncio.run(main())
+def test_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Companion archive: backfill, catch-up, ratings, deletions followed, rotation, holes,
+    generations, Clear and factory reset, Admin-gated delete, access, switch, export and erase."""
+    asyncio.run(scenario(monkeypatch))
+
+
+def test_codec_takes_the_controllers_larger_frames_only() -> None:
+    """The codec takes the controller's larger record frames only."""
+    key = bytes(32)
+    controller, mine = link.FrameCodec(key, send=b"f", receive=b"c"), link.FrameCodec(key)
+    rows = "x" * 20000
+    big = {"t": "rec", "f": {"rows": rows}}
+    inner = mine.decode(controller.encode(big))["f"]
+    assert isinstance(inner, dict)
+    assert inner["rows"] == rows
+    with pytest.raises(ValueError, match="exceeds"):  # A companion frame over 4096 bytes.
+        mine.encode({"t": "rx", "pad": "x" * 5000})
