@@ -172,6 +172,14 @@ PAGES = {
     "and level in (select value from json_each(?)) and category = ? "
     "order by ordinal desc, sequence desc limit ?",
 }
+# Each stored boot with events, oldest first: its first and last synced wall times by order.
+BOOT_SPANS = """select b.ordinal, b.boot_id,
+    (select e.wall_sec from log_events e where e.device_id = b.device_id
+        and e.ordinal = b.ordinal and e.wall_sec != 0 order by e.sequence limit 1) as since,
+    (select e.wall_sec from log_events e where e.device_id = b.device_id
+        and e.ordinal = b.ordinal and e.wall_sec != 0 order by e.sequence desc limit 1) as until
+    from log_boots b where b.device_id = ? and exists (select 1 from log_events e
+        where e.device_id = b.device_id and e.ordinal = b.ordinal) order by b.ordinal"""
 # Delete history empties the log's events and marks; Forget everything, the archive's tables too.
 ERASE_HISTORY = ("delete from log_events", "delete from log_marks")
 ERASE_ALL = (
@@ -197,6 +205,16 @@ class LogFrame(TypedDict):
     e: Sequence[Sequence[int | str]]  # [sequence, at_ms, wall_sec, level, category, message] each.
     miss: NotRequired[int]
     reset: NotRequired[bool]
+
+
+class BootSpan(TypedDict):
+    """A stored boot: its id, its first and last synced wall times (None: no clock in it), and
+    the page cursor whose first page ends at its newest event."""
+
+    boot: int
+    since: int | None
+    until: int | None
+    end: Cursor
 
 
 class LogStats(TypedDict):
@@ -344,6 +362,24 @@ class LogStore:
                 "select ordinal, boot_id from log_boots where device_id = ?", (device,)
             )
         }
+
+    async def boots(self, device: str | None) -> list[BootSpan]:
+        """The stored boots, oldest first, so a reader can step from boot to boot. A boot's
+        `end` cursor sits just past its last sequence without reaching the next boot, so its page
+        names no newer restart."""
+
+        def read() -> list[BootSpan]:
+            return [
+                {
+                    "boot": row["boot_id"],
+                    "since": row["since"],
+                    "until": row["until"],
+                    "end": (row["ordinal"], FIRST_PAGE - 1),
+                }
+                for row in self.db.execute(BOOT_SPANS, (device,))
+            ]
+
+        return await offload(read)
 
     def _marks(self, device: str | None, low: Cursor, high: Cursor) -> list[tuple[Cursor, Entry]]:
         """The markers anchored in [low, high), newest first, as ((ordinal, sequence), entry)."""

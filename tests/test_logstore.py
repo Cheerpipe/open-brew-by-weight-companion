@@ -323,6 +323,23 @@ async def history(data: Path) -> None:
         None,
         False,
     )
+    # A reader steps boot to boot: each stored boot with its clock span, and a cursor whose
+    # page ends at that boot's newest event without naming the newer restart.
+    spans = await store.boots(FILTERED)
+    assert [(s["boot"], s["since"], s["until"]) for s in spans] == [
+        (1, wall, wall + 70),
+        (2, wall + 100, wall + 100),
+    ], spans
+    entries, _, _ = await store.page(FILTERED, *spans[0]["end"], 10)
+    assert [e.get("m", e.get("g")) for e in entries] == [
+        "d",
+        "after gap",
+        "gap",
+        "c",
+        "unsynced",
+        "b",
+        "a",
+    ], entries
     span = await store.bounds(FILTERED, wall + 5, wall + 65)
     assert span is not None
     chunk, _ = await store.chunk(FILTERED, *span[0], through=span[1])
@@ -412,6 +429,7 @@ async def history(data: Path) -> None:
     await store.grant("abc", True)
     await store.erase(history_only=True)
     assert (await store.stats(DEVICE))["rows"] == 0
+    assert await store.boots(DEVICE) == [], "a boot without events is not listed"
     assert await store.meta("device") == DEVICE
     assert "abc" in await store.grants()
     assert await sql(store, "select count(*) from archive_records") == [(599,)], (

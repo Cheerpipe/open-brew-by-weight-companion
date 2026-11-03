@@ -517,7 +517,12 @@ single disk thread as the secrets).
   `(device_id, wall_sec)` index; events without a clock keep their place by
   order), `GET /__companion/log/export` (optional `from` and `to`, wall
   seconds: the events from the oldest at or after `from` to the newest at or
-  before `to`, with those in between in order) and
+  before `to`, with those in between in order), `GET /__companion/log/boots`
+  (the stored boots with events, oldest first: each `boot` id, its first and
+  last synced wall seconds `from` and `to`, null when none of its events had a
+  clock, and `end`, a cursor shaped like `next` whose page ends at that boot's
+  newest event without naming the newer restart, so the Web UI steps from boot
+  to boot) and
   `POST /__companion/log/delete` answer only over HTTPS (nginx refuses them
   on plain HTTP with `403 HTTPS_REQUIRED`) and only for a browser the
   controller lets open the Web UI: the companion asks `GET /api/v1/auth`

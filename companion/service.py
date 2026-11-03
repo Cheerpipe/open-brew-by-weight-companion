@@ -1248,6 +1248,32 @@ def web_app(companion: Companion) -> web.Application:
             headers=no_store,
         )
 
+    async def log_boots(request: web.Request) -> web.Response:
+        """The stored boots, oldest first, each with its wall-time span and the page cursor
+        that ends at its newest event."""
+        refusal = await _log_refusal(request)
+        if refusal is not None:
+            return refusal
+        try:
+            spans = await companion.logs.boots(companion.device_id)
+        except sqlite3.Error as error:
+            return web.json_response({"error": "STORE", "message": str(error)}, status=500)
+        return web.json_response(
+            {
+                "device": companion.device_id,
+                "boots": [
+                    {
+                        "boot": span["boot"],
+                        "from": span["since"],
+                        "to": span["until"],
+                        "end": {"boot": span["end"][0], "before": span["end"][1]},
+                    }
+                    for span in spans
+                ],
+            },
+            headers=no_store,
+        )
+
     async def log_export(request: web.Request) -> web.StreamResponse:
         """The whole history, or the events between wall times `from` and `to` (either may be
         absent)."""
@@ -1564,6 +1590,7 @@ def web_app(companion: Companion) -> web.Application:
     app.router.add_get("/__companion/pair", show)
     app.router.add_get("/__companion/status", status)
     app.router.add_get("/__companion/log", log_page)
+    app.router.add_get("/__companion/log/boots", log_boots)
     app.router.add_get("/__companion/log/export", log_export)
     app.router.add_post("/__companion/log/delete", log_delete)
     app.router.add_get("/__companion/archive/{store:shots|history}", archive_rows)
