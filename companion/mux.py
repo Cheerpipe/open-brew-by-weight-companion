@@ -153,7 +153,7 @@ class Merged:
     """
 
     def __init__(self):
-        self.boot, self.changes, self.ready = None, {}, False
+        self.boot, self.changes, self.ready, self.clock_at = None, {}, False, 0.0
 
     def apply(self, frame):
         changes = frame.get("changes")
@@ -168,6 +168,8 @@ class Merged:
             for stale in [name for name in self.changes if name.startswith(prefix)]:
                 del self.changes[stale]
             self.changes[key] = value
+        if "timeUtcSec" in changes:  # Home's controller clock, which every page runs locally.
+            self.clock_at = _now()
         return True
 
     def clear(self):
@@ -998,6 +1000,8 @@ class Mux:
             screen.home = False
             return
         changes = self.home.changes
+        if type(changes.get("timeUtcSec")) is int:  # The controller sends its clock only on a rebase.
+            changes = {**changes, "timeUtcSec": changes["timeUtcSec"] + int(_now() - self.home.clock_at)}
         if presets and screen.presets_tag is not None and changes.get("presetsTag") == screen.presets_tag:
             changes = {key: value for key, value in changes.items() if key != "presets"}
         screen.send(dumps({"v": 1, "type": "home", "boot": self.home.boot, "snapshot": True, "changes": changes}))

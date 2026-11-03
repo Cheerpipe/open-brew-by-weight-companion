@@ -385,7 +385,11 @@ every op itself:
 - Home, Settings and Diagnostic are kept as merged models. A new screen gets
   one snapshot built from them (Diagnostic split into frames of at most
   20 KiB); Settings sends nothing when the screen's `tag` is current, and
-  Home leaves out the presets the screen already holds.
+  Home leaves out the presets the screen already holds. Home's controller
+  clock (`timeUtcSec`) moves on by the time since it arrived: the
+  controller sends it only when it rebases and every page runs it locally,
+  so a late screen would otherwise count warm-up and other times from an
+  old clock.
 - The shot card is kept from its last snapshot (at most 512 frames or
   256 KiB) and replayed to a new screen.
 - The log keeps a ring of the last 1,024 events (512 KiB) and serves each

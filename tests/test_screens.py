@@ -185,12 +185,14 @@ async def main():
             await a.send({"op": "activity", "seconds": 0, "hidden": False})
             assert (await a.next("alive"))["type"] == "alive"
             count = len(session.ops)
+            the_mux.home.clock_at -= 5  # Five seconds after the controller's clock arrived.
 
             b = await screen(1).open([{"op": "settings", "on": True, "tag": 55}, {**HISTORY, "request": 7}],
                                      presetsTag=9)
             home = await b.next("home")
             assert home["snapshot"] and "presets" not in home["changes"] and home["changes"]["presetsTag"] == 9, \
                 "the screen's presets are current: Home omits them"
+            assert home["changes"]["timeUtcSec"] == 1800000005, "a late screen's clock is as old as it is"
             assert (await b.next("card"))["cycle"] == 3
             history = await b.next("history")
             assert history["request"] == 7 and history["snapshot"] is True and len(history["records"]) == 3

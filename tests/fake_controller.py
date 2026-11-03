@@ -337,7 +337,7 @@ class Session:
 def home_snapshot(**extra):
     changes = {"bootId": 7, "configMutable": True, "adminUnlocked": False, "config.soundAlertsEnabled": True,
                "presetsTag": 9, "presets": [{"id": 1, "name": "Espresso"}], "lastCommand.requestId": 0,
-               "lastCommand.state": "NONE", "machineState": "idle", **extra}
+               "lastCommand.state": "NONE", "machineState": "idle", "timeUtcSec": 1800000000, **extra}
     return {"v": 1, "type": "home", "boot": 7, "snapshot": True, "changes": changes}
 
 
