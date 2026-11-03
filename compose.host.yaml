@@ -1,6 +1,7 @@
 # Shares the server's own address, for servers where ports 80 and 443 are
 # free, so the companion needs no address of its own. Enable it in .env:
 #   COMPOSE_FILE=compose.yaml:compose.host.yaml
+---
 services:
   companion:
     network_mode: host

@@ -1,0 +1,7 @@
+---
+# yamllint for the compose files, run by ./scripts/dev: the default rule set at
+# the project's 100-column width (ruff and Prettier use the same).
+extends: default
+rules:
+  line-length:
+    max: 100
