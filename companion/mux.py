@@ -15,10 +15,18 @@ import asyncio
 import collections
 import json
 import sqlite3
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Literal, NoReturn, NotRequired, TypedDict, TypeIs, overload
 
 from . import log, pages
 from .archive import Unavailable
 from .upstream import Upstream, dumps
+
+if TYPE_CHECKING:
+    from aiohttp import web
+
+    from .relay import Relay
+    from .service import Companion
 
 U32 = 0xFFFFFFFF
 FRAME_BUDGET = 20 * 1024
@@ -38,7 +46,53 @@ STATS_WINDOWS, FILTER_MAX = (10, 50, 100), 8
 # moves them on (the firmware's src/tests/fixtures/companion_replay_v1.json lists them).
 CLOCKS = ("timeUtcSec",)
 FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
-DEFAULTS = {
+
+# A JSON object as it came, from the controller or a screen: its fields are checked where they are
+# read.
+type Frame = Mapping[str, object]
+# A History or a Stats group: its parameters in View.key's order.
+type HistoryKey = tuple[int, int, str, tuple[str, ...]]
+type StatsKey = tuple[int, int, str, str, str, int]
+type Group = HistoryKey | StatsKey
+
+
+class Op(TypedDict):
+    """A screen's op: a JSON object naming it; its other fields are validated where they are
+    read."""
+
+    op: str
+
+
+class Params(TypedDict, total=False):
+    """A record view's parameters: History's or Stats' (DEFAULTS)."""
+
+    offset: int
+    limit: int
+    dir: str
+    types: tuple[str, ...]
+    sort: str
+    filter: str  # Canonical JSON (_filter).
+    window: int
+
+
+class Parked(TypedDict):
+    """A parked page (View._page): its group, tag, boot, epoch and whole rows by id."""
+
+    group: Group
+    tag: object
+    boot: object
+    epoch: object
+    rows: dict[int, object]
+    request: NotRequired[int]  # The standing subscribe that named its tag.
+
+
+class Status(TypedDict):
+    screens: int
+    owner: bool
+    views: dict[str, int]
+
+
+DEFAULTS: dict[str, Params] = {
     "history": {"offset": 0, "limit": 20, "dir": "desc", "types": ()},
     "stats": {
         "offset": 0,
@@ -49,29 +103,29 @@ DEFAULTS = {
         "window": 10,
     },
 }
-ROWS = {"history": "records", "stats": "rows"}
+ROWS: dict[str, Literal["records", "rows"]] = {"history": "records", "stats": "rows"}
 STORE = {"history": "history", "stats": "shots"}
 CAPACITY = {"history": HISTORY_CAPACITY, "stats": SHOT_LOG_CAPACITY}
 
 
-class Invalid(Exception):
+class InvalidOpError(Exception):
     """An op the controller would reject: the screen is closed with 4003."""
 
 
-def _now():
+def _now() -> float:
     return asyncio.get_running_loop().time()
 
 
-def _newer(a, b):
+def _newer(a: int, b: int) -> bool:
     """a comes after b in uint32 sequence order."""
     return 0 < (a - b) & U32 < 0x80000000
 
 
-def _reject(_):
+def _reject(_: str) -> NoReturn:
     raise ValueError("not a JSON number")
 
 
-def _row_id(row):
+def _row_id(row: object) -> object:
     """A whole row's id: a History record names it, a Stats row starts with it."""
     return (
         row.get("id")
@@ -83,85 +137,99 @@ def _row_id(row):
 
 
 # --- Op validation (the firmware's whitelists and ranges) -------------------------
-def _fields(message, allowed):
+def _fields(message: Frame, allowed: set[str]) -> None:
     if not set(message) <= allowed:
-        raise Invalid()
+        raise InvalidOpError
 
 
-def _number(message, name, low, high):
+def _number(message: Frame, name: str, low: int, high: int) -> int | None:
     if name not in message:
         return None
-    value = message[name]
+    return _integer(message[name], low, high)
+
+
+def _integer(value: object, low: int, high: int) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or value != int(value)
         or not low <= value <= high
     ):
-        raise Invalid()
+        raise InvalidOpError
     return int(value)
 
 
-def _flag(message, name, required=False):
+@overload
+def _flag(message: Frame, name: str, required: Literal[True]) -> bool: ...
+@overload
+def _flag(message: Frame, name: str, required: bool = False) -> bool | None: ...
+def _flag(message: Frame, name: str, required: bool = False) -> bool | None:
     if name not in message:
         if required:
-            raise Invalid()
+            raise InvalidOpError
         return None
-    if not isinstance(message[name], bool):
-        raise Invalid()
-    return message[name]
-
-
-def _choice(message, name, choices):
-    if name not in message:
-        return None
-    if message[name] not in choices:
-        raise Invalid()
-    return message[name]
-
-
-def _list(value, limit):
-    if not isinstance(value, list) or len(value) > limit:
-        raise Invalid()
+    value = message[name]
+    if not isinstance(value, bool):
+        raise InvalidOpError
     return value
 
 
-def _types(message):
+def _choice(message: Frame, name: str, choices: tuple[str, ...]) -> str | None:
+    if name not in message:
+        return None
+    value = message[name]
+    if not isinstance(value, str) or value not in choices:  # Every choice is a str.
+        raise InvalidOpError
+    return value
+
+
+def _list(value: object, limit: int) -> list[object]:
+    if not isinstance(value, list) or len(value) > limit:
+        raise InvalidOpError
+    return value
+
+
+def _types(message: Frame) -> tuple[str, ...] | None:
     if "types" not in message:
         return None
     names = _list(message["types"], len(HISTORY_TYPES))
     if not all(isinstance(name, str) and name in HISTORY_TYPES for name in names):
-        raise Invalid()
+        raise InvalidOpError
     return tuple(name for name in HISTORY_TYPES if name in names)
 
 
-def _filter(message):
-    """The Stats filter as canonical JSON (empty lists and bad:false dropped), or None when absent."""
+def _filter(message: Frame) -> str | None:
+    """The Stats filter as canonical JSON (empty lists and bad:false dropped), or None when
+    absent."""
     if "filter" not in message:
         return None
     value = message["filter"]
     if not isinstance(value, dict) or not set(value) <= {"result", "preset", "scale", "bad"}:
-        raise Invalid()
-    canonical = {}
+        raise InvalidOpError
+    canonical: dict[str, object] = {}
     if _flag(value, "bad"):
         canonical["bad"] = True
     results = _list(value.get("result", []), FILTER_MAX)
     if not all(isinstance(name, str) and name in STATS_RESULTS for name in results):
-        raise Invalid()
+        raise InvalidOpError
     if results:
         canonical["result"] = [name for name in STATS_RESULTS if name in results]
     for name, high in (("preset", 255), ("scale", U32)):
         items = _list(value.get(name, []), FILTER_MAX)
-        numbers = sorted({_number({"v": item}, "v", 0, high) for item in items})
+        numbers = sorted({_integer(item, 0, high) for item in items})
         if numbers:
             canonical[name] = numbers
     return dumps(dict(sorted(canonical.items())))
 
 
-def parse(text):
+def _is_op(value: object) -> TypeIs[Op]:
+    return isinstance(value, dict) and isinstance(value.get("op"), str)
+
+
+def parse(text: str) -> Op:
     """A screen's op, validated; ValueError when it is not a JSON object."""
     message = json.loads(text, parse_constant=_reject)
-    if not isinstance(message, dict) or not isinstance(message.get("op"), str):
+    if not _is_op(message):
         raise ValueError("not an op")
     return message
 
@@ -174,10 +242,14 @@ class Merged:
     rebuilds exactly the model the frames built, and keys keep their first position.
     """
 
-    def __init__(self):
+    boot: object
+    changes: dict[str, object]
+    clock_at: dict[str, float]  # When each of CLOCKS arrived.
+
+    def __init__(self) -> None:
         self.boot, self.changes, self.ready, self.clock_at = None, {}, False, {}
 
-    def apply(self, frame):
+    def apply(self, frame: Frame) -> bool:
         changes = frame.get("changes")
         if not isinstance(changes, dict):
             return False
@@ -193,14 +265,16 @@ class Merged:
         self.clock_at.update((key, _now()) for key in CLOCKS if key in changes)
         return True
 
-    def clear(self):
+    def clear(self) -> None:
         self.boot, self.changes, self.ready = None, {}, False
 
-    def frames(self, kind, extra=None, split=False):
+    def frames(self, kind: str, extra: Frame | None = None, split: bool = False) -> list[str]:
         """The model as one synthesized snapshot, or split into ≤ FRAME_BUDGET frames."""
         head = {"v": 1, "type": kind, "boot": self.boot, "snapshot": True}
         if not split:
             return [dumps({**head, "changes": self.changes, **(extra or {})})]
+        frames: list[dict[str, object]]
+        part: dict[str, object]
         frames, part, size = [], {}, 0
         for key, value in self.changes.items():
             item = len(dumps({key: value}))
@@ -218,19 +292,24 @@ class Merged:
 class Record:
     """One screen's History or Stats view: its parameters, group and request id."""
 
-    def __init__(self, kind):
-        self.params = dict(DEFAULTS[kind])
-        self.group = None  # Parameter group while subscribed.
+    def __init__(self, kind: str) -> None:
+        self.params = DEFAULTS[kind].copy()
+        self.group: Group | None = None  # Parameter group while subscribed.
         self.request, self.synced = 0, False
-        # Served by the archive's replica (never by an upstream window), and the standing page's serial.
+        # Served by the archive's replica (never by an upstream window), and the standing page's
+        # serial.
         self.replica, self.serial = False, 0
 
 
 class Screen:
-    def __init__(self, mux, ws, addr):
+    id: str | None  # Its browser's client id, once bound.
+    stats_map: dict[object, int]  # The controller's Stats seq -> this screen's.
+    queue: collections.deque[str]
+
+    def __init__(self, mux: Mux, ws: web.WebSocketResponse, addr: str) -> None:
         self.mux, self.ws, self.addr = mux, ws, addr
         self.id, self.bound, self.closed = None, False, False
-        self.presets_tag = None
+        self.presets_tag: int | None = None
         self.home = self.card = False  # Holds a snapshot of each.
         self.settings = self.settings_synced = False
         self.diagnostic = self.diagnostic_synced = False
@@ -248,7 +327,7 @@ class Screen:
         self.queue, self.queued = collections.deque(), 0
         self.wake = asyncio.Event()
 
-    def send(self, text):
+    def send(self, text: str) -> None:
         if self.closed:
             return
         self.queue.append(text)
@@ -259,13 +338,13 @@ class Screen:
             return
         self.wake.set()
 
-    def close(self, code, reason=""):
+    def close(self, code: int, reason: str = "") -> None:
         if not self.closed:
             self.closed = True
             self.wake.set()
-            self.mux.companion.spawn(self.ws.close(code=code, message=reason.encode()))
+            _ = self.mux.companion.spawn(self.ws.close(code=code, message=reason.encode()))
 
-    async def writer(self):
+    async def writer(self) -> None:
         while not self.closed:
             await self.wake.wait()
             self.wake.clear()
@@ -278,7 +357,7 @@ class Screen:
                     self.closed = True
                     return
 
-    def seconds(self, now):
+    def seconds(self, now: float) -> int:
         return max(0, int(self.until - now + 0.999))
 
 
@@ -286,7 +365,12 @@ class Screen:
 class Fetch:
     """One upstream fetch: a group's first page and/or screens' own windows, coalesced."""
 
-    def __init__(self, key, group=None, target=None):
+    targets: list[tuple[Screen, int]]  # Screens' own windows: the screen and its request.
+    timer: asyncio.TimerHandle | None
+
+    def __init__(
+        self, key: Group, group: Group | None = None, target: tuple[Screen, int] | None = None
+    ) -> None:
         self.key, self.group, self.targets = key, group, [target] if target else []
         self.id, self.timer, self.started = 0, None, False
 
@@ -299,14 +383,24 @@ class View:
     whole from it before any screen sees it.
     """
 
-    def __init__(self, mux, kind):
+    standing: Group | None  # The owner group's, while the upstream window stands.
+    parked: Parked | None
+    epoch: object  # The standing window's store epoch, once it answered.
+    buffer: list[Frame]
+    buffer_state: str  # waiting, valid or over
+    pages: dict[Group, tuple[list[Frame], bool]]
+    queue: list[Fetch]
+    inflight: Fetch | None
+
+    def __init__(self, mux: Mux, kind: str) -> None:
         self.mux, self.kind = mux, kind
-        self.next_id, self.standing, self.parked = 0, None, None
+        self.next_id, self.standing, self.parked, self.inflight = 0, None, None, None
         self.clear()
 
-    def clear(self, park=True):
-        """Forget the standing window; with `park` its last whole page stays for the next subscribe."""
-        if getattr(self, "inflight", None) and self.inflight.timer:
+    def clear(self, park: bool = True) -> None:
+        """Forget the standing window; with `park` its last whole page stays for the next
+        subscribe."""
+        if self.inflight and self.inflight.timer:
             self.inflight.timer.cancel()
         self.parked = (self._page() or self.parked) if park else None
         self.standing, self.request, self.epoch, self.awaiting = None, 0, None, False
@@ -314,12 +408,12 @@ class View:
         self.pages = {}  # Non-owner group -> (frames of its last page, complete)
         self.queue, self.inflight = [], None
 
-    def _id(self):
+    def _id(self) -> int:
         self.next_id = self.next_id % U32 + 1
         return self.next_id
 
     # Parameters and ops
-    def key(self, params):
+    def key(self, params: Params) -> Group:
         if self.kind == "history":
             return (params["offset"], params["limit"], params["dir"], params["types"])
         return (
@@ -331,13 +425,13 @@ class View:
             params["window"],
         )
 
-    def op(self, key, request, fetch=False):
-        op = {"op": self.kind, "on": True}
+    def op(self, key: Group, request: int, fetch: bool = False) -> dict[str, object]:
+        op: dict[str, object] = {"op": self.kind, "on": True}
         if fetch:
             op["fetch"] = True
         # The whole history may page past the controller's own records; it answers those empty.
         key = (min(key[0], CAPACITY[self.kind]), *key[1:])
-        if self.kind == "history":
+        if len(key) == 4:  # History's group; Stats' has six parameters.
             offset, limit, direction, types = key
             op.update(request=request, offset=offset, limit=limit, dir=direction)
             if types or fetch:
@@ -351,24 +445,27 @@ class View:
                 op["window"] = window
         return op
 
-    def standing_op(self):
-        """The standing subscribe: on the parked page's group it names that page's tag."""
-        op = self.op(self.standing, self.request)
-        if self.parked and self.parked["group"] == self.standing:
+    def standing_op(self, standing: Group) -> dict[str, object]:
+        """The standing subscribe (to `standing`, the view's): on the parked page's group it names
+        that page's tag."""
+        op = self.op(standing, self.request)
+        if self.parked and self.parked["group"] == standing:
             op["tag"], self.parked["request"] = self.parked["tag"], self.request
         return op
 
-    def members(self, group):
+    def members(self, group: Group | None) -> list[Screen]:
         return [
             screen
             for screen in self.mux.bound()
             if screen.records[self.kind].group == group and not screen.records[self.kind].replica
         ]
 
-    def _start(self, frame):
+    def _start(self, frame: Frame) -> bool:
         return self.kind == "history" or frame.get("rowBase") == 0
 
-    def deliver(self, screen, frame, request, snapshot=None):
+    def deliver(
+        self, screen: Screen, frame: Frame, request: int, snapshot: bool | None = None
+    ) -> None:
         out = dict(frame, request=request)
         if self.kind == "stats":  # Each screen sees its own monotonic page sequence.
             if frame.get("rowBase") == 0:
@@ -384,7 +481,7 @@ class View:
         screen.send(dumps(out))
 
     # Screen ops
-    def on_op(self, screen, message):
+    def on_op(self, screen: Screen, message: Frame) -> None:
         on = _flag(message, "on", required=True)
         request = _number(message, "request", 1, U32)
         tag = _number(message, "tag", 1, U32)
@@ -395,12 +492,21 @@ class View:
         direction = _choice(message, "dir", ("asc", "desc"))
         fetch = _flag(message, "fetch")
         record = screen.records[self.kind]
+        given: Params = {}  # The parameters the op names, in DEFAULTS' order.
+        if offset is not None:
+            given["offset"] = offset
+        if limit is not None:
+            given["limit"] = limit
         if self.kind == "history":
             _fields(
                 message, {"op", "on", "offset", "limit", "dir", "fetch", "request", "types", "tag"}
             )
-            values = {"offset": offset, "limit": limit, "dir": direction, "types": _types(message)}
-            replaced = {"types": ()}
+            types = _types(message)
+            if direction is not None:
+                given["dir"] = direction
+            if types is not None:
+                given["types"] = types
+            replaced: Params = {"types": ()}
         else:
             _fields(
                 message,
@@ -420,26 +526,26 @@ class View:
             )
             window = _number(message, "window", 0, U32)
             if window is not None and window not in STATS_WINDOWS:
-                raise Invalid()
-            values = {
-                "offset": offset,
-                "limit": limit,
-                "sort": _choice(message, "sort", ("date", "rating")),
-                "dir": direction,
-                "filter": _filter(message),
-                "window": window,
-            }
+                raise InvalidOpError
+            sort, criteria = _choice(message, "sort", ("date", "rating")), _filter(message)
+            if sort is not None:
+                given["sort"] = sort
+            if direction is not None:
+                given["dir"] = direction
+            if criteria is not None:
+                given["filter"] = criteria
+            if window is not None:
+                given["window"] = window
             replaced = {"filter": "{}", "window": 10}
-        given = {name: value for name, value in values.items() if value is not None}
         if not on:
             if set(message) - {"op", "on"}:
-                raise Invalid()
+                raise InvalidOpError
             self.unsubscribe(screen)
         elif (
             fetch
         ):  # Without a view of its own it is Home's rows-only Stats fetch, as on the controller.
             if offset is None or tag is not None or (self.kind == "stats" and "window" in given):
-                raise Invalid()
+                raise InvalidOpError
             self.fetch(screen, request or 0, {**record.params, **given})
         elif (
             self.kind == "stats"
@@ -460,28 +566,36 @@ class View:
             )
 
     # The replica: pages from the archive's copy, no upstream window
-    def fetch(self, screen, request, params):
+    def fetch(self, screen: Screen, request: int, params: Params) -> None:
         if self.mux.companion.archive.serving():
-            self.mux.companion.spawn(self._serve(screen, request, params, False, fetch=True))
+            _ = self.mux.companion.spawn(self._serve(screen, request, params, False, fetch=True))
         else:
             self.mux.attribute(
                 screen
             )  # What it leaves out is its own window's, not the controller's.
             self._queue(self.key(params), target=(screen, request))
 
-    def refresh(self):
-        """The copy changed (or the active preset, for Stats, or Home named the controller's boot): every
-        page it serves is built again, superseding one still being built; a screen with none yet gets
-        its snapshot."""
+    def refresh(self) -> None:
+        """The copy changed (or the active preset, for Stats, or Home named the controller's boot):
+        every page it serves is built again, superseding one still being built; a screen with none
+        yet gets its snapshot."""
         for screen in self.mux.bound():
             record = screen.records[self.kind]
             if record.replica and record.group is not None:
                 record.serial += 1
-                self.mux.companion.spawn(
+                _ = self.mux.companion.spawn(
                     self._serve(screen, record.request, record.params, not record.synced)
                 )
 
-    async def _serve(self, screen, request, params, snapshot, fetch=False, tag=0):
+    async def _serve(
+        self,
+        screen: Screen,
+        request: int,
+        params: Params,
+        snapshot: bool,
+        fetch: bool = False,
+        tag: int = 0,
+    ) -> None:
         """One page from the replica; when its store cannot catch up in time (link down, no answer
         within CATCH_UP_S) the page comes whole from the controller instead, never mixed."""
         archive, record = self.mux.companion.archive, screen.records[self.kind]
@@ -489,7 +603,8 @@ class View:
         page = header = None
         ready = await archive.ready(STORE[self.kind])
         if ready and self.mux.home.boot is None and not fetch:
-            return  # A page carries the controller's boot: it goes with Home's snapshot (Mux._on_home).
+            # A page carries the controller's boot: it goes with Home's snapshot (Mux._on_home).
+            return
         if ready and self.mux.home.boot is not None:
             try:
                 page = await archive.page(
@@ -507,7 +622,8 @@ class View:
                     )[0]
             except (sqlite3.Error, Unavailable, ValueError) as error:
                 log(
-                    f"the archive could not build a {self.kind} page ({error}); the controller sends it"
+                    f"the archive could not build a {self.kind} page ({error}); "
+                    "the controller sends it"
                 )
                 page = None
         if screen.closed or (not fetch and (record.serial != serial or not record.replica)):
@@ -536,7 +652,7 @@ class View:
         if not fetch:
             record.synced = True
 
-    def _query(self, params):
+    def _query(self, params: Params) -> dict[str, object]:
         if self.kind == "history":
             return {"dir": params["dir"], "types": list(params["types"])}
         criteria = json.loads(params["filter"])
@@ -549,7 +665,9 @@ class View:
             "scale": criteria.get("scale", []),
         }
 
-    def subscribe(self, screen, request, params, window_only=False, tag=0):
+    def subscribe(
+        self, screen: Screen, request: int, params: Params, window_only: bool = False, tag: int = 0
+    ) -> None:
         record = screen.records[self.kind]
         if self.mux.companion.archive.serving():
             record.params, record.group, record.request = params, self.key(params), request
@@ -557,13 +675,15 @@ class View:
             record.serial += 1
             self.mux.attribute(screen)
             self.settle()  # Its upstream window, if it held one, is no longer its.
-            self.mux.companion.spawn(
+            _ = self.mux.companion.spawn(
                 self._serve(screen, request, params, not window_only, tag=0 if window_only else tag)
             )
             return
         self._upstream_subscribe(screen, request, params, window_only)
 
-    def _upstream_subscribe(self, screen, request, params, window_only=False):
+    def _upstream_subscribe(
+        self, screen: Screen, request: int, params: Params, window_only: bool = False
+    ) -> None:
         record = screen.records[self.kind]
         record.replica = False
         old, group = record.group, self.key(params)
@@ -589,7 +709,7 @@ class View:
             record.synced = False
             self._join(screen, group)
 
-    def unsubscribe(self, screen, settle=True):
+    def unsubscribe(self, screen: Screen, settle: bool = True) -> None:
         record = screen.records[self.kind]
         record.group, record.synced, record.replica = None, False, False
         record.serial += 1
@@ -599,20 +719,20 @@ class View:
         if settle:
             self.settle()
 
-    def resync(self, screen):
+    def resync(self, screen: Screen) -> None:
         record = screen.records[self.kind]
         if record.group is None:
             return
         record.synced = False
         if record.replica:
             record.serial += 1
-            self.mux.companion.spawn(self._serve(screen, record.request, record.params, True))
+            _ = self.mux.companion.spawn(self._serve(screen, record.request, record.params, True))
         elif record.group == self.standing:
             self._replay(screen)
         else:
             self._join(screen, record.group)
 
-    def settle(self):
+    def settle(self) -> None:
         """After a screen left: promote another group, or end the upstream window."""
         screens = [
             screen
@@ -626,19 +746,22 @@ class View:
             return
         if not any(screen.records[self.kind].group == self.standing for screen in screens):
             newest = max(screens, key=lambda screen: screen.active_at)
-            self._subscribe_upstream(newest.records[self.kind].group)
+            group = newest.records[self.kind].group
+            if group is not None:  # Each of `screens` holds one.
+                self._subscribe_upstream(group)
 
-    def _subscribe_upstream(self, group):
+    def _subscribe_upstream(self, group: Group) -> None:
         self.standing, self.request, self.awaiting = group, self._id(), True
         self.buffer, self.buffer_bytes, self.buffer_pages, self.buffer_state = [], 0, 0, "waiting"
         self.pages.pop(group, None)
         for screen in self.members(group):
             screen.records[self.kind].synced = False
         self.dropped()
-        self.mux.up(self.standing_op())
+        self.mux.up(self.standing_op(group))
 
-    def dropped(self):
-        """An upstream subscribe or resync drops the controller's fetch: ask again after its snapshot."""
+    def dropped(self) -> None:
+        """An upstream subscribe or resync drops the controller's fetch: ask again after its
+        snapshot."""
         self.awaiting = True
         if self.inflight is not None:
             fetch, self.inflight = self.inflight, None
@@ -647,24 +770,23 @@ class View:
             fetch.started = False
             self.queue.insert(0, fetch)
 
-    def upstream_resync(self):
+    def upstream_resync(self) -> None:
         self.buffer, self.buffer_bytes, self.buffer_pages, self.buffer_state = [], 0, 0, "waiting"
         for screen in self.members(self.standing):
             screen.records[self.kind].synced = False
         self.dropped()
 
-    def _replay(self, screen):
+    def _replay(self, screen: Screen) -> None:
         record = screen.records[self.kind]
         if self.buffer_state == "valid" and self.buffer:
             for frame in self.buffer:
                 self.deliver(screen, frame, record.request)
             record.synced = True
-        elif self.buffer_state == "over":
-            self._subscribe_upstream(
-                self.standing
-            )  # Over the bound: one fresh snapshot, without a tag.
+        elif self.buffer_state == "over" and self.standing is not None:
+            # Over the bound: one fresh snapshot, without a tag.
+            self._subscribe_upstream(self.standing)
 
-    def _join(self, screen, group):
+    def _join(self, screen: Screen, group: Group) -> None:
         frames, complete = self.pages.get(group, ((), False))
         if complete:
             record = screen.records[self.kind]
@@ -675,7 +797,13 @@ class View:
             self._queue(group, group=group)
 
     # Fetch queue: one in flight, identical ones coalesced
-    def _queue(self, key, group=None, target=None, behind_inflight=False):
+    def _queue(
+        self,
+        key: Group,
+        group: Group | None = None,
+        target: tuple[Screen, int] | None = None,
+        behind_inflight: bool = False,
+    ) -> None:
         candidates = (
             self.queue
             if behind_inflight
@@ -690,12 +818,12 @@ class View:
         self.queue.append(Fetch(key, group, target))
         self.pump()
 
-    def _wanted(self, fetch):
+    def _wanted(self, fetch: Fetch) -> list[tuple[Screen, int]] | bool | list[Screen]:
         return fetch.targets or (
             fetch.group is not None and fetch.group != self.standing and self.members(fetch.group)
         )
 
-    def pump(self):
+    def pump(self) -> None:
         if self.inflight is not None or self.awaiting or self.mux.upstream.state != "open":
             return
         while self.queue:
@@ -709,14 +837,14 @@ class View:
                 self.mux.up(self.op(fetch.key, fetch.id, fetch=True))
                 return
 
-    def _expired(self, fetch):
+    def _expired(self, fetch: Fetch) -> None:
         """Stats fetches wait silently while a shot's trace capture is open; never resent."""
         if self.inflight is fetch:
             self.inflight = None
             self.pump()
 
     # Upstream frames
-    def on_frame(self, frame):
+    def on_frame(self, frame: Frame) -> None:
         request = frame.get("request")
         if not isinstance(request, int) or (
             self.kind == "stats" and not isinstance(frame.get("seq"), int)
@@ -725,13 +853,14 @@ class View:
         if self.standing is not None and request == self.request:
             self._standing(frame)
         elif self.inflight is not None and request == self.inflight.id:
-            self._fetched(frame)
+            self._fetched(self.inflight, frame)
 
-    def _standing(self, frame):
+    def _standing(self, frame: Frame) -> None:
         if self.parked and self.parked.get("request") == self.request:
-            frame = self._unpark(frame)
-            if frame is None:
+            whole = self._unpark(self.parked, frame)
+            if whole is None:
                 return
+            frame = whole
         start, snapshot = self._start(frame), frame.get("snapshot") is True
         if start and snapshot:
             self.buffer, self.buffer_bytes, self.buffer_pages, self.buffer_state = [], 0, 0, "valid"
@@ -759,12 +888,15 @@ class View:
         self.pump()
 
     # Parked page
-    def _page(self):
-        """The last whole standing page as a parked page: its group, tag, boot, epoch and rows by id."""
+    def _page(self) -> Parked | None:
+        """The last whole standing page as a parked page: its group, tag, boot, epoch and rows by
+        id."""
         if self.standing is None or self.buffer_state != "valid" or not self.buffer:
             return None
+        known: dict[int, object]
+        page: Parked | None
         known, page, done = {}, None, False
-        for frame in self.buffer:
+        for frame in self.buffer:  # A valid buffer starts with a page's first frame.
             if self._start(frame):
                 page = {
                     "group": self.standing,
@@ -773,21 +905,27 @@ class View:
                     "epoch": frame.get("epoch"),
                     "rows": {},
                 }
-            for row in frame.get(ROWS[self.kind]) or ():
-                row = known.get(row) if type(row) is int else row
-                rid = _row_id(row)
+            rows = frame.get(ROWS[self.kind]) or []
+            if page is None or not isinstance(rows, list):
+                return None
+            for row in rows:
+                whole = known.get(row) if type(row) is int else row
+                rid = _row_id(whole)
                 if type(rid) is not int:
                     return None
-                known[rid] = page["rows"][rid] = row
+                known[rid] = page["rows"][rid] = whole
             done = self.kind == "history" or frame.get("more") is False
+        if page is None:
+            return None
         tag = page["tag"]
         return page if done and type(tag) is int and 0 < tag <= U32 else None
 
-    def _unpark(self, frame):
-        """The answer to the parked page's tag, its bare ids whole again from that page. One answer
-        revalidates it; ids it cannot resolve (or another boot) ask for the page again without the tag."""
-        parked, name = self.parked, ROWS[self.kind]
-        rows = frame.get(name) if isinstance(frame.get(name), list) else []
+    def _unpark(self, parked: Parked, frame: Frame) -> Frame | None:
+        """The answer to the `parked` page's tag, its bare ids whole again from that page. One
+        answer revalidates it; ids it cannot resolve (or another boot) ask for the page again
+        without the tag."""
+        name = ROWS[self.kind]
+        rows = value if isinstance(value := frame.get(name), list) else []
         if self.kind == "history" or frame.get("more") is False:
             self.parked = None
         if not any(type(row) is int for row in rows):
@@ -800,11 +938,13 @@ class View:
                 name: [parked["rows"][row] if type(row) is int else row for row in rows],
             }
         self.parked = None
-        self._subscribe_upstream(self.standing)
+        if self.standing is not None:  # It answers the standing subscribe.
+            self._subscribe_upstream(self.standing)
         return None
 
-    def unpark(self, epoch=None):
-        """Drop the parked page, or with `epoch` only when its store moved, unless a revalidation runs."""
+    def unpark(self, epoch: object = None) -> None:
+        """Drop the parked page, or with `epoch` only when its store moved, unless a revalidation
+        runs."""
         parked = self.parked
         if (
             parked
@@ -813,18 +953,20 @@ class View:
         ):
             self.parked = None
 
-    def _epoch_moved(self):
+    def _epoch_moved(self) -> None:
         """The store changed: every other group's page is out of date; one fetch per group."""
         self.pages.clear()
-        groups = {screen.records[self.kind].group for screen in self.mux.bound()} - {
-            None,
-            self.standing,
-        }
+        groups = {
+            group
+            for screen in self.mux.bound()
+            if (group := screen.records[self.kind].group) is not None
+        } - {self.standing}
         for group in sorted(groups, key=repr):
             self._queue(group, group=group, behind_inflight=True)
 
-    def _fetched(self, frame):
-        fetch, start = self.inflight, self._start(frame)
+    def _fetched(self, fetch: Fetch, frame: Frame) -> None:
+        """A frame answering `fetch`, the one in flight."""
+        start = self._start(frame)
         done = self.kind == "history" or frame.get("more") is False
         if start:
             fetch.started = True
@@ -849,23 +991,29 @@ class View:
 
 # --- The multiplexer ---------------------------------------------------------------------------
 class Mux:
-    def __init__(self, companion, relay):
+    idle: asyncio.TimerHandle | None
+    linger: asyncio.TimerHandle | None
+    settings_tag: object  # The Settings model's tag, as the controller named it.
+    card: list[str]
+    ring: collections.deque[tuple[int, object, int]]  # The log: (sequence, event, its size).
+    log_meta: dict[str, object] | None
+    alive_waiters: list[Screen]
+
+    def __init__(self, companion: Companion, relay: Relay) -> None:
         self.companion, self.relay = companion, relay
-        self.screens = set()
-        self.claimed = (
-            set()
-        )  # Browser ids whose relayed claim (or sign-in) the controller accepted.
+        self.screens: set[Screen] = set()
+        # Browser ids whose relayed claim (or sign-in) the controller accepted.
+        self.claimed: set[str] = set()
         self.upstream = Upstream(companion, relay, self)
         self.views = {"history": View(self, "history"), "stats": View(self, "stats")}
         self.home, self.settings, self.diagnostic = Merged(), Merged(), Merged()
         self.idle = self.linger = None
         self.changed = asyncio.Event()
-        self.attributed = collections.deque(
-            maxlen=64
-        )  # (time, screen) of ops sent upstream for a screen
+        # (time, screen) of ops sent upstream for a screen
+        self.attributed: collections.deque[tuple[float, Screen]] = collections.deque(maxlen=64)
         self._reset()
 
-    def _reset(self, park=True):
+    def _reset(self, park: bool = True) -> None:
         self.home.clear()
         self.settings.clear()
         self.diagnostic.clear()
@@ -887,10 +1035,10 @@ class Mux:
         for view in self.views.values():
             view.clear(park)
 
-    def bound(self):
+    def bound(self) -> list[Screen]:
         return [screen for screen in self.screens if screen.bound and not screen.closed]
 
-    def status(self):
+    def status(self) -> Status:
         screens = self.bound()
         views = {
             "home": len(screens),
@@ -903,18 +1051,18 @@ class Mux:
         return {"screens": len(screens), "owner": bool(self.claimed), "views": views}
 
     # --- Upstream ops ----------------------------------------------------------------
-    def up(self, op):
+    def up(self, op: Frame) -> bool:
         return self.upstream.send(op)
 
-    def attribute(self, screen):
+    def attribute(self, screen: Screen) -> None:
         """Note that this screen's op led to upstream ops (a 4003 then names it)."""
         now = _now()
         screen.active_at = now
         self.attributed.append((now, screen))
 
-    def bind_ops(self):
+    def bind_ops(self) -> list[dict[str, object]]:
         screens = self.bound()
-        ops = []
+        ops: list[dict[str, object]] = []
         self.settings_on = any(screen.settings for screen in screens)
         if self.settings_on:
             ops.append({"op": "settings", "on": True})
@@ -927,23 +1075,24 @@ class Mux:
         for view in self.views.values():
             if view.standing is not None:
                 view.awaiting = True
-                ops.append(view.standing_op())
+                ops.append(view.standing_op(view.standing))
         return ops
 
-    def upstream_opened(self):
+    def upstream_opened(self) -> None:
         for view in self.views.values():
             view.pump()
         if not self.bound() and not self.idle:
             self.idle = asyncio.get_running_loop().call_later(IDLE_S, self._idle)
 
-    def upstream_closed(self, code, deliberate, heard=False):
+    def upstream_closed(self, code: int | None, deliberate: bool, heard: bool = False) -> None:
         screens = list(self.screens)
         if (
             code == 4001
         ):  # The controller gave the Web UI to a direct browser, or forgot the claim (reboot).
             self.claimed.clear()
             log(
-                "the Web UI was opened directly on another device; every companion screen offers Reload"
+                "the Web UI was opened directly on another device; "
+                "every companion screen offers Reload"
             )
             for screen in screens:
                 screen.close(4001, "direct" if heard else "")
@@ -967,27 +1116,29 @@ class Mux:
             park=deliberate
         )  # An idle close keeps the parked pages; a lost session may be a reboot.
 
-    def replica_changed(self, store=None):
+    def replica_changed(self, store: str | None = None) -> None:
         """The replica's copy changed or stopped serving: the pages it serves are built again."""
         for kind, view in self.views.items():
             if store in (None, STORE[kind]):
                 view.refresh()
 
-    def active_preset(self):
-        """The active preset, from Home's model: the Stats header's "This preset" chart follows it."""
+    def active_preset(self) -> object:
+        """The active preset, from Home's model: the Stats header's "This preset" chart follows
+        it."""
         changes = self.home.changes
         if "presets.activeId" in changes:
             return changes["presets.activeId"]
         presets = changes.get("presets")
         return presets.get("activeId", 0) if isinstance(presets, dict) else 0
 
-    def unpark(self, notice=None):
-        """Drop the parked pages (Forget, a link reset), or with an `rs` notice those whose store moved."""
+    def unpark(self, notice: Frame | None = None) -> None:
+        """Drop the parked pages (Forget, a link reset), or with an `rs` notice those whose store
+        moved."""
         for kind, key in (("stats", "sh"), ("history", "hi")):
             if notice is None or type(notice.get(key)) is int:
                 self.views[kind].unpark(None if notice is None else notice[key])
 
-    def takeover(self):
+    def takeover(self) -> None:
         """A relayed call answered UI_TAKEN_OVER: a direct browser holds the Web UI."""
         self.claimed.clear()
         for screen in list(self.screens):
@@ -995,18 +1146,23 @@ class Mux:
         self.upstream.close()
 
     # --- Screens ---------------------------------------------------------------------
-    def connect(self, ws, addr):
+    def connect(self, ws: web.WebSocketResponse, addr: str) -> Screen:
         screen = Screen(self, ws, addr)
         self.screens.add(screen)
         if self.idle:
             self.idle.cancel()
             self.idle = None
+
+        def unbound() -> None:
+            if not screen.bound:
+                screen.close(1008)
+
         loop = asyncio.get_running_loop()
-        loop.call_later(BIND_S, lambda: screen.bound or screen.close(1008))
-        self.companion.spawn(screen.writer())
+        loop.call_later(BIND_S, unbound)
+        _ = self.companion.spawn(screen.writer())
         return screen
 
-    def disconnect(self, screen):
+    def disconnect(self, screen: Screen) -> None:
         screen.closed = True
         screen.wake.set()
         self.screens.discard(screen)
@@ -1024,19 +1180,19 @@ class Mux:
         else:
             self.idle = asyncio.get_running_loop().call_later(IDLE_S, self._idle)
 
-    def _settle(self):
+    def _settle(self) -> None:
         """Drop upstream subscriptions no screen holds any more."""
         for view in self.views.values():
             view.settle()
         self._log_settle()
         self._diagnostic_settle()
 
-    def _idle(self):
+    def _idle(self) -> None:
         self.idle = None
         if not self.bound():
             self.upstream.close()  # The claim stays: the next screen binds a new session.
 
-    def on_message(self, screen, text):
+    def on_message(self, screen: Screen, text: str) -> None:
         try:
             message = parse(text)
         except ValueError:
@@ -1046,19 +1202,19 @@ class Mux:
         try:
             if not screen.bound:
                 if op != "bind":
-                    raise ValueError()
+                    raise ValueError
                 self._bind(screen, message)
             else:
                 self._op(screen, message)
         except ValueError:
             screen.close(1008)
-        except Invalid:
+        except InvalidOpError:
             log(
                 f"a screen's {op[:12]} op failed validation; closing it so it resets its list views"
             )
             screen.close(4003)
 
-    def _bind(self, screen, message):
+    def _bind(self, screen: Screen, message: Op) -> None:
         client = message.get("client")
         if not isinstance(client, str) or client not in self.claimed:
             screen.close(4001)
@@ -1077,21 +1233,21 @@ class Mux:
         self._send_card(screen)
         ops = message.get("ops", [])
         if not isinstance(ops, list):
-            raise Invalid()
+            raise InvalidOpError
         for op in ops:
-            if not isinstance(op, dict) or not isinstance(op.get("op"), str) or op["op"] == "bind":
-                raise Invalid()
+            if not _is_op(op) or op["op"] == "bind":
+                raise InvalidOpError
             self._op(screen, op)
         self._settle()
         self.upstream.open()
 
-    def _op(self, screen, message):
+    def _op(self, screen: Screen, message: Frame) -> None:
         op = message["op"]
         if op == "activity":
             _fields(message, {"op", "seconds", "hidden"})
             seconds, hidden = _number(message, "seconds", 0, 30), _flag(message, "hidden")
             if seconds is None:
-                raise Invalid()
+                raise InvalidOpError
             now = _now()
             screen.until = now + seconds
             if hidden is not None:
@@ -1112,7 +1268,7 @@ class Mux:
             _fields(message, {"op", "on", "tag"})
             tag = _number(message, "tag", 0, U32)
             if message.get("on") is not True:
-                raise Invalid()
+                raise InvalidOpError
             self._settings_subscribe(screen, tag)
         elif op == "diagnostic":
             _fields(message, {"op", "on"})
@@ -1121,23 +1277,25 @@ class Mux:
             _fields(message, {"op", "on", "after"})
             on, after = _flag(message, "on", required=True), _number(message, "after", 0, U32)
             if not on and after is not None:
-                raise Invalid()
+                raise InvalidOpError
             self._log_subscribe(screen, on, after or 0)
         elif op in self.views:
             self.views[op].on_op(screen, message)
         elif op != "records":  # An older page's record index request: ignored, never closed.
-            raise Invalid()
+            raise InvalidOpError
 
-    def aggregate(self):
-        """(seconds, hidden) for the upstream: the most of the visible screens, hidden only when all are."""
+    def aggregate(self) -> tuple[int, bool]:
+        """(seconds, hidden) for the upstream: the most of the visible screens, hidden only when all
+        are."""
         now, screens = _now(), self.bound()
         visible = [screen for screen in screens if not screen.hidden]
         return max((screen.seconds(now) for screen in visible), default=0), bool(
             screens
         ) and not visible
 
-    def _resync(self, screen):
-        """Answered from what the companion holds; the same screen again within 30 s asks the controller."""
+    def _resync(self, screen: Screen) -> None:
+        """Answered from what the companion holds; the same screen again within 30 s asks the
+        controller."""
         now = _now()
         repeated, screen.resync_at = now - screen.resync_at < RESYNC_REPEAT_S, now
         if repeated and now - self.resync_at >= RESYNC_UPSTREAM_S and self._resync_upstream():
@@ -1154,7 +1312,7 @@ class Mux:
         for view in self.views.values():
             view.resync(screen)
 
-    def _resync_upstream(self):
+    def _resync_upstream(self) -> bool:
         if not self.up({"op": "resync"}):
             return False
         self.resync_at = self.card_resync_at = _now()
@@ -1163,7 +1321,7 @@ class Mux:
         return True
 
     # --- Home, shot card --------------------------------------------------------------
-    def _send_home(self, screen, presets=False):
+    def _send_home(self, screen: Screen, presets: bool = False) -> None:
         if not self.home.ready:
             screen.home = False
             return
@@ -1171,9 +1329,9 @@ class Mux:
         changes = {
             **changes,
             **{
-                key: changes[key] + int(_now() - self.home.clock_at[key])
+                key: value + int(_now() - self.home.clock_at[key])
                 for key in CLOCKS
-                if type(changes.get(key)) is int
+                if type(value := changes.get(key)) is int
             },
         }
         if (
@@ -1195,7 +1353,7 @@ class Mux:
         )
         screen.home = True
 
-    def _send_card(self, screen):
+    def _send_card(self, screen: Screen) -> None:
         if self.card_valid:
             for text in self.card:
                 screen.send(text)
@@ -1203,8 +1361,9 @@ class Mux:
         else:
             self._card_recover()
 
-    def _card_recover(self):
-        """Over its bound the card cannot serve a new screen: one upstream resync, at most once a minute."""
+    def _card_recover(self) -> None:
+        """Over its bound the card cannot serve a new screen: one upstream resync, at most once a
+        minute."""
         if (
             not self.card_live
             and _now() - self.card_resync_at >= RESYNC_UPSTREAM_S
@@ -1212,7 +1371,7 @@ class Mux:
         ):
             self._resync_upstream()
 
-    def _on_home(self, frame, text):
+    def _on_home(self, frame: Frame, text: str) -> None:
         active, boot = self.active_preset(), self.home.boot
         if not self.home.apply(frame):
             return
@@ -1232,7 +1391,7 @@ class Mux:
         self.changed.set()
         self.changed = asyncio.Event()
 
-    def _on_card(self, frame, text):
+    def _on_card(self, frame: Frame, text: str) -> None:
         snapshot = frame.get("snapshot") is True
         if "phase" in frame:
             self.card_live = frame["phase"] in ("active", "pending")
@@ -1250,10 +1409,9 @@ class Mux:
         if not self.card_valid and any(not screen.card for screen in self.bound()):
             self._card_recover()
 
-    async def command_done(self, request_id, timeout):
-        """Wait until Home's lastCommand settles this request (or a newer one), or the timeout."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+    async def command_done(self, request_id: int) -> bool:
+        """Wait until Home's lastCommand settles this request (or a newer one); the caller bounds
+        the wait (asyncio.timeout)."""
         while self.upstream.state == "open":
             current = self.home.changes.get("lastCommand.requestId")
             if isinstance(current, int) and (
@@ -1261,17 +1419,11 @@ class Mux:
                 or (current == request_id and self.home.changes.get("lastCommand.state") in FINAL)
             ):
                 return True
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return False
-            try:
-                await asyncio.wait_for(self.changed.wait(), remaining)
-            except asyncio.TimeoutError:
-                return False
+            await self.changed.wait()
         return False
 
     # --- Settings, Diagnostic --------------------------------------------------------------
-    def _settings_subscribe(self, screen, tag):
+    def _settings_subscribe(self, screen: Screen, tag: int | None) -> None:
         screen.settings = True
         if not self.settings_on:
             self.settings_on = True
@@ -1284,7 +1436,7 @@ class Mux:
                 for text in self.settings.frames("settings", {"tag": self.settings_tag}):
                     screen.send(text)
 
-    def _on_settings(self, frame, text):
+    def _on_settings(self, frame: Frame, text: str) -> None:
         if not self.settings.apply(frame):
             return
         if "tag" in frame:
@@ -1295,7 +1447,7 @@ class Mux:
                 screen.send(text)
                 screen.settings_synced = True
 
-    def _diagnostic_subscribe(self, screen, on):
+    def _diagnostic_subscribe(self, screen: Screen, on: bool) -> None:
         screen.diagnostic = on
         if not on:
             self._diagnostic_settle()
@@ -1312,7 +1464,7 @@ class Mux:
         else:
             self._send_diagnostic(screen)
 
-    def _send_diagnostic(self, screen):
+    def _send_diagnostic(self, screen: Screen) -> None:
         if self.diagnostic.ready:
             for text in self.diagnostic.frames("diagnostic", split=True):
                 screen.send(text)
@@ -1320,7 +1472,7 @@ class Mux:
         else:
             screen.diagnostic_synced = False
 
-    def _diagnostic_settle(self):
+    def _diagnostic_settle(self) -> None:
         if (
             self.diagnostic_on
             and not any(screen.diagnostic for screen in self.bound())
@@ -1330,14 +1482,14 @@ class Mux:
                 DIAGNOSTIC_LINGER_S, self._diagnostic_off
             )
 
-    def _diagnostic_off(self):
+    def _diagnostic_off(self) -> None:
         self.linger = None
         if self.diagnostic_on and not any(screen.diagnostic for screen in self.bound()):
             self.diagnostic_on = False
             self.diagnostic.clear()
             self.up({"op": "diagnostic", "on": False})
 
-    def _on_diagnostic(self, frame, text):
+    def _on_diagnostic(self, frame: Frame, text: str) -> None:
         if not self.diagnostic_on or not self.diagnostic.apply(frame):
             return
         snapshot = frame.get("snapshot") is True
@@ -1347,7 +1499,7 @@ class Mux:
                 screen.diagnostic_synced = True
 
     # --- Log ---------------------------------------------------------------------------
-    def _log_subscribe(self, screen, on, after):
+    def _log_subscribe(self, screen: Screen, on: bool, after: int) -> None:
         if not on:
             screen.log = False
             self._log_settle()
@@ -1359,12 +1511,12 @@ class Mux:
             self.up({"op": "log", "on": True, "after": self.ring[-1][0] if self.ring else 0})
         self._log_serve(screen)
 
-    def _log_settle(self):
+    def _log_settle(self) -> None:
         if self.log_on and not any(screen.log for screen in self.bound()):
             self.log_on = False
             self.up({"op": "log", "on": False})  # The ring stays while the session lives.
 
-    def _on_log(self, frame):
+    def _on_log(self, frame: Frame) -> None:
         events, boot = frame.get("events"), frame.get("bootId")
         if not isinstance(events, list) or not isinstance(boot, int):
             return
@@ -1400,7 +1552,7 @@ class Mux:
         for screen in screens:
             self._log_serve(screen)
 
-    def _log_serve(self, screen):
+    def _log_serve(self, screen: Screen) -> None:
         """This screen's events after its cursor, in ≤ FRAME_BUDGET frames."""
         if self.log_meta is None:
             return
@@ -1411,11 +1563,14 @@ class Mux:
             if after == newest:
                 start = len(ring)
             elif _newer(after, newest) or (_newer(oldest, after) and (oldest - after) & U32 > 1):
-                invalid = True  # A cursor from the future, or older than the ring: refill from the oldest.
+                # A cursor from the future, or older than the ring: refill from the oldest.
+                invalid = True
             else:
                 start = next(index for index, entry in enumerate(ring) if _newer(entry[0], after))
         if start == len(ring) and not (screen.log_owed or invalid or screen.log_missed):
             return
+        chunks: list[list[object]]
+        chunk: list[object]
         chunks, chunk, size = [], [], 0
         for index in range(start, len(ring)):
             _, event, event_size = ring[index]
@@ -1448,7 +1603,7 @@ class Mux:
         screen.log_missed = 0
 
     # --- Upstream frames ------------------------------------------------------------------
-    def on_frame(self, frame, text):
+    def on_frame(self, frame: Frame, text: str) -> None:
         kind = frame.get("type")
         if kind == "home":
             self._on_home(frame, text)
