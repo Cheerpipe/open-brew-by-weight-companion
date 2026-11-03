@@ -1,0 +1,11 @@
+{
+  "extends": [
+    "stylelint-config-standard"
+  ],
+  "customSyntax": "postcss-html",
+  "reportNeedlessDisables": true,
+  "reportInvalidScopeDisables": true,
+  "rules": {
+    "media-feature-range-notation": "prefix"
+  }
+}

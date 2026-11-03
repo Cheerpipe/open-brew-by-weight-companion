@@ -1,0 +1,26 @@
+{
+  "name": "openbrewbyweight-companion",
+  "private": true,
+  "description": "Lint and format tooling for the companion's web pages",
+  "scripts": {
+    "format:web": "prettier --write companion/page.html companion/ui-off.html gateway/setup.html gateway/strings.json",
+    "format:web:check": "prettier --check companion/page.html companion/ui-off.html gateway/setup.html gateway/strings.json"
+  },
+  "prettier": {
+    "printWidth": 100
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.14.0",
+    "eslint-plugin-html": "8.2.1",
+    "globals": "17.14.0",
+    "html-validate": "11.18.0",
+    "postcss-html": "2.0.0",
+    "prettier": "3.9.10",
+    "stylelint": "17.16.0",
+    "stylelint-config-standard": "40.0.0"
+  },
+  "overrides": {
+    "minimatch": "11.0.4"
+  }
+}
