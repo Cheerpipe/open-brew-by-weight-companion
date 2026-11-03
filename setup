@@ -83,7 +83,9 @@ bold "Checking this server"
 command -v docker >/dev/null || die "Docker is not installed. Install Docker Engine first: https://docs.docker.com/engine/install/"
 docker info >/dev/null 2>&1 || die "This user cannot use Docker. Run: sudo ./setup"
 version=$(docker compose version --short 2>/dev/null) || die "Docker Compose v2 (the 'docker compose' command) is missing."
-printf '%s\n%s\n' 2.24 "${version#v}" | sort -V -C || die "Docker Compose $version is too old; 2.24 or newer is needed."
+# The oldest of the two sorts first; BusyBox sort has -V but not -C.
+oldest=$(printf '%s\n%s\n' 2.24 "${version#v}" | sort -V | head -n 1)
+[[ $oldest == 2.24 ]] || die "Docker Compose $version is too old; 2.24 or newer is needed."
 command -v ip >/dev/null || die "The 'ip' command (package iproute2) is missing."
 say "Docker $(docker version -f '{{.Server.Version}}'), Compose ${version#v}"
 
