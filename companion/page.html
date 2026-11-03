@@ -1,380 +1,648 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Open Brew by Weight Companion</title>
-<style>@STYLE@
-  .code { display: inline-block; margin: 0.6rem 0; padding: 0.85rem 1.25rem; background: var(--in); border: 1px solid var(--ln); border-radius: var(--r); font: 800 2.4rem/1.2 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: 0.2em; font-variant-numeric: tabular-nums; }
-  button { display: inline-block; min-height: 3rem; padding: 0.65rem 1.5rem; margin-top: 0.75rem; border: 0; border-radius: 2rem; background: var(--pri); color: var(--on); font: inherit; font-weight: 700; cursor: pointer; }
-  button:hover { opacity: 0.92; }
-  #erase { background: none; border: 1px solid var(--dn); color: var(--dn); }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: 0 1rem; margin: 0.5rem 0 0; }
-  dt { color: var(--mu); font-size: 0.85rem; padding: 0.5rem 0; border-bottom: 1px solid var(--ln); }
-  dd { margin: 0; padding: 0.5rem 0; font-weight: 650; border-bottom: 1px solid var(--ln); overflow-wrap: anywhere; }
-  dl > :nth-last-child(-n + 2) { border-bottom: 0; }
-</style>
-</head>
-<body>
-<main>
-  <div class="brandLock" aria-hidden="true">
-    <svg viewBox="12 4 40 56">
-      <mask id="brandCut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-        <rect width="64" height="64" fill="#fff" />
-        <path fill="none" stroke="#000" stroke-width="7.13" d="M32 0v27.55m0 20.9V64" />
-        <path fill="none" stroke="#000" stroke-width="7.6" stroke-linecap="round" d="M32 48.45 21.62 36.08" />
-        <circle fill="#000" cx="32" cy="27.55" r="6.27" />
-        <circle fill="#000" cx="31.34" cy="48.45" r="6.27" />
-      </mask>
-      <path mask="url(#brandCut)" d="M32 5s20 16 20 34a20 20 0 0 1-40 0C12 21 32 5 32 5z" />
-    </svg>
-    <span><small>Open Brew</small>by Weight</span>
-  </div>
-  <p class="muted" id="brand">Open Brew by Weight Companion</p>
-  <nav class="menu">
-    <a id="m-webui" href="/" target="_blank" rel="noopener">Web UI</a>
-    <a id="m-access" href="/">Secure access</a>
-    <a id="m-companion" href="/__companion/" aria-current="page">Companion</a>
-  </nav>
-  <h1 id="title">Companion</h1>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Open Brew by Weight Companion</title>
+    <style>
+      /* @STYLE@ */
+      .code {
+        display: inline-block;
+        margin: 0.6rem 0;
+        padding: 0.85rem 1.25rem;
+        background: var(--in);
+        border: 1px solid var(--ln);
+        border-radius: var(--r);
+        font:
+          800 2.4rem/1.2 ui-monospace,
+          "SF Mono",
+          Menlo,
+          monospace;
+        letter-spacing: 0.2em;
+        font-variant-numeric: tabular-nums;
+      }
 
-  <section class="card">
-    <h2 id="pairing-title"></h2>
-    <p id="pairing" class="status"></p>
-    <p id="code" class="code" hidden></p>
-    <p id="pairing-help" class="muted"></p>
-    <button id="pair" type="button" hidden></button>
-    <button id="erase" type="button" hidden></button>
-  </section>
+      button {
+        display: inline-block;
+        min-height: 3rem;
+        padding: 0.65rem 1.5rem;
+        margin-top: 0.75rem;
+        border: 0;
+        border-radius: 2rem;
+        background: var(--pri);
+        color: var(--on);
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
 
-  <section class="card">
-    <h2 id="status-title"></h2>
-    <dl>
-      <dt id="controller-label"></dt><dd id="controller"></dd>
-      <dt id="ui-label"></dt><dd id="ui"></dd>
-      <dt id="link-label"></dt><dd id="link"></dd>
-      <dt id="lm-label"></dt><dd id="lm"></dd>
-    </dl>
-    <p id="mismatch" class="status warn" hidden></p>
-  </section>
+      button:hover {
+        opacity: 0.92;
+      }
 
-  <section class="card">
-    <h2 id="log-title"></h2>
-    <p id="log-stats" class="muted"></p>
-    <p>
-      <select id="log-level" aria-describedby="log-level-hint">
-        <option value="c"></option><option value="e"></option><option value="w"></option>
-        <option value="i" selected></option><option value="d"></option>
-      </select>
-      <small id="log-level-hint" class="muted"></small>
-      <a id="log-export" href="#" hidden></a>
-    </p>
-    <p id="log-note" class="status warn" hidden></p>
-    <pre id="log-view" style="max-height:24rem;overflow:auto;margin:0;font-size:.85em"></pre>
-    <button id="log-more" type="button" hidden></button>
-  </section>
+      #erase {
+        background: none;
+        border: 1px solid var(--dn);
+        color: var(--dn);
+      }
 
-  <section class="card">
-    <h2 id="archive-title"></h2>
-    <p id="archive-stats" class="muted"></p>
-    <p id="archive-holes" class="status warn" hidden></p>
-    <p id="archive-note" class="status warn" hidden></p>
-    <ul id="archive-restarts" class="muted"></ul>
-    <p><a id="archive-export" href="#" hidden></a></p>
-    <p id="deleting" class="muted"></p>
-  </section>
-</main>
-<footer>
-  <div id="version"></div>
-  <div><a href="https://github.com/Cheerpipe/open-brew-by-weight-companion" target="_blank" rel="noopener">GitHub</a>
-    <span id="made-by">· Made by</span>
-    <a href="https://github.com/Cheerpipe" target="_blank" rel="noopener">Cheerpipe</a></div>
-</footer>
-<script>
-(function () {
-  var T = {
-    en: {
-      title: "Companion", pairingTitle: "Pairing", statusTitle: "Status", controller: "Controller",
-      link: "Link", lm: "La Marzocco", pair: "Pair with the controller", pairAgain: "Pair again",
-      searching: "Looking for the controller on your network…",
-      unpaired: "Not paired yet. Pairing lets several phones, tablets and computers use the Web UI through this companion at the same time, and lets the controller hand its La Marzocco cloud connection to it, so the espresso machine's controller has less to do.",
-      requesting: "Asking the controller…",
-      pending: "Waiting for your approval. In the Web UI, open Admin → Companion and type this code:",
-      pendingNoCode: "Waiting for the controller to prepare the request…",
-      expires: "The request expires in {m} min.",
-      paired: "Paired with {name}.",
-      denied: "The controller declined the request.",
-      expired: "The request expired before it was approved.",
-      ignored: "The controller ignores this companion. Choose Stop ignoring in Admin → Companion, then pair again.",
-      already_paired: "The controller is already paired with a companion. Forget it in Admin → Companion first.",
-      busy: "Another companion is asking to pair right now. Try again in a few minutes.",
-      rate_limited: "The controller received another request a moment ago. Try again in a few seconds.",
-      unreachable: "The controller did not answer. Is it on?",
-      not_recognized: "The controller no longer recognizes this companion, for example after a factory reset, so the companion stopped using your La Marzocco account. It still keeps the account until you pair again or erase this pairing.",
-      erase: "Erase this pairing", eraseHttps: "Open this page over HTTPS to erase the pairing.", eraseConfirm: "Erase this pairing, the La Marzocco account and the companion's La Marzocco installation from this companion? Its copy of your shot history and the controller's log stay here, and come back if you pair this controller again.",
-      version: "The controller and this companion use different versions of their connection. Update both to their latest release.",
-      unknown: "The controller sent messages this companion does not understand. Update the companion.",
-      error: "Pairing did not work. The companion's log says why.",
-      down: "Not connected", connecting: "Connecting…", open: "Connected", retry: "Reconnecting ({reason})",
-      lmOff: "Off. Turn it on in Admin → Companion.", lmWaiting: "Waiting for the account from the controller",
-      lmConnecting: "Connecting to La Marzocco…", lmConnected: "Connected",
-      lmRefused: "Connected, but the cloud refuses its reads; correct the account in the Web UI",
-      routeCompanion: "the controller uses this connection", routeDirect: "the controller uses its own",
-      versionLine: "Companion {v} · {name}", madeBy: "· Made by", none: "Not found yet",
-      ui: "Web UI", uiReady: "Through the companion · {screens}", uiPassthrough: "Straight to the controller, one screen at a time",
-      uiDisabled: "Directly on the controller (off in Admin → Companion)",
-      screens0: "no screen open", screens1: "1 screen open", screensN: "{n} screens open",
-      logTitle: "Diagnostic log", logEmpty: "Nothing stored yet",
-      logStats: "{n} events · {mb} of {budget} MB · kept {days} days",
-      logMore: "Show older", logExport: "Export everything",
-      logLevelC: "Critical", logLevelE: "Error", logLevelW: "Warning",
-      logLevelI: "Info", logLevelD: "Debug",
-      logLevelHint: "This severity and above",
-      logGap: "· {n} events could not be copied ·", logBoot: "· restart (boot {b}) ·",
-      logReset: "· the controller could not continue from here; earlier events may be missing ·",
-      logOff: "The controller is not sending its log here: Diagnostic log through the companion is off in Admin → Companion.",
-      logAuth: "Sign in to the Web UI through this companion to read the log. Once signed in, it stays readable here even while the controller is off.",
-      logHttps: "Open this page over HTTPS to read the log.",
-      logStore: "The log history cannot be read right now. The companion's log says why.",
-      archiveTitle: "Shot archive", archiveEmpty: "Nothing stored yet",
-      archiveStats: "{shots} shots and {history} activations · {older} of them no longer on the controller · {mb} MB",
-      archiveDates: "From {first} to {last}", archiveSynced: "Last copied {when}",
-      archiveSyncing: "Copying from the controller…",
-      archiveHoles: "Up to {n} records made while the companion was away could not be copied.",
-      archiveOff: "The controller is not sending its records here: Shot archive in the companion is off in Admin → Companion.",
-      archiveExport: "Export everything",
-      archiveRestart: "The controller's {store} history restarted on {date}; {n} records kept here.",
-      shot: "shot", activation: "activation",
-      archiveAuth: "Sign in to the Web UI through this companion to export the archive.",
-      archiveController: "Turn the controller on so it can confirm your sign-in, then try again.",
-      archiveStore: "The archive cannot be read right now. The companion's log says why.",
-      archiveHttps: "Open this page over HTTPS to export the archive.",
-      archiveFailed: "The archive could not be exported. Try again.",
-      deleting: "To delete shots, activations or the log history, unlock Admin in the Web UI: delete one record from Stats or History, clear a whole list in Admin, and delete the log history in Diagnostic through this companion. What you delete there goes from here too."
-    }
-  };
-  var t = T.en;
-  function $(id) { return document.getElementById(id); }
-  function fill(text, values) {
-    return text.replace(/\{(\w+)\}/g, function (_, key) { return values[key]; });
-  }
-  $("title").textContent = t.title;
-  $("pairing-title").textContent = t.pairingTitle;
-  $("status-title").textContent = t.statusTitle;
-  $("controller-label").textContent = t.controller;
-  $("link-label").textContent = t.link;
-  $("ui-label").textContent = t.ui;
-  $("lm-label").textContent = t.lm;
-  // The menu's addresses: the secure Web UI and the plain-HTTP pages beside it.
-  fetch("/__companion/gateway", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (g) {
-    document.getElementById("m-webui").href = g.secure_url + "/";
-    // Plain HTTP: the access page is this server's root; over HTTPS the root is the Web UI.
-    if (location.protocol === "https:") document.getElementById("m-access").href = g.setup_url + "/";
-  }, function () {});
-  $("made-by").textContent = t.madeBy;
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 0 1rem;
+        margin: 0.5rem 0 0;
+      }
 
-  var timer;
-  function render(s) {
-    var p = s.pairing, state = p.state, pending = state === "pending" || state === "requesting";
-    $("brand").textContent = "Open Brew by Weight Companion · " + s.name;
-    $("version").textContent = fill(t.versionLine, { v: s.version, name: s.name });
-    $("controller").textContent = s.controller ? s.controller.name + " (" + s.controller.address + ")" : t.none;
-    var message = !s.controller && !s.paired ? t.searching
-      : state === "paired" ? fill(t.paired, { name: s.pairedWith || (s.controller && s.controller.name) })
-      : state === "pending" && !p.code ? t.pendingNoCode : t[state] || t.error;
-    $("pairing").textContent = message;
-    $("pairing").className = "status" + (state === "paired" ? " ok" : pending || state === "unpaired" ? "" : " warn");
-    $("code").hidden = !(state === "pending" && p.code);
-    $("code").textContent = p.code || "";
-    $("pairing-help").textContent = state === "pending" ? fill(t.expires, { m: Math.max(1, Math.ceil(p.expiresInS / 60)) }) : "";
-    $("pair").hidden = !s.controller || pending || state === "paired";
-    $("pair").textContent = state === "unpaired" ? t.pair : t.pairAgain;
-    $("erase").hidden = !s.paired || pending || state === "paired" || s.link === "open";
-    $("mismatch").hidden = !(s.linkReason === "VERSION" || s.unknownFrames);
-    $("mismatch").textContent = s.linkReason === "VERSION" ? t.version : t.unknown;
-    $("link").textContent = fill(t[s.link] || s.link, { reason: s.linkReason || "" });
-    var screens = s.screens === 1 ? t.screens1 : s.screens ? fill(t.screensN, { n: s.screens }) : t.screens0;
-    $("ui").textContent = s.relay === "ready" ? fill(t.uiReady, { screens: screens })
-      : s.relay === "disabled" ? t.uiDisabled : t.uiPassthrough;
-    var lm = s.laMarzocco;
-    $("lm").textContent = !s.paired ? "—" : !lm.enabled ? t.lmOff : !lm.account ? t.lmWaiting
-      : lm.refused ? t.lmRefused
-      : (lm.up ? t.lmConnected : t.lmConnecting) + " · " + (s.route === "companion" ? t.routeCompanion : t.routeDirect);
-    renderLogStats(s);
-    renderArchive(s);
-    clearTimeout(timer);
-    timer = setTimeout(refresh, pending ? 1000 : 5000);
-  }
-  function refresh() {
-    fetch("/__companion/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(render, function () {
-      clearTimeout(timer);
-      timer = setTimeout(refresh, 5000);
-    });
-  }
-  $("pair").addEventListener("click", function () {
-    $("pair").hidden = true;
-    fetch("/__companion/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-      .then(refresh, refresh);
-  });
-  $("erase").textContent = t.erase;
-  $("erase").addEventListener("click", function () {
-    if (location.protocol !== "https:") { alert(t.eraseHttps); return; }
-    if (!confirm(t.eraseConfirm)) return;
-    $("erase").hidden = true;
-    fetch("/__companion/erase", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-      .then(refresh, refresh);
-  });
+      dt {
+        color: var(--mu);
+        font-size: 0.85rem;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--ln);
+      }
 
-  // The stored diagnostic log: read from this companion's own store, so it
-  // shows and exports with the controller down, for a browser the controller
-  // lets open the Web UI (its session goes along). Newest first, older pages
-  // on demand; the newest page follows new events while nothing older is open.
-  var LEVELS = { c: 0, e: 1, w: 2, i: 3, d: 4 }, logEntries = [], logNext = null, logOlder = false, logBusy = false, logRows = null;
-  $("log-title").textContent = t.logTitle;
-  $("log-more").textContent = t.logMore;
-  $("log-export").textContent = t.logExport;
-  ["c", "e", "w", "i", "d"].forEach(function (level, i) {
-    $("log-level").options[i].text = t["logLevel" + level.toUpperCase()];
-  });
-  $("log-level-hint").textContent = " · " + t.logLevelHint;
-  $("log-level").addEventListener("change", renderLog);
-  function session() {
-    try { return localStorage.getItem("obbwSession") || sessionStorage.getItem("obbwSession") || ""; }
-    catch (_) { return ""; }
-  }
-  function logFetch(url, init) {
-    init = init || {};
-    init.cache = "no-store";
-    init.headers = Object.assign({ "X-WebUI-Session": session() }, init.headers);
-    return fetch(url, init).then(function (r) {
-      if (r.ok) return r;
-      return r.json().then(function (body) { throw body; }, function () { throw {}; });
-    });
-  }
-  function logRefused(body) {
-    var note = body && body.error === "AUTH_REQUIRED" ? t.logAuth : body && body.error === "HTTPS_REQUIRED" ? t.logHttps
-      : body && body.error === "CONTROLLER_UNREACHABLE" ? t.archiveController
-      : body && body.error === "STORE" ? t.logStore : "";
-    $("log-note").textContent = note;
-    $("log-note").hidden = !note;
-    logBusy = false;
-  }
-  function logLine(entry) {
-    if (entry.g === "boot") return fill(t.logBoot, { b: entry.boot });
-    if (entry.g === "gap") return fill(t.logGap, { n: entry.count });
-    if (entry.g === "reset") return t.logReset;
-    var when = entry.w ? new Date(entry.w * 1000).toLocaleString() : "+" + (entry.ms / 1000).toFixed(3) + "s";
-    return when + " " + entry.l.toUpperCase() + " [" + entry.c + "] " + entry.m;
-  }
-  function renderLog() {
-    var ceiling = LEVELS[$("log-level").value], lines = [];
-    for (var i = 0; i < logEntries.length; i++) {
-      var entry = logEntries[i];
-      if (!entry.g && LEVELS[entry.l] > ceiling) continue;
-      lines.push(logLine(entry));
-    }
-    $("log-view").textContent = lines.length ? lines.join("\n") : t.logEmpty;
-  }
-  function logPage(fresh) {
-    if (logBusy) return;
-    logBusy = true;
-    var next = fresh ? null : logNext;
-    var url = "/__companion/log?limit=100" + (next ? "&boot=" + next.boot + "&before=" + next.before : "");
-    logFetch(url).then(function (r) { return r.json(); }).then(function (page) {
-      logEntries = (fresh ? [] : logEntries).concat(page.entries);
-      logOlder = !fresh;
-      logNext = page.next;
-      logBusy = false;
-      $("log-note").hidden = true;
-      $("log-more").hidden = !page.next;
-      $("log-export").hidden = !logEntries.length;
-      renderLog();
-    }, logRefused);
-  }
-  $("log-more").addEventListener("click", function () { logPage(false); });
-  // An export: the server names the file.
-  function download(url, fallback, refused) {
-    logFetch(url).then(function (r) {
-      var name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "");
-      return r.blob().then(function (blob) {
-        var link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = name ? name[1] : fallback;
-        link.click();
-        setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
-      });
-    }).catch(refused);
-  }
-  $("log-export").addEventListener("click", function (event) {
-    event.preventDefault();
-    download("/__companion/log/export", "obbw-log.json", logRefused);
-  });
-  // The shot archive: what the companion keeps and its export. Deleting is the
-  // Web UI's, with Admin unlocked: this companion only follows.
-  $("archive-title").textContent = t.archiveTitle;
-  $("archive-export").textContent = t.archiveExport;
-  $("deleting").textContent = t.deleting;
-  function archiveRefused(body) {
-    var note = body && body.error === "AUTH_REQUIRED" ? t.archiveAuth : body && body.error === "HTTPS_REQUIRED" ? t.archiveHttps
-      : body && body.error === "CONTROLLER_UNREACHABLE" ? t.archiveController
-      : body && body.error === "STORE" ? t.archiveStore : body ? t.archiveFailed : "";
-    $("archive-note").textContent = note;
-    $("archive-note").hidden = !note;
-  }
-  function day(seconds) { return new Date(seconds * 1000).toLocaleDateString(); }
-  function renderArchive(s) {
-    var a = s.archive || {}, total = (a.shotsTotal || 0) + (a.historyTotal || 0), first = Math.min(
-      a.shotsFirst || Infinity, a.historyFirst || Infinity), last = Math.max(a.shotsLast || 0, a.historyLast || 0);
-    var lines = !s.paired ? [] : a.error && !total ? [t.archiveStore]
-      : !total ? [t.archiveEmpty]
-      : [fill(t.archiveStats, { shots: a.shotsTotal, history: a.historyTotal, older: a.shots + a.history,
-        mb: (a.bytes / 1048576).toFixed(1) })];
-    if (total && last) lines.push(fill(t.archiveDates, { first: day(first), last: day(last) }));
-    if (a.syncing) lines.push(t.archiveSyncing);
-    else if (a.syncedAt) lines.push(fill(t.archiveSynced, { when: new Date(a.syncedAt * 1000).toLocaleString() }));
-    if (s.paired && s.link === "open") lines.push(a.available && !a.on ? t.archiveOff : "");
-    $("archive-stats").textContent = lines.filter(Boolean).join(" · ");
-    $("archive-holes").hidden = !a.holes;
-    $("archive-holes").textContent = fill(t.archiveHoles, { n: a.holes });
-    $("archive-export").hidden = !total;
-    renderRestarts(a);
-  }
-  $("archive-export").addEventListener("click", function (event) {
-    event.preventDefault();
-    download("/__companion/archive/export", "obbw-archive.json", archiveRefused);
-  });
-  // Each restarted history (a factory reset): when, and how many records it left here.
-  function renderRestarts(a) {
-    var restarts = [];
-    ["shots", "history"].forEach(function (store) {
-      var list = (a.generations || {})[store] || [], name = store === "shots" ? t.shot : t.activation;
-      list.forEach(function (g) {
-        var older = list.filter(function (o) { return o.generation === g.generation - 1; })[0];
-        if (g.restartedAt && older) restarts.push(fill(t.archiveRestart, { store: name, date: day(g.restartedAt), n: older.count }));
-      });
-    });
-    $("archive-restarts").textContent = "";
-    restarts.forEach(function (line) {
-      $("archive-restarts").appendChild(document.createElement("li")).textContent = line;
-    });
-  }
-  function renderLogStats(s) {
-    var log = s.log || {};
-    if (!s.paired) {
-      $("log-stats").textContent = "";
-      return;
-    }
-    $("log-stats").textContent = log.error ? t.logStore
-      : (log.rows ? fill(t.logStats, { n: log.rows, mb: (log.bytes / 1048576).toFixed(1), budget: log.mb, days: log.days })
-        : t.logEmpty) + (s.link === "open" && !log.enabled ? " · " + t.logOff : "");
-    // The newest page follows new events while the reader has not paged back.
-    if (!log.error && log.rows !== logRows && !logOlder) {
-      logRows = log.rows;
-      logPage(true);
-    }
-  }
-  refresh();
-})();
-</script>
-</body>
+      dd {
+        margin: 0;
+        padding: 0.5rem 0;
+        font-weight: 650;
+        border-bottom: 1px solid var(--ln);
+        overflow-wrap: anywhere;
+      }
+
+      dl > :nth-last-child(-n + 2) {
+        border-bottom: 0;
+      }
+
+      #log-view {
+        max-height: 24rem;
+        overflow: auto;
+        margin: 0;
+        font-size: 0.85em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="brand-lock" aria-hidden="true">
+        <svg viewBox="12 4 40 56">
+          <mask id="brandCut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+            <rect width="64" height="64" fill="#fff" />
+            <path fill="none" stroke="#000" stroke-width="7.13" d="M32 0v27.55m0 20.9V64" />
+            <path
+              fill="none"
+              stroke="#000"
+              stroke-width="7.6"
+              stroke-linecap="round"
+              d="M32 48.45 21.62 36.08"
+            />
+            <circle fill="#000" cx="32" cy="27.55" r="6.27" />
+            <circle fill="#000" cx="31.34" cy="48.45" r="6.27" />
+          </mask>
+          <path mask="url(#brandCut)" d="M32 5s20 16 20 34a20 20 0 0 1-40 0C12 21 32 5 32 5z" />
+        </svg>
+        <span><small>Open Brew</small>by Weight</span>
+      </div>
+      <p class="muted" id="brand">Open Brew by Weight Companion</p>
+      <nav class="menu">
+        <a id="m-webui" href="/" target="_blank" rel="noopener">Web UI</a>
+        <a id="m-access" href="/">Secure access</a>
+        <a id="m-companion" href="/__companion/" aria-current="page">Companion</a>
+      </nav>
+      <h1 id="title">Companion</h1>
+
+      <section class="card">
+        <h2 id="pairing-title">Pairing</h2>
+        <p id="pairing" class="status"></p>
+        <p id="code" class="code" hidden></p>
+        <p id="pairing-help" class="muted"></p>
+        <button id="pair" type="button" hidden></button>
+        <button id="erase" type="button" hidden></button>
+      </section>
+
+      <section class="card">
+        <h2 id="status-title">Status</h2>
+        <dl>
+          <dt id="controller-label"></dt>
+          <dd id="controller"></dd>
+          <dt id="ui-label"></dt>
+          <dd id="ui"></dd>
+          <dt id="link-label"></dt>
+          <dd id="link"></dd>
+          <dt id="lm-label"></dt>
+          <dd id="lm"></dd>
+        </dl>
+        <p id="mismatch" class="status warn" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2 id="log-title">Diagnostic log</h2>
+        <p id="log-stats" class="muted"></p>
+        <p>
+          <select id="log-level" aria-describedby="log-level-hint">
+            <option value="c"></option>
+            <option value="e"></option>
+            <option value="w"></option>
+            <option value="i" selected></option>
+            <option value="d"></option>
+          </select>
+          <small id="log-level-hint" class="muted"></small>
+          <a id="log-export" href="#" hidden></a>
+        </p>
+        <p id="log-note" class="status warn" hidden></p>
+        <pre id="log-view"></pre>
+        <button id="log-more" type="button" hidden></button>
+      </section>
+
+      <section class="card">
+        <h2 id="archive-title">Shot archive</h2>
+        <p id="archive-stats" class="muted"></p>
+        <p id="archive-holes" class="status warn" hidden></p>
+        <p id="archive-note" class="status warn" hidden></p>
+        <ul id="archive-restarts" class="muted"></ul>
+        <p><a id="archive-export" href="#" hidden></a></p>
+        <p id="deleting" class="muted"></p>
+      </section>
+    </main>
+    <footer>
+      <div id="version"></div>
+      <div>
+        <a
+          href="https://github.com/Cheerpipe/open-brew-by-weight-companion"
+          target="_blank"
+          rel="noopener"
+          >GitHub</a
+        >
+        <span id="made-by">· Made by</span>
+        <a href="https://github.com/Cheerpipe" target="_blank" rel="noopener">Cheerpipe</a>
+      </div>
+    </footer>
+    <script>
+      (function () {
+        var T = {
+          en: {
+            title: "Companion",
+            pairingTitle: "Pairing",
+            statusTitle: "Status",
+            controller: "Controller",
+            link: "Link",
+            lm: "La Marzocco",
+            pair: "Pair with the controller",
+            pairAgain: "Pair again",
+            searching: "Looking for the controller on your network…",
+            unpaired:
+              "Not paired yet. Pairing lets several phones, tablets and computers use the Web UI through this companion at the same time, and lets the controller hand its La Marzocco cloud connection to it, so the espresso machine's controller has less to do.",
+            requesting: "Asking the controller…",
+            pending:
+              "Waiting for your approval. In the Web UI, open Admin → Companion and type this code:",
+            pendingNoCode: "Waiting for the controller to prepare the request…",
+            expires: "The request expires in {m} min.",
+            paired: "Paired with {name}.",
+            denied: "The controller declined the request.",
+            expired: "The request expired before it was approved.",
+            ignored:
+              "The controller ignores this companion. Choose Stop ignoring in Admin → Companion, then pair again.",
+            already_paired:
+              "The controller is already paired with a companion. Forget it in Admin → Companion first.",
+            busy: "Another companion is asking to pair right now. Try again in a few minutes.",
+            rate_limited:
+              "The controller received another request a moment ago. Try again in a few seconds.",
+            unreachable: "The controller did not answer. Is it on?",
+            not_recognized:
+              "The controller no longer recognizes this companion, for example after a factory reset, so the companion stopped using your La Marzocco account. It still keeps the account until you pair again or erase this pairing.",
+            erase: "Erase this pairing",
+            eraseHttps: "Open this page over HTTPS to erase the pairing.",
+            eraseConfirm:
+              "Erase this pairing, the La Marzocco account and the companion's La Marzocco installation from this companion? Its copy of your shot history and the controller's log stay here, and come back if you pair this controller again.",
+            version:
+              "The controller and this companion use different versions of their connection. Update both to their latest release.",
+            unknown:
+              "The controller sent messages this companion does not understand. Update the companion.",
+            error: "Pairing did not work. The companion's log says why.",
+            down: "Not connected",
+            connecting: "Connecting…",
+            open: "Connected",
+            retry: "Reconnecting ({reason})",
+            lmOff: "Off. Turn it on in Admin → Companion.",
+            lmWaiting: "Waiting for the account from the controller",
+            lmConnecting: "Connecting to La Marzocco…",
+            lmConnected: "Connected",
+            lmRefused:
+              "Connected, but the cloud refuses its reads; correct the account in the Web UI",
+            routeCompanion: "the controller uses this connection",
+            routeDirect: "the controller uses its own",
+            versionLine: "Companion {v} · {name}",
+            madeBy: "· Made by",
+            none: "Not found yet",
+            ui: "Web UI",
+            uiReady: "Through the companion · {screens}",
+            uiPassthrough: "Straight to the controller, one screen at a time",
+            uiDisabled: "Directly on the controller (off in Admin → Companion)",
+            screens0: "no screen open",
+            screens1: "1 screen open",
+            screensN: "{n} screens open",
+            logTitle: "Diagnostic log",
+            logEmpty: "Nothing stored yet",
+            logStats: "{n} events · {mb} of {budget} MB · kept {days} days",
+            logMore: "Show older",
+            logExport: "Export everything",
+            logLevelC: "Critical",
+            logLevelE: "Error",
+            logLevelW: "Warning",
+            logLevelI: "Info",
+            logLevelD: "Debug",
+            logLevelHint: "This severity and above",
+            logGap: "· {n} events could not be copied ·",
+            logBoot: "· restart (boot {b}) ·",
+            logReset:
+              "· the controller could not continue from here; earlier events may be missing ·",
+            logOff:
+              "The controller is not sending its log here: Diagnostic log through the companion is off in Admin → Companion.",
+            logAuth:
+              "Sign in to the Web UI through this companion to read the log. Once signed in, it stays readable here even while the controller is off.",
+            logHttps: "Open this page over HTTPS to read the log.",
+            logStore: "The log history cannot be read right now. The companion's log says why.",
+            archiveTitle: "Shot archive",
+            archiveEmpty: "Nothing stored yet",
+            archiveStats:
+              "{shots} shots and {history} activations · {older} of them no longer on the controller · {mb} MB",
+            archiveDates: "From {first} to {last}",
+            archiveSynced: "Last copied {when}",
+            archiveSyncing: "Copying from the controller…",
+            archiveHoles:
+              "Up to {n} records made while the companion was away could not be copied.",
+            archiveOff:
+              "The controller is not sending its records here: Shot archive in the companion is off in Admin → Companion.",
+            archiveExport: "Export everything",
+            archiveRestart:
+              "The controller's {store} history restarted on {date}; {n} records kept here.",
+            shot: "shot",
+            activation: "activation",
+            archiveAuth: "Sign in to the Web UI through this companion to export the archive.",
+            archiveController:
+              "Turn the controller on so it can confirm your sign-in, then try again.",
+            archiveStore: "The archive cannot be read right now. The companion's log says why.",
+            archiveHttps: "Open this page over HTTPS to export the archive.",
+            archiveFailed: "The archive could not be exported. Try again.",
+            deleting:
+              "To delete shots, activations or the log history, unlock Admin in the Web UI: delete one record from Stats or History, clear a whole list in Admin, and delete the log history in Diagnostic through this companion. What you delete there goes from here too.",
+          },
+        };
+        var t = T.en;
+        function $(id) {
+          return document.getElementById(id);
+        }
+        function fill(text, values) {
+          return text.replace(/\{(\w+)\}/g, function (_, key) {
+            return values[key];
+          });
+        }
+        $("title").textContent = t.title;
+        $("pairing-title").textContent = t.pairingTitle;
+        $("status-title").textContent = t.statusTitle;
+        $("controller-label").textContent = t.controller;
+        $("link-label").textContent = t.link;
+        $("ui-label").textContent = t.ui;
+        $("lm-label").textContent = t.lm;
+        // The menu's addresses: the secure Web UI and the plain-HTTP pages beside it.
+        fetch("/__companion/gateway", { cache: "no-store" })
+          .then(function (r) {
+            return r.json();
+          })
+          .then(
+            function (g) {
+              document.getElementById("m-webui").href = g.secure_url + "/";
+              // Plain HTTP: the access page is this server's root; over HTTPS the root is the Web UI.
+              if (location.protocol === "https:")
+                document.getElementById("m-access").href = g.setup_url + "/";
+            },
+            function () {},
+          );
+        $("made-by").textContent = t.madeBy;
+
+        var timer;
+        function render(s) {
+          var p = s.pairing,
+            state = p.state,
+            pending = state === "pending" || state === "requesting";
+          $("brand").textContent = "Open Brew by Weight Companion · " + s.name;
+          $("version").textContent = fill(t.versionLine, { v: s.version, name: s.name });
+          $("controller").textContent = s.controller
+            ? s.controller.name + " (" + s.controller.address + ")"
+            : t.none;
+          var message =
+            !s.controller && !s.paired
+              ? t.searching
+              : state === "paired"
+                ? fill(t.paired, { name: s.pairedWith || (s.controller && s.controller.name) })
+                : state === "pending" && !p.code
+                  ? t.pendingNoCode
+                  : t[state] || t.error;
+          $("pairing").textContent = message;
+          $("pairing").className =
+            "status" +
+            (state === "paired" ? " ok" : pending || state === "unpaired" ? "" : " warn");
+          $("code").hidden = !(state === "pending" && p.code);
+          $("code").textContent = p.code || "";
+          $("pairing-help").textContent =
+            state === "pending"
+              ? fill(t.expires, { m: Math.max(1, Math.ceil(p.expiresInS / 60)) })
+              : "";
+          $("pair").hidden = !s.controller || pending || state === "paired";
+          $("pair").textContent = state === "unpaired" ? t.pair : t.pairAgain;
+          $("erase").hidden = !s.paired || pending || state === "paired" || s.link === "open";
+          $("mismatch").hidden = !(s.linkReason === "VERSION" || s.unknownFrames);
+          $("mismatch").textContent = s.linkReason === "VERSION" ? t.version : t.unknown;
+          $("link").textContent = fill(t[s.link] || s.link, { reason: s.linkReason || "" });
+          var screens =
+            s.screens === 1
+              ? t.screens1
+              : s.screens
+                ? fill(t.screensN, { n: s.screens })
+                : t.screens0;
+          $("ui").textContent =
+            s.relay === "ready"
+              ? fill(t.uiReady, { screens: screens })
+              : s.relay === "disabled"
+                ? t.uiDisabled
+                : t.uiPassthrough;
+          var lm = s.laMarzocco;
+          $("lm").textContent = !s.paired
+            ? "—"
+            : !lm.enabled
+              ? t.lmOff
+              : !lm.account
+                ? t.lmWaiting
+                : lm.refused
+                  ? t.lmRefused
+                  : (lm.up ? t.lmConnected : t.lmConnecting) +
+                    " · " +
+                    (s.route === "companion" ? t.routeCompanion : t.routeDirect);
+          renderLogStats(s);
+          renderArchive(s);
+          clearTimeout(timer);
+          timer = setTimeout(refresh, pending ? 1000 : 5000);
+        }
+        function refresh() {
+          fetch("/__companion/status", { cache: "no-store" })
+            .then(function (r) {
+              return r.json();
+            })
+            .then(render, function () {
+              clearTimeout(timer);
+              timer = setTimeout(refresh, 5000);
+            });
+        }
+        $("pair").addEventListener("click", function () {
+          $("pair").hidden = true;
+          fetch("/__companion/pair", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          }).then(refresh, refresh);
+        });
+        $("erase").textContent = t.erase;
+        $("erase").addEventListener("click", function () {
+          if (location.protocol !== "https:") {
+            alert(t.eraseHttps);
+            return;
+          }
+          if (!confirm(t.eraseConfirm)) return;
+          $("erase").hidden = true;
+          fetch("/__companion/erase", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          }).then(refresh, refresh);
+        });
+
+        // The stored diagnostic log: read from this companion's own store, so it
+        // shows and exports with the controller down, for a browser the controller
+        // lets open the Web UI (its session goes along). Newest first, older pages
+        // on demand; the newest page follows new events while nothing older is open.
+        var LEVELS = { c: 0, e: 1, w: 2, i: 3, d: 4 },
+          logEntries = [],
+          logNext = null,
+          logOlder = false,
+          logBusy = false,
+          logRows = null;
+        $("log-title").textContent = t.logTitle;
+        $("log-more").textContent = t.logMore;
+        $("log-export").textContent = t.logExport;
+        ["c", "e", "w", "i", "d"].forEach(function (level, i) {
+          $("log-level").options[i].text = t["logLevel" + level.toUpperCase()];
+        });
+        $("log-level-hint").textContent = " · " + t.logLevelHint;
+        $("log-level").addEventListener("change", renderLog);
+        function session() {
+          try {
+            return (
+              localStorage.getItem("obbwSession") || sessionStorage.getItem("obbwSession") || ""
+            );
+          } catch {
+            return "";
+          }
+        }
+        function logFetch(url, init) {
+          init = init || {};
+          init.cache = "no-store";
+          init.headers = Object.assign({ "X-WebUI-Session": session() }, init.headers);
+          return fetch(url, init).then(function (r) {
+            if (r.ok) return r;
+            return r.json().then(
+              function (body) {
+                throw body;
+              },
+              function () {
+                throw {};
+              },
+            );
+          });
+        }
+        function logRefused(body) {
+          var note =
+            body && body.error === "AUTH_REQUIRED"
+              ? t.logAuth
+              : body && body.error === "HTTPS_REQUIRED"
+                ? t.logHttps
+                : body && body.error === "CONTROLLER_UNREACHABLE"
+                  ? t.archiveController
+                  : body && body.error === "STORE"
+                    ? t.logStore
+                    : "";
+          $("log-note").textContent = note;
+          $("log-note").hidden = !note;
+          logBusy = false;
+        }
+        function logLine(entry) {
+          if (entry.g === "boot") return fill(t.logBoot, { b: entry.boot });
+          if (entry.g === "gap") return fill(t.logGap, { n: entry.count });
+          if (entry.g === "reset") return t.logReset;
+          var when = entry.w
+            ? new Date(entry.w * 1000).toLocaleString()
+            : "+" + (entry.ms / 1000).toFixed(3) + "s";
+          return when + " " + entry.l.toUpperCase() + " [" + entry.c + "] " + entry.m;
+        }
+        function renderLog() {
+          var ceiling = LEVELS[$("log-level").value],
+            lines = [];
+          for (var i = 0; i < logEntries.length; i++) {
+            var entry = logEntries[i];
+            if (!entry.g && LEVELS[entry.l] > ceiling) continue;
+            lines.push(logLine(entry));
+          }
+          $("log-view").textContent = lines.length ? lines.join("\n") : t.logEmpty;
+        }
+        function logPage(fresh) {
+          if (logBusy) return;
+          logBusy = true;
+          var next = fresh ? null : logNext;
+          var url =
+            "/__companion/log?limit=100" +
+            (next ? "&boot=" + next.boot + "&before=" + next.before : "");
+          logFetch(url)
+            .then(function (r) {
+              return r.json();
+            })
+            .then(function (page) {
+              logEntries = (fresh ? [] : logEntries).concat(page.entries);
+              logOlder = !fresh;
+              logNext = page.next;
+              logBusy = false;
+              $("log-note").hidden = true;
+              $("log-more").hidden = !page.next;
+              $("log-export").hidden = !logEntries.length;
+              renderLog();
+            }, logRefused);
+        }
+        $("log-more").addEventListener("click", function () {
+          logPage(false);
+        });
+        // An export: the server names the file.
+        function download(url, fallback, refused) {
+          logFetch(url)
+            .then(function (r) {
+              var name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "");
+              return r.blob().then(function (blob) {
+                var link = document.createElement("a");
+                link.href = URL.createObjectURL(blob);
+                link.download = name ? name[1] : fallback;
+                link.click();
+                setTimeout(function () {
+                  URL.revokeObjectURL(link.href);
+                }, 1000);
+              });
+            })
+            .catch(refused);
+        }
+        $("log-export").addEventListener("click", function (event) {
+          event.preventDefault();
+          download("/__companion/log/export", "obbw-log.json", logRefused);
+        });
+        // The shot archive: what the companion keeps and its export. Deleting is the
+        // Web UI's, with Admin unlocked: this companion only follows.
+        $("archive-title").textContent = t.archiveTitle;
+        $("archive-export").textContent = t.archiveExport;
+        $("deleting").textContent = t.deleting;
+        function archiveRefused(body) {
+          var note =
+            body && body.error === "AUTH_REQUIRED"
+              ? t.archiveAuth
+              : body && body.error === "HTTPS_REQUIRED"
+                ? t.archiveHttps
+                : body && body.error === "CONTROLLER_UNREACHABLE"
+                  ? t.archiveController
+                  : body && body.error === "STORE"
+                    ? t.archiveStore
+                    : body
+                      ? t.archiveFailed
+                      : "";
+          $("archive-note").textContent = note;
+          $("archive-note").hidden = !note;
+        }
+        function day(seconds) {
+          return new Date(seconds * 1000).toLocaleDateString();
+        }
+        function renderArchive(s) {
+          var a = s.archive || {},
+            total = (a.shotsTotal || 0) + (a.historyTotal || 0),
+            first = Math.min(a.shotsFirst || Infinity, a.historyFirst || Infinity),
+            last = Math.max(a.shotsLast || 0, a.historyLast || 0);
+          var lines = !s.paired
+            ? []
+            : a.error && !total
+              ? [t.archiveStore]
+              : !total
+                ? [t.archiveEmpty]
+                : [
+                    fill(t.archiveStats, {
+                      shots: a.shotsTotal,
+                      history: a.historyTotal,
+                      older: a.shots + a.history,
+                      mb: (a.bytes / 1048576).toFixed(1),
+                    }),
+                  ];
+          if (total && last)
+            lines.push(fill(t.archiveDates, { first: day(first), last: day(last) }));
+          if (a.syncing) lines.push(t.archiveSyncing);
+          else if (a.syncedAt)
+            lines.push(
+              fill(t.archiveSynced, { when: new Date(a.syncedAt * 1000).toLocaleString() }),
+            );
+          if (s.paired && s.link === "open") lines.push(a.available && !a.on ? t.archiveOff : "");
+          $("archive-stats").textContent = lines.filter(Boolean).join(" · ");
+          $("archive-holes").hidden = !a.holes;
+          $("archive-holes").textContent = fill(t.archiveHoles, { n: a.holes });
+          $("archive-export").hidden = !total;
+          renderRestarts(a);
+        }
+        $("archive-export").addEventListener("click", function (event) {
+          event.preventDefault();
+          download("/__companion/archive/export", "obbw-archive.json", archiveRefused);
+        });
+        // Each restarted history (a factory reset): when, and how many records it left here.
+        function renderRestarts(a) {
+          var restarts = [];
+          ["shots", "history"].forEach(function (store) {
+            var list = (a.generations || {})[store] || [],
+              name = store === "shots" ? t.shot : t.activation;
+            list.forEach(function (g) {
+              var older = list.filter(function (o) {
+                return o.generation === g.generation - 1;
+              })[0];
+              if (g.restartedAt && older)
+                restarts.push(
+                  fill(t.archiveRestart, { store: name, date: day(g.restartedAt), n: older.count }),
+                );
+            });
+          });
+          $("archive-restarts").textContent = "";
+          restarts.forEach(function (line) {
+            $("archive-restarts").appendChild(document.createElement("li")).textContent = line;
+          });
+        }
+        function renderLogStats(s) {
+          var log = s.log || {};
+          if (!s.paired) {
+            $("log-stats").textContent = "";
+            return;
+          }
+          $("log-stats").textContent = log.error
+            ? t.logStore
+            : (log.rows
+                ? fill(t.logStats, {
+                    n: log.rows,
+                    mb: (log.bytes / 1048576).toFixed(1),
+                    budget: log.mb,
+                    days: log.days,
+                  })
+                : t.logEmpty) + (s.link === "open" && !log.enabled ? " · " + t.logOff : "");
+          // The newest page follows new events while the reader has not paged back.
+          if (!log.error && log.rows !== logRows && !logOlder) {
+            logRows = log.rows;
+            logPage(true);
+          }
+        }
+        refresh();
+      })();
+    </script>
+  </body>
 </html>

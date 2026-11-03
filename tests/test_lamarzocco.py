@@ -336,7 +336,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
                     and events.log[-1][1] == D["pushes"]["temperature"]
                 )
             )
-            assert events.log[-1][2] == 9
+            assert events.log[-1] == ("pushed", D["pushes"]["temperature"], 9)
             assert (await lm.read())[2] == 9
             cloud.command_status = 409
             assert await lm.command(10, "temp", 1001) == 409
@@ -370,7 +370,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             monkeypatch.setattr(lamarzocco, "RENEW_AFTER_S", 50 * 60)
             lm.stop()
             await asyncio.sleep(0.1)
-            assert not lm.sub
+            await events.wait(lambda: not lm.sub)
             refreshes, renewals = cloud.calls.count("refresh"), events.log.count(("renewed",))
             # Long past due: a read uses the token it has and refreshes nothing.
             lm.issued_at -= 3 * 3600
@@ -396,7 +396,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             )
             cloud.refuse_dashboard = 0
             assert (await lm.read())[1] is not None
-            assert not lm.refused
+            await events.wait(lambda: not lm.refused)
             assert any("accepts reads and commands again" in line for line in lines.lines)
             cloud.refuse_dashboard = 500
             assert (await lm.read())[:2] == (500, None)
@@ -429,7 +429,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             lm.configure(ACCOUNT, "api", False)
             await asyncio.sleep(0.7)
             assert len(cloud.calls) == calls, "no sign-in, renewal or polling"
-            assert not lm.sub, "no sign-in, renewal or polling"
+            await events.wait(lambda: not lm.sub)
             assert not lm.tasks, "no sign-in, renewal or polling"
             assert (await lm.read())[1] is None
             assert await lm.command(12, "on") == 0

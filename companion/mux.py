@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal, NoReturn, NotRequired, TypedDict, TypeIs, overload
 
 from . import log, pages
-from .archive import Unavailable
+from .archive import UnavailableError
 from .upstream import Upstream, dumps
 
 if TYPE_CHECKING:
@@ -620,7 +620,7 @@ class View:
                             params["window"], self.mux.active_preset(), page["epoch"], ((), (), ())
                         )
                     )[0]
-            except (sqlite3.Error, Unavailable, ValueError) as error:
+            except (sqlite3.Error, UnavailableError, ValueError) as error:
                 log(
                     f"the archive could not build a {self.kind} page ({error}); "
                     "the controller sends it"

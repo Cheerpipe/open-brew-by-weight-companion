@@ -299,9 +299,9 @@ def density(shots: Sequence[Record]) -> Density:
     }
 
 
-def header(rows: Iterable[Row], window: int, active: int) -> Header:
+def header(rows: Iterable[Row], window: int, active: object) -> Header:
     """formatStatsHeader over `rows` (Stats rows, newest first) for `window` and the active
-    preset."""
+    preset, as the controller sent it (only ever compared with a record's preset)."""
     records = [Record(row) for row in rows]
     built = aggregate(records, window)
     timed, own, found = [], 0, 0

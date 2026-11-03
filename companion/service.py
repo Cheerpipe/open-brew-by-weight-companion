@@ -25,10 +25,10 @@ import aiohttp
 from aiohttp import web
 from cryptography.exceptions import InvalidTag
 
-from . import VERSION, crypto, dashboard, log, stats
-from .archive import FETCH_MAX, Archive, Unavailable
+from . import VERSION, crypto, dashboard, log, logger, stats
+from .archive import FETCH_MAX, Archive, UnavailableError
 from .lamarzocco import LaMarzocco
-from .link import Erased, LinkClosed, open_link
+from .link import ErasedError, LinkClosedError, open_link
 from .logstore import EXPORT_VERSION, FIRST_PAGE, FORMAT, LogStore
 from .pairing import Pairing
 from .relay import CLIENT_ID, Relay, address
@@ -325,7 +325,7 @@ class Companion:
             try:
                 reason = await self._link()
             except Exception:  # A bug or a disk error ends this attempt, never the gateway.
-                log("the link failed unexpectedly:\n" + traceback.format_exc())
+                logger.info("the link failed unexpectedly:", exc_info=True)
                 reason = "ERROR"
             if reason is None:
                 continue
@@ -370,11 +370,11 @@ class Companion:
             ws, codec = await open_link(
                 self.http, self.base_url("ws") + "/api/v1/companion/link", hello, pairing["secret"]
             )
-        except Erased:
+        except ErasedError:
             self.failures = 0
             await self.erase("the controller forgot this companion")
             return None
-        except LinkClosed as error:
+        except LinkClosedError as error:
             if error.code == "NOT_PAIRED":  # Unsigned, so it could be forged.
                 self.not_recognized()
             elif error.detail:
@@ -405,7 +405,7 @@ class Companion:
                 await self._on_frame(codec.decode(message.data))
             # A close frame carries the peer's code; an ended loop without one is a dead transport.
             return f"CLOSED_{ws.close_code}" if ws.close_code else "SOCKET_RESET"
-        except LinkClosed as error:
+        except LinkClosedError as error:
             log(f"closing the link: {error}")
             return error.code
         except (aiohttp.ClientError, ConnectionError) as error:
@@ -487,15 +487,19 @@ class Companion:
                 await ws.close()
                 return
 
+    async def _hold_lifted(self) -> None:
+        """Return once no sync hold is on: at once, or when the controller lifts it."""
+        while self.sync_hold:
+            self.ping_now.clear()
+            await self.ping_now.wait()
+
     async def _pinger(self) -> None:
         """A ping when the session opens, whenever `up` changes or the route turns to the
         companion, and then every PING_S of the route; none during a sync hold, and one the moment
         it ends (only a missing answer to that one finds a link lost during the shot)."""
         loop = asyncio.get_running_loop()
         while True:
-            while self.sync_hold:
-                self.ping_now.clear()
-                await self.ping_now.wait()
+            await self._hold_lifted()
             up, route = self.lm.up, self.route
             self.post({"t": "ping", "up": up})
             deadline = loop.time() + PING_S[route]
@@ -574,7 +578,7 @@ class Companion:
         else:  # cmd
             command_id, op, value = frame.get("id"), frame.get("op"), frame.get("v")
             if type(command_id) is not int or command_id < 1:
-                raise LinkClosed("PROTOCOL", "command without an id")
+                raise LinkClosedError("PROTOCOL", "command without an id")
             if op == "temp" and type(value) is int and 0 < value < 2000:
                 _ = self.spawn(self._command(command_id, "temp", value))
             elif isinstance(op, str) and op in ("standby", "on", "refresh"):
@@ -813,7 +817,7 @@ class Companion:
     async def _on_credentials(self, frame: Frame) -> None:
         generation = frame.get("gen")
         if type(generation) is not int or generation < 0:
-            raise LinkClosed("PROTOCOL", "credentials without a generation")
+            raise LinkClosedError("PROTOCOL", "credentials without a generation")
         if frame.get("erase") is True:
             await offload(self.store.erase_account)
             self.creds_gen = None
@@ -841,7 +845,7 @@ class Companion:
             ) or SERIAL_FORBIDDEN.intersection(account["serial"]):
                 raise ValueError
         except ValueError, KeyError, TypeError, InvalidTag:
-            raise LinkClosed("PROTOCOL", "credentials did not decrypt") from None
+            raise LinkClosedError("PROTOCOL", "credentials did not decrypt") from None
         await offload(self.store.save_credentials, generation, account)
         self.creds_gen = generation
         log(f"received the La Marzocco account (generation {generation})")
@@ -1076,16 +1080,21 @@ def render_page(name: str = "page.html") -> str:
     """A companion page, styled like the setup page it sits beside."""
     setup = (HERE.parent / "gateway" / "setup.html").read_text()
     style = setup[setup.index("<style>") + 7 : setup.index("</style>")]
-    return (HERE / name).read_text().replace("@STYLE@", style)
+    return (HERE / name).read_text().replace("/* @STYLE@ */", style)
+
+
+def notice_page(name: str) -> str:
+    """The Web UI notice for the companion called name; @ADDRESS@ is filled per request."""
+    return (
+        render_page("ui-off.html")
+        .replace("@VERSION@", html.escape(VERSION))
+        .replace("@NAME@", html.escape(name))
+    )
 
 
 def web_app(companion: Companion) -> web.Application:
     page = render_page()
-    notice = (
-        render_page("ui-off.html")
-        .replace("@VERSION@", html.escape(VERSION))
-        .replace("@NAME@", html.escape(companion.name))
-    )
+    notice = notice_page(companion.name)
     no_store = {"Cache-Control": "no-store"}
 
     async def show(_request: web.Request) -> web.Response:
@@ -1450,7 +1459,7 @@ def web_app(companion: Companion) -> web.Application:
         )
         try:
             header, good, synced = await companion.archive.header(window, active, epoch, chosen)
-        except (Unavailable, sqlite3.Error) as error:
+        except (UnavailableError, sqlite3.Error) as error:
             companion.archive.note_unavailable(error)
             return web.json_response({"error": "STATS_UNAVAILABLE"}, status=503)
         return web.json_response({"stats": header, "good": good, "epoch": synced}, headers=no_store)
@@ -1662,7 +1671,7 @@ def start(cfg: Config, data: Path, run: Path, on_exit: Callable[[], object]) -> 
         try:
             asyncio.run(_serve(cfg, data, run / "companion.sock", handle, ready))
         except Exception:
-            log("stopped after an error:\n" + traceback.format_exc())
+            logger.info("stopped after an error:", exc_info=True)
         finally:
             ready.set()
             on_exit()

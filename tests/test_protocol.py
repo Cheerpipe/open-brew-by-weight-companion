@@ -13,7 +13,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from companion import crypto, dashboard
-from companion.link import FrameCodec, LinkClosed
+from companion.link import FrameCodec, LinkClosedError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,7 +24,7 @@ D = json.loads((ROOT / "tests/fixtures/lamarzocco-dashboard.json").read_text())
 
 
 def raises(call: Callable[[], object], code: str = "PROTOCOL") -> None:
-    with pytest.raises(LinkClosed) as closed:
+    with pytest.raises(LinkClosedError) as closed:
         call()
     assert closed.value.code == code, closed.value
 

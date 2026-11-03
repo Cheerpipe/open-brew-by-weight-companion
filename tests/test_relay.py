@@ -183,7 +183,7 @@ async def relay_scenario(data: Path) -> None:
         assert await relay.handshake() == "ready"
         assert fake.handshakes == 1
         assert (await companion.status())["relay"] == "ready", "no feature needs the link"
-        assert relay.link is False, "no feature needs the link"
+        assert (relay.mode, relay.link) == ("ready", False), "no feature needs the link"
         status, reply_headers, body = await call(
             "POST",
             "/api/v1/ui/claim",
@@ -339,7 +339,7 @@ async def relay_scenario(data: Path) -> None:
         # --- A failed relay handshake: passthrough, the link always on ----------------------------
         fake.mode = "none"
         assert await relay.handshake() == "passthrough"
-        assert relay.link is True
+        assert (relay.mode, relay.link) == ("passthrough", True)
         fake.active = B
         status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
         assert status == 200
@@ -375,8 +375,7 @@ async def relay_scenario(data: Path) -> None:
         await relay.handshake()
         assert companion.store.pairing() is None
         assert companion.pairing.state == "unpaired"
-        assert relay.mode == "passthrough"
-        assert relay.link is None
+        assert (relay.mode, relay.link) == ("passthrough", None)
 
         async with browser.get(base + "/__companion/status") as reply:
             facts = await reply.json()

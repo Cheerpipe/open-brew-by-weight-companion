@@ -9,6 +9,7 @@ controller's key never leaves the controller.
 """
 
 import asyncio
+import contextlib
 import json
 import time
 import traceback
@@ -191,6 +192,7 @@ class LaMarzocco:
         self.access: str | None = None
         self.refresh: str | None = None
         self.issued_at = 0.0
+        self.issued = asyncio.Event()  # Set by each sign-in: the renewal deadline moved.
         self.rejected = False
         self.sub, self.ep, self.alive_at = False, 0, 0.0
         self.last_message_at = 0.0
@@ -360,6 +362,7 @@ class LaMarzocco:
             raise TransportError("sign-in answer without tokens")
         self.access, self.refresh = access, refresh
         self.issued_at = time.monotonic()
+        self.issued.set()
 
     async def _sign_in(self) -> None:
         saved = await offload(self.store.credentials)
@@ -411,7 +414,10 @@ class LaMarzocco:
     async def _renew_loop(self) -> None:
         while True:
             while (due := self.issued_at + RENEW_AFTER_S - time.monotonic()) > 0:
-                await asyncio.sleep(due)  # A sign-in meanwhile (after a 401) moves the deadline.
+                # A sign-in meanwhile (after a 401) moves the deadline: wait for it again.
+                self.issued.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.issued.wait(), due)
             try:
                 await self._session(renew=True)
             except AuthRejectedError:

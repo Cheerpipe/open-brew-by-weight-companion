@@ -21,7 +21,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from companion import VERSION, crypto, service
+from companion import VERSION, crypto, dashboard, service
 from companion.link import FrameCodec
 from companion.service import Companion, web_app
 from companion.store import Store
@@ -443,7 +443,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             assert (await companion.status())["pairedWith"] == "Bar"
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True})
             assert await session.next("lm") == {"q": 2, "t": "lm", "sub": False, "ep": 0, "tok": 0}
-            assert upstream.configured[-1] == (None, "ws", True), "no account yet"
+            assert upstream.configured == [(None, "ws", True)], "no account yet"
             await session.send(encrypt(3, ACCOUNT))
             assert await session.next("creds") == {"q": 3, "t": "creds", "gen": 3, "ok": True}
             assert await session.next("lm") == {
@@ -492,7 +492,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             assert full["k"] == "full"
             assert full["ep"] == 1
             assert full["ac"] == 0
-            assert full["d"] == service.dashboard.reduce(D["read"], push=False)
+            assert full["d"] == dashboard.reduce(D["read"], push=False)
             await session.next("ping", skip=())  # Every PING_S["companion"] from now on.
 
             # --- A sync hold (a shot): no ping at all until it ends, then one at once ---
@@ -967,7 +967,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             await session.ws.close()
             await eventually(lambda: companion.pairing.state == "not_recognized")
             assert upstream.account is None
-            assert upstream.configured[-1][0] is None
+            await eventually(lambda: upstream.configured[-1][0] is None)
             assert companion.store.pairing()
             assert companion.store.credentials()
             assert sorted(path.name for path in secrets.iterdir()) == [
@@ -1031,8 +1031,9 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
                 assert reply.status == 200
                 assert (await reply.json())["paired"] is False
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
-            assert companion.pairing.state == "unpaired"
-            assert companion.device_name is None
+            await eventually(
+                lambda: companion.pairing.state == "unpaired" and companion.device_name is None
+            )
             await pages.close()
             await companion.logs.close()
             await companion.relay.close()

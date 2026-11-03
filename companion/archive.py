@@ -285,7 +285,7 @@ class ChangedError(Exception):
     """The user changed the archive during a pass: it starts again from the index."""
 
 
-class Unavailable(Exception):
+class UnavailableError(Exception):
     """The Stats header cannot be built now; the browser keeps the controller's."""
 
 
@@ -1537,7 +1537,7 @@ class Archive:
         controller holds sync (or a request waits for it), the newest complete header answers at
         once, with its own epoch."""
         if not self.on or not self.usable():
-            raise Unavailable("the archive is off or its store is closed")
+            raise UnavailableError("the archive is off or its store is closed")
         device, view = self.companion.device_id, (window, active, filters)
         synced = (await self.store.sync_state(device, "shots"))[1]
         if synced != epoch:
@@ -1552,7 +1552,7 @@ class Archive:
                 synced = (await self.store.sync_state(device, "shots"))[1]
             if synced != epoch:
                 if not self.companion.sync_blocked():
-                    raise Unavailable(
+                    raise UnavailableError(
                         f"the copy is at shot epoch {synced}, the controller at {epoch}"
                     )
                 if view in self.complete:

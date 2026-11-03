@@ -25,7 +25,7 @@ type Json = bool | int | float | str | list[Json] | dict[str, Json] | None
 class Page(TypedDict):
     """A page from the archive's copy (Archive.page): each row is (id, text, archive only)."""
 
-    boot: int
+    boot: object  # Home's boot as the controller sent it, passed through unchecked.
     epoch: int
     good: int
     total: int

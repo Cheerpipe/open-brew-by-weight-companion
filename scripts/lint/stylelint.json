@@ -1,7 +1,5 @@
 {
-  "extends": [
-    "stylelint-config-standard"
-  ],
+  "extends": ["stylelint-config-standard"],
   "customSyntax": "postcss-html",
   "reportNeedlessDisables": true,
   "reportInvalidScopeDisables": true,

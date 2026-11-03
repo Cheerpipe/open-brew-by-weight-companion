@@ -1,14 +1,8 @@
 {
-  "extends": [
-    "html-validate:recommended",
-    "html-validate:a11y"
-  ],
+  "extends": ["html-validate:recommended", "html-validate:a11y"],
   "rules": {
     "no-inline-style": "error",
-    "text-content": [
-      "error",
-      {}
-    ],
+    "text-content": ["error", {}],
     "void-style": [
       "error",
       {

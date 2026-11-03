@@ -25,7 +25,7 @@ STEP_TIMEOUT_S = 10
 ACK_TIMEOUT_S = 30
 
 
-class LinkClosed(Exception):
+class LinkClosedError(Exception):
     """The link failed or the controller refused it; `code` is the reason on the status page."""
 
     def __init__(self, code: str, detail: str = "") -> None:
@@ -33,7 +33,7 @@ class LinkClosed(Exception):
         self.code, self.detail = code, detail
 
 
-class Erased(Exception):
+class ErasedError(Exception):
     """The controller forgot this companion and proved it with the pairing secret."""
 
 
@@ -64,17 +64,17 @@ class FrameCodec:
             or not dot
             or not hmac.compare_digest(tag, self._tag(self.receive_dir, body))
         ):
-            raise LinkClosed("PROTOCOL", "frame failed its MAC check")
+            raise LinkClosedError("PROTOCOL", "frame failed its MAC check")
         try:
             frame = json.loads(body)
         except ValueError:
-            raise LinkClosed("PROTOCOL", "malformed frame") from None
+            raise LinkClosedError("PROTOCOL", "malformed frame") from None
         if (
             not isinstance(frame, dict)
             or type(frame.get("q")) is not int
             or frame["q"] != self.received + 1
         ):
-            raise LinkClosed("PROTOCOL", "frame out of sequence")
+            raise LinkClosedError("PROTOCOL", "frame out of sequence")
         self.received += 1
         return frame
 
@@ -82,20 +82,21 @@ class FrameCodec:
 async def _receive(ws: aiohttp.ClientWebSocketResponse) -> dict[str, object]:
     message = await ws.receive(timeout=STEP_TIMEOUT_S)
     if message.type is not aiohttp.WSMsgType.TEXT:
-        raise LinkClosed("CLOSED", "the controller closed the link while opening it")
+        raise LinkClosedError("CLOSED", "the controller closed the link while opening it")
     try:
         reply = json.loads(message.data)
     except ValueError:
         reply = None
     if not isinstance(reply, dict):
-        raise LinkClosed("PROTOCOL", "malformed opening frame")
+        raise LinkClosedError("PROTOCOL", "malformed opening frame")
     return reply
 
 
 async def open_link(
     http: aiohttp.ClientSession, url: str, hello: Mapping[str, object], secret: bytes
 ) -> tuple[aiohttp.ClientWebSocketResponse, FrameCodec]:
-    """Open and authenticate the link: (websocket, codec), or it raises LinkClosed or Erased."""
+    """Open and authenticate the link: (websocket, codec), or it raises LinkClosedError or
+    ErasedError."""
     try:
         ws = await http.ws_connect(
             url,
@@ -104,9 +105,11 @@ async def open_link(
             timeout=aiohttp.ClientWSTimeout(ws_close=STEP_TIMEOUT_S),
         )
     except aiohttp.WSServerHandshakeError as error:
-        raise LinkClosed("NOT_PAIRED" if error.status == 404 else f"HTTP_{error.status}") from None
+        raise LinkClosedError(
+            "NOT_PAIRED" if error.status == 404 else f"HTTP_{error.status}"
+        ) from None
     except (aiohttp.ClientError, TimeoutError, OSError) as error:
-        raise LinkClosed("UNREACHABLE", clip(f"{type(error).__name__}: {error}")) from None
+        raise LinkClosedError("UNREACHABLE", clip(f"{type(error).__name__}: {error}")) from None
     try:
         ws.get_extra_info("socket").setsockopt(
             socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, ACK_TIMEOUT_S * 1000
@@ -120,13 +123,13 @@ async def open_link(
             if hmac.compare_digest(
                 crypto.unb64(reply.get("mac"), 32), crypto.mac(secret, b"E", nc)
             ):
-                raise Erased
-            raise LinkClosed("AUTH", "erase failed its MAC check")
+                raise ErasedError
+            raise LinkClosedError("AUTH", "erase failed its MAC check")
         if reply.get("t") == "error":
             code = str(reply.get("code") or "ERROR")
-            raise LinkClosed("VERSION" if code == "PROTOCOL" else code)
+            raise LinkClosedError("VERSION" if code == "PROTOCOL" else code)
         if reply.get("t") != "challenge":
-            raise LinkClosed("PROTOCOL", "expected a challenge")
+            raise LinkClosedError("PROTOCOL", "expected a challenge")
         ns = crypto.unb64(reply.get("nonce"), 16)
         await ws.send_str(
             json.dumps({"t": "proof", "mac": crypto.b64(crypto.mac(secret, b"C", nc, ns))})
@@ -135,14 +138,14 @@ async def open_link(
         if ready.get("t") != "ready" or not hmac.compare_digest(
             crypto.unb64(ready.get("mac"), 32), crypto.mac(secret, b"F", nc, ns)
         ):
-            raise LinkClosed("AUTH", "the controller did not prove the pairing secret")
+            raise LinkClosedError("AUTH", "the controller did not prove the pairing secret")
         return ws, FrameCodec(crypto.session_key(secret, nc, ns))
     except ValueError:
         await ws.close()
-        raise LinkClosed("PROTOCOL", "malformed opening field") from None
+        raise LinkClosedError("PROTOCOL", "malformed opening field") from None
     except TimeoutError, aiohttp.ClientError, ConnectionError:
         await ws.close()
-        raise LinkClosed("CLOSED", "the link failed while opening") from None
+        raise LinkClosedError("CLOSED", "the link failed while opening") from None
     except BaseException:
         await ws.close()
         raise
