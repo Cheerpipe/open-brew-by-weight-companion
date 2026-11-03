@@ -1,13 +1,15 @@
 """Supervisor of Open Brew by Weight Companion and its HTTPS gateway.
 
 Finds the controller over mDNS, publishes the companion's own `.local` name,
-keeps a name-constrained local CA and its server certificate current, and runs
-nginx as a reverse proxy plus a plain-HTTP setup page. Discovery relies on mDNS
+keeps a name-constrained local CA and its server certificate current, and keeps
+the configuration of nginx (a reverse proxy plus a plain-HTTP setup page, run
+beside it by gateway/entrypoint.sh) current. Discovery relies on mDNS
 announcements and the browser's own schedule; only when mDNS finds no controller
 does it search the companion's own network, once per host, for the controller's
 identity route (see fallback()).
 """
 
+import datetime as dt
 import hashlib
 import html
 import http.client
@@ -23,7 +25,6 @@ import signal
 import socket
 import ssl
 import struct
-import subprocess
 import sys
 import threading
 import time
@@ -33,6 +34,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast, override
 from urllib.parse import urlsplit
 
+import ifaddr
+import segno
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from cryptography.x509.verification import PolicyBuilder, Store, VerificationError
 from zeroconf import (
     IPVersion,
     RecordUpdate,
@@ -101,13 +109,6 @@ STORED_TIMEOUT_S = (
 )
 PRIVATE = tuple(ipaddress.IPv4Network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 ROUTES = Path("/proc/net/route")
-OPENSSL_CNF = "[req]\ndistinguished_name=dn\n[dn]\n"
-# The image's own tools, by absolute path so no command depends on the PATH; a missing one
-# fails with its path in the error.
-OPENSSL = "/usr/bin/openssl"
-NGINX = "/usr/sbin/nginx"
-QRENCODE = "/usr/bin/qrencode"
-IP = "/sbin/ip"
 
 type Address = tuple[str, int]
 type Target = tuple[str, Address]  # (name, (ip, port))
@@ -175,7 +176,7 @@ class CompanionStatus(TypedDict):
 
 
 type Event = (
-    tuple[Literal["tick", "nginx", "companion"]]
+    tuple[Literal["tick", "companion"]]
     | tuple[Literal["found"], Target]
     | tuple[Literal["skip"], str, bool, str]
     | tuple[Literal["scanned"], list[Found]]
@@ -452,96 +453,146 @@ def fallback(
             )
 
 
-def openssl(*args: str) -> str:
-    result = subprocess.run([OPENSSL, *args], capture_output=True, text=True, check=False)
-    if result.returncode:
-        raise RuntimeError(f"openssl {args[0]} failed: {result.stderr.strip()}")
-    return result.stdout
+def certificate(
+    subject: str,
+    key: ec.EllipticCurvePrivateKey,
+    days: int,
+    extensions: Sequence[tuple[x509.ExtensionType, bool]],
+    issuer: tuple[x509.Certificate, ec.EllipticCurvePrivateKey] | None = None,
+) -> x509.Certificate:
+    """An X.509 v3 certificate for key, valid from now: self-signed, or signed by issuer."""
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject)])
+    issuer_name, signer = (issuer[0].subject, issuer[1]) if issuer else (name, key)
+    now = dt.datetime.now(dt.UTC)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(issuer_name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + dt.timedelta(days=days))
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(signer.public_key()), critical=False
+        )
+    )
+    for extension, critical in extensions:
+        builder = builder.add_extension(extension, critical=critical)
+    return builder.sign(signer, hashes.SHA256())
+
+
+def save(
+    key: ec.EllipticCurvePrivateKey, key_path: Path, cert: x509.Certificate, path: Path
+) -> None:
+    """Write a key (PKCS #8, unencrypted, owner-only) and its certificate as PEM."""
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    key_path.chmod(0o600)
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+
+def covers(ca: x509.Certificate, host: str) -> bool:
+    """Whether the CA's name constraints permit host."""
+    try:
+        constraints = ca.extensions.get_extension_for_class(x509.NameConstraints).value
+    except x509.ExtensionNotFound:
+        return False
+    return x509.DNSName(host) in (constraints.permitted_subtrees or [])
+
+
+def leaf_current(ca: x509.Certificate, leaf: Path, host: str) -> bool:
+    """Whether the server certificate chains to the CA for host and is not due for renewal."""
+    try:
+        cert = x509.load_pem_x509_certificate(leaf.read_bytes())
+        PolicyBuilder().store(Store([ca])).build_server_verifier(x509.DNSName(host)).verify(
+            cert, []
+        )
+    except OSError, ValueError, VerificationError:
+        return False
+    renew_at = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=RENEW_BEFORE_S)
+    return cert.not_valid_after_utc > renew_at
 
 
 def ensure_certificates(cfg: Config, data: Path) -> bool:
     """Create or renew the CA and server certificate; return True when files changed."""
-    host, ca, ca_key = cfg["hostname"], data / f"{CA_NAME}.crt", data / f"{CA_NAME}.key"
-    leaf, leaf_key, cnf = data / "server.crt", data / "server.key", data / "openssl.cnf"
+    host, ca_path, ca_key_path = cfg["hostname"], data / f"{CA_NAME}.crt", data / f"{CA_NAME}.key"
+    leaf, leaf_key = data / "server.crt", data / "server.key"
     data.mkdir(parents=True, exist_ok=True)
-    cnf.write_text(OPENSSL_CNF)
-    base = [
-        "-config",
-        str(cnf),
-        "-x509",
-        "-new",
-        "-noenc",
-        "-newkey",
-        "ec",
-        "-pkeyopt",
-        "ec_paramgen_curve:P-256",
-    ]
     changed = False
-    if not ca.exists() or f"DNS:{host}" not in openssl(
-        "x509", "-in", str(ca), "-noout", "-ext", "nameConstraints"
-    ):
-        if ca.exists():
+    ca = x509.load_pem_x509_certificate(ca_path.read_bytes()) if ca_path.exists() else None
+    if ca is None or not covers(ca, host):
+        if ca is not None:
             log(
                 f"the CA does not cover {host}; creating a new one, "
                 "so every device must be set up again"
             )
-        openssl(
-            "req",
-            *base,
-            "-keyout",
-            str(ca_key),
-            "-out",
-            str(ca),
-            "-days",
-            "3650",
-            "-subj",
-            f"/CN=Open Brew by Weight local CA ({host})",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE,pathlen:0",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-            "-addext",
-            f"nameConstraints=critical,permitted;DNS:{host}",
+        ca_key = ec.generate_private_key(ec.SECP256R1())
+        ca = certificate(
+            f"Open Brew by Weight local CA ({host})",
+            ca_key,
+            3650,
+            [
+                (x509.BasicConstraints(ca=True, path_length=0), True),
+                (
+                    x509.KeyUsage(
+                        digital_signature=False,
+                        content_commitment=False,
+                        key_encipherment=False,
+                        data_encipherment=False,
+                        key_agreement=False,
+                        key_cert_sign=True,
+                        crl_sign=True,
+                        encipher_only=False,
+                        decipher_only=False,
+                    ),
+                    True,
+                ),
+                (x509.NameConstraints([x509.DNSName(host)], None), True),
+            ],
         )
+        save(ca_key, ca_key_path, ca, ca_path)
         changed = True
-    try:
-        valid = (
-            not changed
-            and leaf.exists()
-            and bool(openssl("verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)))
-            and bool(openssl("x509", "-in", str(leaf), "-noout", "-checkend", str(RENEW_BEFORE_S)))
+    if changed or not leaf_current(ca, leaf, host):
+        signer = serialization.load_pem_private_key(ca_key_path.read_bytes(), None)
+        if not isinstance(signer, ec.EllipticCurvePrivateKey):
+            raise TypeError(f"{ca_key_path} does not hold the CA's elliptic-curve key")
+        key = ec.generate_private_key(ec.SECP256R1())
+        cert = certificate(
+            host,
+            key,
+            LEAF_DAYS,
+            [
+                (x509.SubjectAlternativeName([x509.DNSName(host)]), False),
+                (x509.BasicConstraints(ca=False, path_length=None), True),
+                (
+                    x509.KeyUsage(
+                        digital_signature=True,
+                        content_commitment=False,
+                        key_encipherment=False,
+                        data_encipherment=False,
+                        key_agreement=False,
+                        key_cert_sign=False,
+                        crl_sign=False,
+                        encipher_only=False,
+                        decipher_only=False,
+                    ),
+                    True,
+                ),
+                (x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), False),
+            ],
+            (ca, signer),
         )
-    except RuntimeError:
-        valid = False
-    if not valid:
-        openssl(
-            "req",
-            *base,
-            "-keyout",
-            str(leaf_key),
-            "-out",
-            str(leaf),
-            "-days",
-            str(LEAF_DAYS),
-            "-subj",
-            f"/CN={host}",
-            "-CA",
-            str(ca),
-            "-CAkey",
-            str(ca_key),
-            "-addext",
-            f"subjectAltName=DNS:{host}",
-            "-addext",
-            "basicConstraints=critical,CA:FALSE",
-            "-addext",
-            "keyUsage=critical,digitalSignature",
-            "-addext",
-            "extendedKeyUsage=serverAuth",
-        )
+        save(key, leaf_key, cert, leaf)
         log(f"issued the server certificate for {host}")
         changed = True
-    for key in (ca_key, leaf_key):
-        key.chmod(0o600)
+    for key_path in (ca_key_path, leaf_key):
+        key_path.chmod(0o600)
     return changed
 
 
@@ -591,16 +642,31 @@ def upstream(target: Target | None) -> str:
 
 
 def qr_svg(text: str) -> str:
-    try:
-        return subprocess.run(
-            [QRENCODE, "-t", "SVG", "--inline", "-m", "1", "-o", "-", text],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as error:
-        log(f"setup page shows no QR code: {error}")
-        return ""
+    """The QR code of text as inline SVG, one module of margin; the page's CSS sizes it."""
+    code = segno.make(text, error="l", boost_error=False)
+    return code.svg_inline(border=1, omitsize=True, svgclass=None, lineclass=None)
+
+
+def setup_pages(values: dict[str, str], target: Target | None) -> dict[str, str]:
+    """The setup page in each language of strings.json, filled with values (HTML-escaped)."""
+    pages: dict[str, str] = {}
+    for lang, strings in json.loads((HERE / "strings.json").read_text()).items():
+        controller = (
+            strings["found"].format(name=target[0], address=upstream(target))
+            if target
+            else strings["looking"]
+        )
+        page = fill(
+            (HERE / "setup.html").read_text(),
+            {
+                "T_" + key.upper(): "".join(f"<li>{item}</li>" for item in text)
+                if isinstance(text, list)
+                else text
+                for key, text in strings.items()
+            },
+        )
+        pages[lang] = fill(page, {**values, "CONTROLLER": html.escape(controller)})
+    return pages
 
 
 def write_site(cfg: Config, data: Path, run: Path, target: Target | None) -> None:
@@ -627,24 +693,8 @@ def write_site(cfg: Config, data: Path, run: Path, target: Target | None) -> Non
         f"{CA_NAME}.crt": ca_pem.encode(),
         f"{CA_NAME}.mobileconfig": mobileconfig(ca_der, cfg["hostname"]),
     }
-    for lang, strings in json.loads((HERE / "strings.json").read_text()).items():
-        controller = (
-            strings["found"].format(name=target[0], address=upstream(target))
-            if target
-            else strings["looking"]
-        )
-        page = fill(
-            (HERE / "setup.html").read_text(),
-            {
-                "T_" + key.upper(): "".join(f"<li>{item}</li>" for item in text)
-                if isinstance(text, list)
-                else text
-                for key, text in strings.items()
-            },
-        )
-        files[f"index.{lang}.html"] = fill(
-            page, {**values, "CONTROLLER": html.escape(controller)}
-        ).encode()
+    for lang, page in setup_pages(values, target).items():
+        files[f"index.{lang}.html"] = page.encode()
     for name, content in files.items():
         (www / name).write_bytes(content)
         (www / name).chmod(0o644)
@@ -663,6 +713,23 @@ def write_site(cfg: Config, data: Path, run: Path, target: Target | None) -> Non
     )
 
 
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def openssl_time(moment: dt.datetime) -> str:
+    """A UTC time as OpenSSL prints it (`Nov  3 14:05:09 2027 GMT`), whatever the locale."""
+    month = MONTHS[moment.month - 1]
+    return f"{month} {moment.day:2d} {moment:%H:%M:%S} {moment.year} GMT"
+
+
+def reload_nginx(run: Path) -> None:
+    """Make nginx, which the entrypoint runs beside this supervisor, reread its configuration."""
+    try:
+        os.kill(int((run / "nginx.pid").read_text()), signal.SIGHUP)
+    except (OSError, ValueError) as error:
+        log(f"nginx did not reload its configuration: {error}")
+
+
 def write_status(
     cfg: Config, data: Path, run: Path, target: Target | None, source: str, seen: dict[str, Seen]
 ) -> None:
@@ -670,10 +737,8 @@ def write_status(
 
     For ./setup, health checks and monitoring.
     """
-    expires = (
-        openssl("x509", "-in", str(data / "server.crt"), "-noout", "-enddate")
-        .strip()
-        .split("=", 1)[1]
+    expires = openssl_time(
+        x509.load_pem_x509_certificate((data / "server.crt").read_bytes()).not_valid_after_utc
     )
     status: Status = {
         "name": cfg["name"],
@@ -806,13 +871,16 @@ def mdns_check(cfg: Config, host: str = "openbrewbyweight.local", *, wait_s: flo
     and QU from port 5353 (unicast to port 5353, which the running companion may receive instead
     of this check). It changes nothing in the running companion.
     """
-    addresses = subprocess.run(
-        [IP, "-4", "-o", "addr"], capture_output=True, text=True, check=False
-    ).stdout.splitlines()
-    for line in addresses:
-        flags = int((Path("/sys/class/net") / line.split()[1] / "flags").read_text(), 16)
+    addresses = [
+        (adapter.nice_name, f"{ip.ip}/{ip.network_prefix}")
+        for adapter in ifaddr.get_adapters()
+        for ip in adapter.ips
+        if ip.is_IPv4
+    ]
+    for interface, address in addresses:
+        flags = int((Path("/sys/class/net") / interface / "flags").read_text(), 16)
         print(
-            " ".join(line.split()[1:4]),
+            f"{interface} inet {address}",
             " ".join(
                 f
                 for bit, f in ((0x1000, "MULTICAST"), (0x200, "ALLMULTI"), (0x100, "PROMISC"))
@@ -906,15 +974,12 @@ def main() -> None:
     write_site(cfg, DATA, RUN, target)
     seen: dict[str, Seen] = {}
     write_status(cfg, DATA, RUN, target, source, seen)
-    nginx = subprocess.Popen([NGINX, "-c", str(RUN / "nginx.conf"), "-g", "daemon off;"])
+    if sys.argv[1:2] == ["prepare"]:
+        # gateway/entrypoint.sh starts nginx on what this rendered, then this supervisor.
+        stop_logging()
+        raise SystemExit(0)
     events: queue.Queue[Event] = queue.Queue()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-
-    def watch_nginx() -> None:
-        nginx.wait()
-        events.put(("nginx",))
-
-    threading.Thread(target=watch_nginx, daemon=True).start()
     companion = start_companion(cfg, DATA, RUN, lambda: events.put(("companion",)))
     companion.controller(target)
 
@@ -1023,10 +1088,6 @@ def main() -> None:
                     browser.cancel()
                     browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
                 site_changed = status_changed = False
-                if event[0] == "nginx":
-                    log(f"nginx exited with status {nginx.returncode}")
-                    status = 1
-                    break
                 if event[0] == "companion":
                     log("the companion service stopped")
                     status = 1
@@ -1080,7 +1141,7 @@ def main() -> None:
                     )  # Every announcement: reconnect now if the link is down.
                 if site_changed:
                     write_site(cfg, DATA, RUN, target)
-                    nginx.send_signal(signal.SIGHUP)
+                    reload_nginx(RUN)
                 if site_changed or status_changed:
                     write_status(cfg, DATA, RUN, target, source, seen)
                 unhandled = 0
@@ -1098,9 +1159,6 @@ def main() -> None:
         stop.set()
         companion.stop()
         zc.close()  # Sends mDNS goodbyes for the published name.
-        if nginx.poll() is None:
-            nginx.terminate()
-            nginx.wait()
         stop_logging()  # Last: the companion's shutdown lines still get written.
     raise SystemExit(status)
 

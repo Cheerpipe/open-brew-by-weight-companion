@@ -6,8 +6,8 @@ services:
   companion:
     build:
       context: .
-      # Always from the current alpine:3.24: a cached older base is how a
-      # package that no longer exists reached a server's build.
+      # The Dockerfile pins the base by digest; pull fetches that exact base
+      # rather than trusting whatever a server cached under the same tag.
       pull: true
       args:
         COMPANION_COMMIT: ${COMPANION_COMMIT:-}

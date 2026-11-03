@@ -14,6 +14,9 @@ import pytest
 import companion
 import gateway
 
+# The test image's OpenSSL command line checks what the gateway issues.
+OPENSSL = "/usr/bin/openssl"
+
 ROOT = Path(__file__).resolve().parents[1]
 BASE = {"COMPANION_IP": "192.168.1.240", "COMPANION_NAME": "Kitchen server"}
 TXT = {b"obbw": b"1"}
@@ -120,7 +123,7 @@ def test_match_controller() -> None:
 def verify(ca: Path, leaf: Path, host: str) -> bool:
     return (
         subprocess.run(
-            [gateway.OPENSSL, "verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)],
+            [OPENSSL, "verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)],
             capture_output=True,
             check=False,
         ).returncode

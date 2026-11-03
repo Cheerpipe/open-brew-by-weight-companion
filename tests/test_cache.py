@@ -23,6 +23,8 @@ import gateway
 if TYPE_CHECKING:
     import pytest
 
+NGINX = "/usr/sbin/nginx"  # The image's nginx, run against the rendered configuration.
+
 TAG = "abcd1234"
 ASSETS = {"/app.js", "/js/runtime.js"}
 SHELLS = {"/", "/stats"}
@@ -173,7 +175,7 @@ def upstream(path: str) -> list[tuple[str, str | None, str | None]]:
 
 def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """Web UI cache against nginx."""
-    assert Path(gateway.NGINX).exists(), "nginx is missing; run this inside the test image"
+    assert Path(NGINX).exists(), "nginx is missing; run this inside the test image"
     monkeypatch.setattr(gateway, "qr_svg", lambda _text: "")
     controller = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Controller)
     controller_port = controller.server_address[1]
@@ -195,9 +197,7 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         companion = socketserver.ThreadingUnixStreamServer(str(run / "companion.sock"), Companion)
         (run / "companion.sock").chmod(0o666)
         threading.Thread(target=companion.serve_forever, daemon=True).start()
-        nginx = subprocess.Popen(
-            [gateway.NGINX, "-c", str(run / "nginx.conf"), "-g", "daemon off;"]
-        )
+        nginx = subprocess.Popen([NGINX, "-c", str(run / "nginx.conf"), "-g", "daemon off;"])
         try:
             for _ in range(100):
                 try:

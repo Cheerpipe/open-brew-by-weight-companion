@@ -4,25 +4,31 @@ version = "1.0.0"
 description = "Open Brew by Weight Companion: the HTTPS gateway, pairing, Web UI relay and La Marzocco offload"
 license = "AGPL-3.0-only"
 requires-python = "==3.14.*"
-# The image installs these from Alpine 3.24's packages, never with pip. The
-# pins name the same versions so the type checker and the vulnerability audit
-# see the code that ships; `./scripts/dev validate` fails when they drift.
+# The image installs exactly these, and their dependencies, from PyPI by the hashes
+# uv.lock records (requirements/runtime.txt, exported from it); the type checker and
+# the vulnerability audit see the same versions.
 dependencies = [
-  "aiohttp==3.13.5",
-  "cryptography==47.0.0",
-  "zeroconf==0.147.2",
+  "aiohttp==3.14.5",
+  "cryptography==50.0.2",
+  "ifaddr==0.2.0",
+  "segno==1.6.6",
+  "zeroconf==0.153.0",
 ]
 
 [dependency-groups]
+# pytest and coverage, which the test image installs (requirements/test.txt).
+test = [
+  "coverage==7.17.1",
+  "pytest==9.2.0",
+]
 # Development tools, installed explicitly with `uv sync --frozen`; the gates
 # never install anything.
 dev = [
+  { include-group = "test" },
   "bandit==1.9.4",
-  "coverage==7.14.1",
   "hadolint-bin==2.15.1",
   "mypy==2.4.1",
   "pip-audit==2.10.1",
-  "pytest==9.0.3",
   "ruff==0.17.3",
   "shellcheck-py==0.11.0.1",
   "shfmt-py==4.2.0",
@@ -81,6 +87,8 @@ select = [
   "W",     # pycodestyle warnings
   "YTT",   # sys.version misuse
 ]
+# The companion's logger, so the logging rules (and BLE001's exc_info) know its calls.
+logger-objects = ["companion.logger"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["companion", "gateway", "fake_controller"]
@@ -88,6 +96,7 @@ known-first-party = ["companion", "gateway", "fake_controller"]
 [tool.mypy]
 strict = true
 python_version = "3.14"
+platform = "linux"  # The companion only runs in its Alpine image.
 warn_unreachable = true
 enable_error_code = [
   "deprecated",
@@ -96,7 +105,7 @@ enable_error_code = [
   "truthy-bool",
   "unused-awaitable",
 ]
-files = ["companion", "gateway", "tests", "scripts/dev"]
+files = ["companion", "gateway", "tests", "scripts", "scripts/dev"]
 mypy_path = ["gateway", "tests"]
 
 [tool.pytest.ini_options]

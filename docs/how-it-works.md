@@ -3,7 +3,11 @@
 Open Brew by Weight Companion runs as one container with two programs:
 **nginx**, which serves the pages and forwards traffic, and a Python
 supervisor (`gateway/gateway.py`) that keeps nginx's configuration current
-and runs the companion service (`companion/`) on a thread of its own.
+and runs the companion service (`companion/`) on a thread of its own. The
+container's entrypoint (`gateway/entrypoint.sh`) has the supervisor render
+nginx's configuration first, then runs nginx and the supervisor side by side;
+the supervisor reloads nginx through its pid file, and when either one stops,
+the other does too and Docker's restart policy starts the container again.
 
 ```text
 phones ─https─▶ nginx ──pages, assets──────────────────────────▶ controller
@@ -113,7 +117,7 @@ mDNS goodbye packets so devices forget the name at once.
 ## Certificates
 
 On first start, the supervisor creates a private certificate authority (CA)
-in the `data` folder:
+in the `data` folder, with Python's `cryptography` library:
 
 - ECDSA P-256, valid for ten years.
 - **Name-constrained** to the gateway's name only (`permitted;DNS:<name>`),
@@ -760,6 +764,7 @@ name). It asks for the controller's address only when nothing answers.
 | Path | Purpose |
 | --- | --- |
 | `gateway/gateway.py` | Supervisor: configuration, discovery, mDNS, certificates, rendering. |
+| `gateway/entrypoint.sh` | The container's entrypoint: renders, then runs nginx beside the supervisor. |
 | `gateway/nginx.conf.in` | nginx configuration template. |
 | `gateway/setup.html` | Setup page template. |
 | `gateway/strings.json` | Setup page texts. |
