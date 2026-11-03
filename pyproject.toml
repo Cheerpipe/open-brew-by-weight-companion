@@ -1,0 +1,117 @@
+[project]
+name = "openbrewbyweight-companion"
+version = "1.0.0"
+description = "Open Brew by Weight Companion: the HTTPS gateway, pairing, Web UI relay and La Marzocco offload"
+license = "AGPL-3.0-only"
+requires-python = "==3.14.*"
+# The image installs these from Alpine 3.24's packages, never with pip. The
+# pins name the same versions so the type checker and the vulnerability audit
+# see the code that ships; `./scripts/dev validate` fails when they drift.
+dependencies = [
+  "aiohttp==3.13.5",
+  "cryptography==47.0.0",
+  "zeroconf==0.147.2",
+]
+
+[dependency-groups]
+# Development tools, installed explicitly with `uv sync --frozen`; the gates
+# never install anything.
+dev = [
+  "bandit==1.9.4",
+  "coverage==7.14.1",
+  "hadolint-bin==2.15.1",
+  "mypy==2.4.1",
+  "pip-audit==2.10.1",
+  "pytest==9.0.3",
+  "ruff==0.17.3",
+  "shellcheck-py==0.11.0.1",
+  "shfmt-py==4.2.0",
+  "yamllint==1.38.0",
+]
+
+[tool.uv]
+package = false
+
+# Lint: a curated positive set of rule families, as the firmware's clang-tidy
+# check list is (bugprone, performance, modernize and analyzer families). Every
+# selected rule passes; nothing is ignored per file or per line. Families not
+# selected and why are listed in docs/STATIC_ANALYSIS.md.
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-include = ["scripts/dev"]
+
+[tool.ruff.lint]
+select = [
+  "A",     # flake8-builtins: shadowed builtins
+  "ARG",   # unused arguments
+  "ASYNC", # asyncio pitfalls
+  "B",     # bugbear: likely bugs and design problems
+  "BLE",   # blind except
+  "C4",    # comprehensions
+  "DTZ",   # naive datetimes
+  "E",     # pycodestyle errors
+  "ERA",   # commented-out code
+  "EXE",   # shebangs and executable bits
+  "F",     # pyflakes
+  "FLY",   # static joins
+  "FURB",  # refurb: modern idioms
+  "G",     # logging format
+  "I",     # import order
+  "ISC",   # implicit string concatenation
+  "LOG",   # logging misuse
+  "N",     # pep8 naming
+  "PERF",  # performance
+  "PGH",   # blanket suppressions
+  "PIE",   # unnecessary code
+  "PLC",   # pylint conventions
+  "PLE",   # pylint errors
+  "PLW",   # pylint warnings
+  "PT",    # pytest style
+  "PTH",   # pathlib
+  "RET",   # return values
+  "RSE",   # raise
+  "RUF",   # ruff's own rules
+  "SIM",   # simplifications
+  "SLOT",  # __slots__ on str/tuple subclasses
+  "T10",   # debugger calls
+  "TC",    # type-checking imports
+  "TID",   # tidy imports
+  "UP",    # pyupgrade
+  "W",     # pycodestyle warnings
+  "YTT",   # sys.version misuse
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["companion", "gateway", "fake_controller"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+warn_unreachable = true
+enable_error_code = [
+  "deprecated",
+  "possibly-undefined",
+  "redundant-expr",
+  "truthy-bool",
+  "unused-awaitable",
+]
+files = ["companion", "gateway", "tests", "scripts/dev"]
+mypy_path = ["gateway", "tests"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+pythonpath = [".", "gateway", "tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["companion", "gateway"]
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

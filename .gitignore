@@ -10,3 +10,15 @@ __pycache__/
 # Operating-system metadata
 .DS_Store
 Thumbs.db
+
+# Development tools (uv sync --frozen, npm ci) and their caches
+.venv/
+node_modules/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+
+# Validation runs (./scripts/dev)
+artifacts/
