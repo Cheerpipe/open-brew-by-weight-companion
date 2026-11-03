@@ -26,7 +26,9 @@ from pathlib import Path
 if not __debug__:
     raise SystemExit("assertions are disabled (PYTHONOPTIMIZE); these checks would not run")
 if not shutil.which("nginx"):
-    raise SystemExit("nginx is not on the PATH; run this inside the gateway image (see the docstring)")
+    raise SystemExit(
+        "nginx is not on the PATH; run this inside the gateway image (see the docstring)"
+    )
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("gateway", ROOT / "gateway/gateway.py")
@@ -42,7 +44,7 @@ lock = threading.Lock()
 
 
 def shell_body():
-    return gzip.compress(f"<html data-fw=\"{state['release']}\">".encode())
+    return gzip.compress(f'<html data-fw="{state["release"]}">'.encode())
 
 
 class Controller(http.server.BaseHTTPRequestHandler):
@@ -64,20 +66,31 @@ class Controller(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         with lock:
-            state["requests"].append((self.path, self.headers.get("Host"), self.headers.get("If-None-Match")))
+            state["requests"].append(
+                (self.path, self.headers.get("Host"), self.headers.get("If-None-Match"))
+            )
         path, _, query = self.path.partition("?")
         gzipped = {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
         if path == "/api/v1/status":
-            self.reply(200, b'{"ok":true}', {"Content-Type": "application/json", "Cache-Control": "public, max-age=60"})
+            self.reply(
+                200,
+                b'{"ok":true}',
+                {"Content-Type": "application/json", "Cache-Control": "public, max-age=60"},
+            )
         elif path in SHELLS or path == "/sw.js":
             etag = f'"{state["release"]}.{TAG}"'
-            control = "no-cache" if path == "/sw.js" else "public, max-age=86400, stale-if-error=604800"
+            control = (
+                "no-cache" if path == "/sw.js" else "public, max-age=86400, stale-if-error=604800"
+            )
             status = 304 if self.headers.get("If-None-Match") == etag else 200
             self.reply(status, shell_body(), {**gzipped, "Cache-Control": control, "ETag": etag})
         elif path in ASSETS:
             time.sleep(0.3)  # Long enough for concurrent misses to overlap.
             current = query == f"v={TAG}"
-            headers = {**gzipped, "Cache-Control": "public, max-age=31536000, immutable" if current else "no-store"}
+            headers = {
+                **gzipped,
+                "Cache-Control": "public, max-age=31536000, immutable" if current else "no-store",
+            }
             if current:
                 headers["ETag"] = f'"{TAG}"'
             self.reply(200, gzip.compress(path.encode()), headers)
@@ -101,8 +114,13 @@ class Companion(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
         elif self.headers.get("Upgrade", "").lower() == "websocket":
-            accept = base64.b64encode(hashlib.sha1(
-                (self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+            accept = base64.b64encode(
+                hashlib.sha1(
+                    (
+                        self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+                    ).encode()
+                ).digest()
+            )
             self.send_response(101)
             self.send_header("Upgrade", "websocket")
             self.send_header("Connection", "Upgrade")
@@ -110,8 +128,11 @@ class Companion(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.close_connection = True
         elif self.path == "/api/v1/history":
-            body = b'{"shots":[' + b",".join(b'{"id":%d,"doseG":360,"timeMs":28000}' % i
-                                             for i in range(80)) + b"]}"
+            body = (
+                b'{"shots":['
+                + b",".join(b'{"id":%d,"doseG":360,"timeMs":28000}' % i for i in range(80))
+                + b"]}"
+            )
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -128,7 +149,9 @@ class Companion(http.server.BaseHTTPRequestHandler):
         else:
             body = b"notice" if self.path == "/__companion/ui-off" else b'{"ok":true}'
             self.send_response(200)
-            self.send_header("Content-Type", "text/html" if body == b"notice" else "application/json")
+            self.send_header(
+                "Content-Type", "text/html" if body == b"notice" else "application/json"
+            )
             self.send_header("Cache-Control", "public, max-age=60")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -156,8 +179,9 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
     Path(temporary).chmod(0o755)  # nginx workers run as the nginx user inside the image.
     data, run = Path(temporary) / "data", Path(temporary) / "run"
     https_port = free_port()
-    cfg = gateway.load_config({"GATEWAY_IP": "127.0.0.1", "HTTP_PORT": str(free_port()),
-                               "HTTPS_PORT": str(https_port)})
+    cfg = gateway.load_config(
+        {"GATEWAY_IP": "127.0.0.1", "HTTP_PORT": str(free_port()), "HTTPS_PORT": str(https_port)}
+    )
     gateway.ensure_certificates(cfg, data)
     gateway.write_site(cfg, data, run, ("Fake", ("127.0.0.1", controller_port)))
     companion = socketserver.ThreadingUnixStreamServer(str(run / "companion.sock"), Companion)
@@ -172,10 +196,14 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
             except OSError:
                 time.sleep(0.1)
         context = ssl.create_default_context(cafile=str(data / f"{gateway.CA_NAME}.crt"))
-        context.check_hostname = False  # The certificate names the gateway, the test dials 127.0.0.1.
+        context.check_hostname = (
+            False  # The certificate names the gateway, the test dials 127.0.0.1.
+        )
 
         def get(path, **headers):
-            connection = http.client.HTTPSConnection("127.0.0.1", https_port, context=context, timeout=15)
+            connection = http.client.HTTPSConnection(
+                "127.0.0.1", https_port, context=context, timeout=15
+            )
             connection.request("GET", path, headers={"Accept-Encoding": "gzip", **headers})
             response = connection.getresponse()
             body = response.read()
@@ -186,16 +214,26 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
         status, headers, body = get(f"/app.js?v={TAG}")
         assert (status, headers["x-gateway-cache"]) == (200, "MISS")
         assert headers["content-encoding"] == "gzip" and gzip.decompress(body) == b"/app.js"
-        status, headers, body = get(f"/app.js?v={TAG}", **{"Accept-Encoding": "gzip, deflate, br, zstd"})
-        assert (status, headers["x-gateway-cache"], gzip.decompress(body)) == (200, "HIT", b"/app.js")
+        status, headers, body = get(
+            f"/app.js?v={TAG}", **{"Accept-Encoding": "gzip, deflate, br, zstd"}
+        )
+        assert (status, headers["x-gateway-cache"], gzip.decompress(body)) == (
+            200,
+            "HIT",
+            b"/app.js",
+        )
         assert len(upstream(f"/app.js?v={TAG}")) == 1
         assert get(f"/app.js?v={TAG}", **{"If-None-Match": f'"{TAG}"'})[0] == 304
-        assert len(upstream(f"/app.js?v={TAG}")) == 1, "a browser revalidation is answered by the gateway"
+        assert len(upstream(f"/app.js?v={TAG}")) == 1, (
+            "a browser revalidation is answered by the gateway"
+        )
 
         # Phones loading at once after an OTA: one request reaches the controller.
         results = []
-        threads = [threading.Thread(target=lambda: results.append(get(f"/js/runtime.js?v={TAG}")))
-                   for _ in range(5)]
+        threads = [
+            threading.Thread(target=lambda: results.append(get(f"/js/runtime.js?v={TAG}")))
+            for _ in range(5)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -213,14 +251,25 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
             status, headers, _ = get("/api/v1/status", **{"X-Real-IP": "6.6.6.6"})
             assert status == 200 and "x-gateway-cache" not in headers
         api = [request for request in state["companion"] if request[1] == "/api/v1/status"]
-        assert len(api) == 2 and api[0][2]["X-Real-IP"] == "127.0.0.1" and not upstream("/api/v1/status")
+        assert (
+            len(api) == 2
+            and api[0][2]["X-Real-IP"] == "127.0.0.1"
+            and not upstream("/api/v1/status")
+        )
 
         # Dynamic JSON answers leave compressed for screens that accept it; a
         # screen that does not, and firmware update bytes, stay untouched.
-        history = b'{"shots":[' + b",".join(b'{"id":%d,"doseG":360,"timeMs":28000}' % i
-                                            for i in range(80)) + b"]}"
+        history = (
+            b'{"shots":['
+            + b",".join(b'{"id":%d,"doseG":360,"timeMs":28000}' % i for i in range(80))
+            + b"]}"
+        )
         status, headers, body = get("/api/v1/history")
-        assert status == 200 and headers["content-encoding"] == "gzip" and gzip.decompress(body) == history
+        assert (
+            status == 200
+            and headers["content-encoding"] == "gzip"
+            and gzip.decompress(body) == history
+        )
         assert headers["vary"] == "Accept-Encoding" and len(body) < len(history) / 4
         status, headers, body = get("/api/v1/history", **{"Accept-Encoding": "identity"})
         assert status == 200 and "content-encoding" not in headers and body == history
@@ -228,31 +277,58 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
         assert status == 200 and "content-encoding" not in headers and body == b"\0" * 4096
         assert get("/api/v1/companion/pair")[0] == 404 and get("/api/v1/companion/relay")[0] == 404
         assert get("/api/v1/companion/admin")[0] == 200, "Admin → Companion's actions are relayed"
-        assert not [request for request in state["companion"] if request[1].startswith("/api/v1/companion/p")]
+        assert not [
+            request
+            for request in state["companion"]
+            if request[1].startswith("/api/v1/companion/p")
+        ]
 
         # Live updates: the upgrade reaches the companion.
-        connection = http.client.HTTPSConnection("127.0.0.1", https_port, context=context, timeout=15)
-        connection.request("GET", "/api/v1/ui/ui-stream", headers={
-            "Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13",
-            "Sec-WebSocket-Key": base64.b64encode(b"0123456789abcdef").decode()})
+        connection = http.client.HTTPSConnection(
+            "127.0.0.1", https_port, context=context, timeout=15
+        )
+        connection.request(
+            "GET",
+            "/api/v1/ui/ui-stream",
+            headers={
+                "Upgrade": "websocket",
+                "Connection": "Upgrade",
+                "Sec-WebSocket-Version": "13",
+                "Sec-WebSocket-Key": base64.b64encode(b"0123456789abcdef").decode(),
+            },
+        )
         assert connection.getresponse().status == 101
         connection.close()
         stream = [request for request in state["companion"] if request[1] == "/api/v1/ui/ui-stream"]
-        assert stream and stream[0][2]["Upgrade"] == "websocket" and stream[0][2]["X-Real-IP"] == "127.0.0.1"
+        assert (
+            stream
+            and stream[0][2]["Upgrade"] == "websocket"
+            and stream[0][2]["X-Real-IP"] == "127.0.0.1"
+        )
 
         # The shell is revalidated on every load: a 304 from the controller when unchanged...
         status, headers, body = get("/")
-        assert (status, headers["x-gateway-cache"]) == (200, "MISS") and b"1.0.0" in gzip.decompress(body)
+        assert (status, headers["x-gateway-cache"]) == (
+            200,
+            "MISS",
+        ) and b"1.0.0" in gzip.decompress(body)
         get("/sw.js")
         time.sleep(2.1)  # Past the 1 s validity, counted in whole seconds.
         status, headers, body = get("/")
-        assert (status, headers["x-gateway-cache"]) == (200, "REVALIDATED") and b"1.0.0" in gzip.decompress(body)
+        assert (status, headers["x-gateway-cache"]) == (
+            200,
+            "REVALIDATED",
+        ) and b"1.0.0" in gzip.decompress(body)
         assert upstream("/")[-1][2] == f'"1.0.0.{TAG}"'
         # ...and the new copy right after an OTA.
         state["release"] = "1.1.0"
         time.sleep(2.1)  # Past the 1 s validity, counted in whole seconds.
         status, headers, body = get("/")
-        assert status == 200 and b"1.1.0" in gzip.decompress(body) and headers["etag"] == f'"1.1.0.{TAG}"'
+        assert (
+            status == 200
+            and b"1.1.0" in gzip.decompress(body)
+            and headers["etag"] == f'"1.1.0.{TAG}"'
+        )
 
         # The Web UI through the companion turned off: pages show the companion's notice instead.
         state["ui"] = False
@@ -268,7 +344,10 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-cache-") as temporary:
         controller.server_close()
         time.sleep(2.1)  # Past the 1 s validity, counted in whole seconds.
         status, headers, body = get("/")
-        assert (status, headers["x-gateway-cache"]) == (200, "STALE") and b"1.1.0" in gzip.decompress(body)
+        assert (status, headers["x-gateway-cache"]) == (
+            200,
+            "STALE",
+        ) and b"1.1.0" in gzip.decompress(body)
         assert get("/sw.js")[1]["x-gateway-cache"] == "STALE"
         assert get(f"/app.js?v={TAG}")[1]["x-gateway-cache"] == "HIT"
         assert get("/stats")[0] == 502, "a page never loaded through the gateway has no copy"

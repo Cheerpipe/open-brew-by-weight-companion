@@ -36,9 +36,15 @@ from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 # Settings are COMPANION_<name>; the HTTPS gateway's earlier names still work.
-LEGACY = {"HOSTNAME": "GATEWAY_HOSTNAME", "IP": "GATEWAY_IP", "HTTP_PORT": "HTTP_PORT",
-          "HTTPS_PORT": "HTTPS_PORT", "MDNS_PUBLISH": "MDNS_PUBLISH",
-          "DATA_DIR": "GATEWAY_DATA_DIR", "RUN_DIR": "GATEWAY_RUN_DIR"}
+LEGACY = {
+    "HOSTNAME": "GATEWAY_HOSTNAME",
+    "IP": "GATEWAY_IP",
+    "HTTP_PORT": "HTTP_PORT",
+    "HTTPS_PORT": "HTTPS_PORT",
+    "MDNS_PUBLISH": "MDNS_PUBLISH",
+    "DATA_DIR": "GATEWAY_DATA_DIR",
+    "RUN_DIR": "GATEWAY_RUN_DIR",
+}
 
 
 def setting(env, name):
@@ -60,8 +66,15 @@ SCAN_PATH = "/api/v1/integration/info"
 SCAN_TIMEOUT_S = 1
 SCAN_WORKERS = 32
 SCAN_MAX_PREFIX = 22  # At most 1022 hosts, about 33 s.
-SCAN_AFTER_S = (120, 300, 600, 1800)  # Without a controller answering; then every 30 minutes at most.
-STORED_TIMEOUT_S = 3  # A single probe of the stored controller may wait out a Wi-Fi power-save beacon.
+SCAN_AFTER_S = (
+    120,
+    300,
+    600,
+    1800,
+)  # Without a controller answering; then every 30 minutes at most.
+STORED_TIMEOUT_S = (
+    3  # A single probe of the stored controller may wait out a Wi-Fi power-save beacon.
+)
 PRIVATE = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 ROUTES = Path("/proc/net/route")
 OPENSSL_CNF = "[req]\ndistinguished_name=dn\n[dn]\n"
@@ -72,7 +85,9 @@ def instance_name(value):
     name = "".join(c for c in value if c.isprintable()).strip()
     if not name:
         host = socket.gethostname().split(".")[0]
-        name = "Companion" if re.fullmatch(r"[0-9a-f]{12}", host) else host  # A container id says nothing.
+        name = (
+            "Companion" if re.fullmatch(r"[0-9a-f]{12}", host) else host
+        )  # A container id says nothing.
     return name.encode()[:32].decode(errors="ignore").strip() or "Companion"
 
 
@@ -87,7 +102,9 @@ def log(message):
 
 def local_ip():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.connect(("192.0.2.1", 9))  # UDP connect sends nothing; it only picks the default-route address.
+        probe.connect(
+            ("192.0.2.1", 9)
+        )  # UDP connect sends nothing; it only picks the default-route address.
         return probe.getsockname()[0]
 
 
@@ -101,7 +118,9 @@ def load_config(env):
     if url := (env.get("OBBW_CONTROLLER_URL") or "").strip():
         parts = urlsplit(url if "://" in url else "http://" + url)
         if parts.scheme != "http" or not parts.hostname:
-            raise SystemExit("OBBW_CONTROLLER_URL must look like http://192.168.1.50 or http://name.local")
+            raise SystemExit(
+                "OBBW_CONTROLLER_URL must look like http://192.168.1.50 or http://name.local"
+            )
         controller = (parts.hostname.lower(), parts.port or 80)
     return {
         "name": instance_name(env.get("COMPANION_NAME") or ""),
@@ -121,7 +140,7 @@ def _bounded(value, low, high, default):
     """A positive whole setting within bounds, or the default."""
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
     return min(max(parsed, low), high)
 
@@ -161,13 +180,20 @@ def controller_identity(body):
         info = json.loads(body)
     except ValueError:
         return None
-    if not (isinstance(info, dict) and type(info.get("apiVersion")) is int and info["apiVersion"] == 1
-            and isinstance(info.get("name"), str) and isinstance(info.get("firmwareVersion"), str)
-            and isinstance(info.get("authRequired"), bool)):
+    if not (
+        isinstance(info, dict)
+        and type(info.get("apiVersion")) is int
+        and info["apiVersion"] == 1
+        and isinstance(info.get("name"), str)
+        and isinstance(info.get("firmwareVersion"), str)
+        and isinstance(info.get("authRequired"), bool)
+    ):
         return None
     clean = lambda text: "".join(c for c in text if c.isprintable() and not c.isspace())[:48] or "?"
-    return {"name": "".join(c for c in info["name"] if c.isprintable()).strip()[:32] or "?",
-            "firmware": clean(info["firmwareVersion"])}
+    return {
+        "name": "".join(c for c in info["name"] if c.isprintable()).strip()[:32] or "?",
+        "firmware": clean(info["firmwareVersion"]),
+    }
 
 
 def probe_controller(ip, port=80, timeout=SCAN_TIMEOUT_S):
@@ -177,7 +203,7 @@ def probe_controller(ip, port=80, timeout=SCAN_TIMEOUT_S):
         connection.request("GET", SCAN_PATH, headers={"Accept": "application/json"})
         reply = connection.getresponse()
         info = controller_identity(reply.read(1024)) if reply.status == 200 else None
-    except (OSError, http.client.HTTPException, ValueError):
+    except OSError, http.client.HTTPException, ValueError:
         return None
     finally:
         connection.close()
@@ -194,9 +220,15 @@ def lan_network(ip, routes=ROUTES):
     for fields in (line.split() for line in lines):
         if len(fields) < 8 or int(fields[2], 16):  # Reached through a router: not this link.
             continue
-        destination, mask = (socket.inet_ntoa(struct.pack("=I", int(fields[i], 16))) for i in (1, 7))
+        destination, mask = (
+            socket.inet_ntoa(struct.pack("=I", int(fields[i], 16))) for i in (1, 7)
+        )
         network = ipaddress.ip_network(f"{destination}/{mask}", strict=False)
-        if network.prefixlen and address in network and (not best or network.prefixlen > best.prefixlen):
+        if (
+            network.prefixlen
+            and address in network
+            and (not best or network.prefixlen > best.prefixlen)
+        ):
             best = network
     return best
 
@@ -245,7 +277,9 @@ def scan(cfg, data, probe=probe_controller, routes=ROUTES):
     return 0 if found else 1
 
 
-def fallback(cfg, current, events, stop, probe=probe_controller, routes=ROUTES, delays=SCAN_AFTER_S):
+def fallback(
+    cfg, current, events, stop, probe=probe_controller, routes=ROUTES, delays=SCAN_AFTER_S
+):
     """Search the network for the controller while mDNS has not found it and none answers.
 
     Runs on its own thread unless OBBW_CONTROLLER_URL is set. The first search comes delays[0] s
@@ -258,7 +292,11 @@ def fallback(cfg, current, events, stop, probe=probe_controller, routes=ROUTES, 
         target, source = current()
         if source == "mdns":
             return
-        if target and (found := probe(*target[1], timeout=STORED_TIMEOUT_S)) and wanted(cfg, found["name"]):
+        if (
+            target
+            and (found := probe(*target[1], timeout=STORED_TIMEOUT_S))
+            and wanted(cfg, found["name"])
+        ):
             events.put(("scanned", [found]))
             delay = delays[-1]
             continue
@@ -267,16 +305,24 @@ def fallback(cfg, current, events, stop, probe=probe_controller, routes=ROUTES, 
             log(f"not searching the network for the controller: {why}")
             return
         started = time.monotonic()
-        log((f"the controller at {target[1][0]} does not answer" if target else "mDNS has not found the controller")
-            + f"; searching {network} ({len(hosts)} addresses)")
+        log(
+            (
+                f"the controller at {target[1][0]} does not answer"
+                if target
+                else "mDNS has not found the controller"
+            )
+            + f"; searching {network} ({len(hosts)} addresses)"
+        )
         found = scan_hosts(cfg, hosts, probe)
         if found:
             events.put(("scanned", found))
             backoff, delay = iter(delays[1:]), delays[-1]
         else:
             delay = next(backoff, delays[-1])
-            log(f"no controller answered in {network} ({time.monotonic() - started:.0f} s); "
-                f"searching again in {delay // 60} minutes")
+            log(
+                f"no controller answered in {network} ({time.monotonic() - started:.0f} s); "
+                f"searching again in {delay // 60} minutes"
+            )
 
 
 def openssl(*args):
@@ -292,30 +338,78 @@ def ensure_certificates(cfg, data):
     leaf, leaf_key, cnf = data / "server.crt", data / "server.key", data / "openssl.cnf"
     data.mkdir(parents=True, exist_ok=True)
     cnf.write_text(OPENSSL_CNF)
-    base = ["-config", str(cnf), "-x509", "-new", "-noenc", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"]
+    base = [
+        "-config",
+        str(cnf),
+        "-x509",
+        "-new",
+        "-noenc",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+    ]
     changed = False
-    if not ca.exists() or f"DNS:{host}" not in openssl("x509", "-in", str(ca), "-noout", "-ext", "nameConstraints"):
+    if not ca.exists() or f"DNS:{host}" not in openssl(
+        "x509", "-in", str(ca), "-noout", "-ext", "nameConstraints"
+    ):
         if ca.exists():
-            log(f"the CA does not cover {host}; creating a new one, so every device must be set up again")
-        openssl("req", *base, "-keyout", str(ca_key), "-out", str(ca), "-days", "3650",
-                "-subj", f"/CN=Open Brew by Weight local CA ({host})",
-                "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
-                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
-                "-addext", f"nameConstraints=critical,permitted;DNS:{host}")
+            log(
+                f"the CA does not cover {host}; creating a new one, so every device must be set up again"
+            )
+        openssl(
+            "req",
+            *base,
+            "-keyout",
+            str(ca_key),
+            "-out",
+            str(ca),
+            "-days",
+            "3650",
+            "-subj",
+            f"/CN=Open Brew by Weight local CA ({host})",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE,pathlen:0",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext",
+            f"nameConstraints=critical,permitted;DNS:{host}",
+        )
         changed = True
     try:
-        valid = not changed and leaf.exists() and bool(
-            openssl("verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf))) and bool(
-            openssl("x509", "-in", str(leaf), "-noout", "-checkend", str(RENEW_BEFORE_S)))
+        valid = (
+            not changed
+            and leaf.exists()
+            and bool(openssl("verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)))
+            and bool(openssl("x509", "-in", str(leaf), "-noout", "-checkend", str(RENEW_BEFORE_S)))
+        )
     except RuntimeError:
         valid = False
     if not valid:
-        openssl("req", *base, "-keyout", str(leaf_key), "-out", str(leaf), "-days", str(LEAF_DAYS),
-                "-subj", f"/CN={host}", "-CA", str(ca), "-CAkey", str(ca_key),
-                "-addext", f"subjectAltName=DNS:{host}",
-                "-addext", "basicConstraints=critical,CA:FALSE",
-                "-addext", "keyUsage=critical,digitalSignature",
-                "-addext", "extendedKeyUsage=serverAuth")
+        openssl(
+            "req",
+            *base,
+            "-keyout",
+            str(leaf_key),
+            "-out",
+            str(leaf),
+            "-days",
+            str(LEAF_DAYS),
+            "-subj",
+            f"/CN={host}",
+            "-CA",
+            str(ca),
+            "-CAkey",
+            str(ca_key),
+            "-addext",
+            f"subjectAltName=DNS:{host}",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "keyUsage=critical,digitalSignature",
+            "-addext",
+            "extendedKeyUsage=serverAuth",
+        )
         log(f"issued the server certificate for {host}")
         changed = True
     for key in (ca_key, leaf_key):
@@ -327,20 +421,27 @@ def mobileconfig(ca_der, host):
     """Apple configuration profile that installs the CA as a trusted root."""
     digest = hashlib.sha256(ca_der).hexdigest()
     ident = f"org.openbrewbyweight.gateway.{host}"
-    return plistlib.dumps({
-        "PayloadType": "Configuration", "PayloadVersion": 1, "PayloadIdentifier": ident,
-        "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, digest)).upper(),
-        "PayloadDisplayName": "Open Brew by Weight secure access",
-        "PayloadDescription": f"Lets this device open https://{host} without warnings.",
-        "PayloadContent": [{
-            "PayloadType": "com.apple.security.root", "PayloadVersion": 1,
-            "PayloadIdentifier": ident + ".ca",
-            "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, digest + ".ca")).upper(),
-            "PayloadDisplayName": "Open Brew by Weight local CA",
-            "PayloadCertificateFileName": f"{CA_NAME}.cer",
-            "PayloadContent": ca_der,
-        }],
-    })
+    return plistlib.dumps(
+        {
+            "PayloadType": "Configuration",
+            "PayloadVersion": 1,
+            "PayloadIdentifier": ident,
+            "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, digest)).upper(),
+            "PayloadDisplayName": "Open Brew by Weight secure access",
+            "PayloadDescription": f"Lets this device open https://{host} without warnings.",
+            "PayloadContent": [
+                {
+                    "PayloadType": "com.apple.security.root",
+                    "PayloadVersion": 1,
+                    "PayloadIdentifier": ident + ".ca",
+                    "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, digest + ".ca")).upper(),
+                    "PayloadDisplayName": "Open Brew by Weight local CA",
+                    "PayloadCertificateFileName": f"{CA_NAME}.cer",
+                    "PayloadContent": ca_der,
+                }
+            ],
+        }
+    )
 
 
 def fill(template, values):
@@ -354,13 +455,21 @@ def site_url(scheme, cfg, port, default):
 
 
 def upstream(target):
-    return target[1][0] + ("" if target[1][1] == 80 else f":{target[1][1]}") if target else "127.0.0.1:9"
+    return (
+        target[1][0] + ("" if target[1][1] == 80 else f":{target[1][1]}")
+        if target
+        else "127.0.0.1:9"
+    )
 
 
 def qr_svg(text):
     try:
-        return subprocess.run(["qrencode", "-t", "SVG", "--inline", "-m", "1", "-o", "-", text],
-                              capture_output=True, text=True, check=True).stdout
+        return subprocess.run(
+            ["qrencode", "-t", "SVG", "--inline", "-m", "1", "-o", "-", text],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
     except (OSError, subprocess.CalledProcessError) as error:
         log(f"setup page shows no QR code: {error}")
         return ""
@@ -381,44 +490,83 @@ def write_site(cfg, data, run, target):
         "VERSION": html.escape(companion_version()),
         "HOSTNAME": html.escape(cfg["hostname"]),
         "CA_NAME": CA_NAME,
-        "FINGERPRINT": ":".join(fingerprint[i:i + 2] for i in range(0, len(fingerprint), 2)),
+        "FINGERPRINT": ":".join(fingerprint[i : i + 2] for i in range(0, len(fingerprint), 2)),
         "QR": qr_svg(setup),
         "QR_IOS": qr_svg(f"{setup}/{CA_NAME}.mobileconfig"),
         "QR_ANDROID": qr_svg(f"{setup}/{CA_NAME}.crt"),
     }
-    files = {f"{CA_NAME}.crt": ca_pem.encode(), f"{CA_NAME}.mobileconfig": mobileconfig(ca_der, cfg["hostname"])}
+    files = {
+        f"{CA_NAME}.crt": ca_pem.encode(),
+        f"{CA_NAME}.mobileconfig": mobileconfig(ca_der, cfg["hostname"]),
+    }
     for lang, strings in json.loads((HERE / "strings.json").read_text()).items():
-        controller = strings["found"].format(name=target[0], address=upstream(target)) if target else strings["looking"]
-        page = fill((HERE / "setup.html").read_text(), {
-            "T_" + key.upper(): "".join(f"<li>{item}</li>" for item in text) if isinstance(text, list) else text
-            for key, text in strings.items()})
-        files[f"index.{lang}.html"] = fill(page, {**values, "CONTROLLER": html.escape(controller)}).encode()
+        controller = (
+            strings["found"].format(name=target[0], address=upstream(target))
+            if target
+            else strings["looking"]
+        )
+        page = fill(
+            (HERE / "setup.html").read_text(),
+            {
+                "T_" + key.upper(): "".join(f"<li>{item}</li>" for item in text)
+                if isinstance(text, list)
+                else text
+                for key, text in strings.items()
+            },
+        )
+        files[f"index.{lang}.html"] = fill(
+            page, {**values, "CONTROLLER": html.escape(controller)}
+        ).encode()
     for name, content in files.items():
         (www / name).write_bytes(content)
         (www / name).chmod(0o644)
-    (run / "nginx.conf").write_text(fill((HERE / "nginx.conf.in").read_text(), {
-        "RUN": run, "DATA": data, "HTTP_PORT": cfg["http_port"], "HTTPS_PORT": cfg["https_port"],
-        "UPSTREAM": upstream(target), "OFFLINE": "" if target else "return 503;",
-    }))
+    (run / "nginx.conf").write_text(
+        fill(
+            (HERE / "nginx.conf.in").read_text(),
+            {
+                "RUN": run,
+                "DATA": data,
+                "HTTP_PORT": cfg["http_port"],
+                "HTTPS_PORT": cfg["https_port"],
+                "UPSTREAM": upstream(target),
+                "OFFLINE": "" if target else "return 503;",
+            },
+        )
+    )
 
 
 def companion_version():
     """The companion's version for the page footer, read from its package without importing it."""
     sys.path.insert(0, str(HERE.parent))
     from companion import VERSION
+
     return VERSION
 
 
 def write_status(cfg, data, run, target, source, seen):
     """Publish the gateway's state at /__companion/gateway for ./setup, health checks and monitoring."""
-    expires = openssl("x509", "-in", str(data / "server.crt"), "-noout", "-enddate").strip().split("=", 1)[1]
+    expires = (
+        openssl("x509", "-in", str(data / "server.crt"), "-noout", "-enddate")
+        .strip()
+        .split("=", 1)[1]
+    )
     status = {
-        "name": cfg["name"], "hostname": cfg["hostname"], "ip": cfg["ip"], "mdns_publish": cfg["mdns_publish"],
+        "name": cfg["name"],
+        "hostname": cfg["hostname"],
+        "ip": cfg["ip"],
+        "mdns_publish": cfg["mdns_publish"],
         "setup_url": site_url("http", cfg, cfg["http_port"], 80),
         "secure_url": site_url("https", cfg, cfg["https_port"], 443),
-        "controller": {"name": target[0], "ip": target[1][0], "port": target[1][1], "source": source}
-        if target else None,
-        "seen": seen, "certificate_expires": expires,
+        "controller": {
+            "name": target[0],
+            "ip": target[1][0],
+            "port": target[1][1],
+            "source": source,
+        }
+        if target
+        else None,
+        "seen": seen,
+        "certificate_expires": expires,
     }
     temporary = run / "status.json.tmp"
     temporary.write_text(json.dumps(status, indent=2))
@@ -439,14 +587,25 @@ def remembered_controller(cfg, data):
         saved = json.loads((data / CONTROLLER_FILE).read_text())
         if saved["filter"] != controller_filter(cfg):
             return None
-        return (saved["name"], (saved["ip"], saved["port"])), "scan" if saved.get("via") == "scan" else "remembered"
-    except (OSError, ValueError, KeyError):
+        return (saved["name"], (saved["ip"], saved["port"])), "scan" if saved.get(
+            "via"
+        ) == "scan" else "remembered"
+    except OSError, ValueError, KeyError:
         return None
 
 
 def remember_controller(cfg, data, target, via="mdns"):
-    (data / CONTROLLER_FILE).write_text(json.dumps(
-        {"name": target[0], "ip": target[1][0], "port": target[1][1], "filter": controller_filter(cfg), "via": via}))
+    (data / CONTROLLER_FILE).write_text(
+        json.dumps(
+            {
+                "name": target[0],
+                "ip": target[1][0],
+                "port": target[1][1],
+                "filter": controller_filter(cfg),
+                "via": via,
+            }
+        )
+    )
 
 
 def https_get(cfg, data, path):
@@ -454,7 +613,9 @@ def https_get(cfg, data, path):
     context = ssl.create_default_context(cafile=str(data / f"{CA_NAME}.crt"))
     with socket.create_connection(("127.0.0.1", cfg["https_port"]), timeout=15) as raw:
         with context.wrap_socket(raw, server_hostname=cfg["hostname"]) as tls:
-            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {cfg['hostname']}\r\nConnection: close\r\n\r\n".encode())
+            tls.sendall(
+                f"GET {path} HTTP/1.1\r\nHost: {cfg['hostname']}\r\nConnection: close\r\n\r\n".encode()
+            )
             return int(tls.recv(64).split()[1])
 
 
@@ -464,11 +625,15 @@ def check(cfg, data, through_controller):
     Without --controller nothing reaches the controller, so Docker health checks add no Wi-Fi traffic.
     """
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['http_port']}/__companion/gateway", timeout=5) as reply:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{cfg['http_port']}/__companion/gateway", timeout=5
+        ) as reply:
             status = json.load(reply)
         print("ok setup-page")
         print(f"ok https {https_get(cfg, data, '/__companion/ping')}")
-        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['http_port']}/__companion/status", timeout=5) as reply:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{cfg['http_port']}/__companion/status", timeout=5
+        ) as reply:
             print(f"ok companion link {json.load(reply)['link']}")
     except (OSError, ValueError, IndexError) as error:
         print(f"fail gateway {error}")
@@ -479,7 +644,9 @@ def check(cfg, data, through_controller):
     if not controller:
         print("fail controller not found yet")
         return 1
-    print(f"ok controller {controller['name']} {controller['ip']}:{controller['port']} {controller['source']}")
+    print(
+        f"ok controller {controller['name']} {controller['ip']}:{controller['port']} {controller['source']}"
+    )
     if through_controller:
         try:
             code = https_get(cfg, data, "/")
@@ -501,21 +668,39 @@ def mdns_check(cfg, host="openbrewbyweight.local", wait_s=3):
     """
     from zeroconf import DNSAddress, DNSIncoming, DNSOutgoing, DNSPointer, DNSQuestion, const
 
-    addresses = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout.splitlines()
+    addresses = subprocess.run(
+        ["ip", "-4", "-o", "addr"], capture_output=True, text=True
+    ).stdout.splitlines()
     for line in addresses:
         flags = int((Path("/sys/class/net") / line.split()[1] / "flags").read_text(), 16)
-        print(" ".join(line.split()[1:4]), " ".join(f for bit, f in (
-            (0x1000, "MULTICAST"), (0x200, "ALLMULTI"), (0x100, "PROMISC")) if flags & bit))
-    print("Multicast groups (FB0000E0 is mDNS, 224.0.0.251):\n" + Path("/proc/net/igmp").read_text().rstrip())
+        print(
+            " ".join(line.split()[1:4]),
+            " ".join(
+                f
+                for bit, f in ((0x1000, "MULTICAST"), (0x200, "ALLMULTI"), (0x100, "PROMISC"))
+                if flags & bit
+            ),
+        )
+    print(
+        "Multicast groups (FB0000E0 is mDNS, 224.0.0.251):\n"
+        + Path("/proc/net/igmp").read_text().rstrip()
+    )
     host, group, results = host.rstrip(".").lower() + ".", ("224.0.0.251", 5353), {}
-    for label, port, unicast in (("legacy unicast", 0, False), ("QM", 5353, False), ("QU", 5353, True)):
+    for label, port, unicast in (
+        ("legacy unicast", 0, False),
+        ("QM", 5353, False),
+        ("QU", 5353, True),
+    ):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             sock.bind(("", port))
             if port:
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
-                                socket.inet_aton(group[0]) + socket.inet_aton(cfg["ip"]))
+                sock.setsockopt(
+                    socket.IPPROTO_IP,
+                    socket.IP_ADD_MEMBERSHIP,
+                    socket.inet_aton(group[0]) + socket.inet_aton(cfg["ip"]),
+                )
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(cfg["ip"]))
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
@@ -526,7 +711,9 @@ def mdns_check(cfg, host="openbrewbyweight.local", wait_s=3):
                 question.unicast = unicast
                 query.add_question(question)
             sock.sendto(query.packets()[0], group)
-            print(f"\n{label}: asked for {host} and _http._tcp.local. from {cfg['ip']}:{sock.getsockname()[1]}")
+            print(
+                f"\n{label}: asked for {host} and _http._tcp.local. from {cfg['ip']}:{sock.getsockname()[1]}"
+            )
             deadline, results[label] = time.monotonic() + wait_s, None
             while (left := deadline - time.monotonic()) > 0:
                 sock.settimeout(left)
@@ -536,21 +723,43 @@ def mdns_check(cfg, host="openbrewbyweight.local", wait_s=3):
                     break
                 interface, _, destination = struct.unpack("I4s4s", ancillary[0][2])
                 message = DNSIncoming(data, source)
-                records = [f"{r.name} A {ipaddress.ip_address(r.address)}" if isinstance(r, DNSAddress) else f"{r.name} PTR {r.alias}" if isinstance(r, DNSPointer)
-                           else f"{r.name} {const._TYPES.get(r.type, r.type)}" for r in message.answers()]
+                records = [
+                    f"{r.name} A {ipaddress.ip_address(r.address)}"
+                    if isinstance(r, DNSAddress)
+                    else f"{r.name} PTR {r.alias}"
+                    if isinstance(r, DNSPointer)
+                    else f"{r.name} {const._TYPES.get(r.type, r.type)}"
+                    for r in message.answers()
+                ]
                 what = "query" if message.is_query() else "; ".join(records) or "empty answer"
-                print(f"  {source[0]}:{source[1]} -> {socket.inet_ntoa(destination)} on "
-                      f"{socket.if_indextoname(interface)}: {what}")
+                print(
+                    f"  {source[0]}:{source[1]} -> {socket.inet_ntoa(destination)} on "
+                    f"{socket.if_indextoname(interface)}: {what}"
+                )
                 if any(r.lower().startswith(host + " a ") for r in records):
-                    results[label] = results[label] or f"{source[0]} -> {socket.inet_ntoa(destination)}"
-    print("\n" + "\n".join(f"{label}: " + (f"answered ({how})" if how else "no answer about " + host)
-                            for label, how in results.items()))
+                    results[label] = (
+                        results[label] or f"{source[0]} -> {socket.inet_ntoa(destination)}"
+                    )
+    print(
+        "\n"
+        + "\n".join(
+            f"{label}: " + (f"answered ({how})" if how else "no answer about " + host)
+            for label, how in results.items()
+        )
+    )
     return 0 if all(results.values()) else 1
 
 
 def main():
-    from zeroconf import (DNSAddress, IPVersion, RecordUpdateListener, ServiceBrowser, ServiceInfo,
-                          ServiceStateChange, Zeroconf)
+    from zeroconf import (
+        DNSAddress,
+        IPVersion,
+        RecordUpdateListener,
+        ServiceBrowser,
+        ServiceInfo,
+        ServiceStateChange,
+        Zeroconf,
+    )
 
     sys.path.insert(0, str(HERE.parent))
     from companion.service import start as start_companion
@@ -563,6 +772,7 @@ def main():
     if sys.argv[1:2] == ["mdns-check"]:
         raise SystemExit(mdns_check(cfg, *sys.argv[2:3]))
     from companion import configure_logging, stop_logging
+
     configure_logging(DATA)  # The supervisor only: check/scan never share the rotating file.
     target, source = static_controller(cfg), "manual"
     if not target and (saved := remembered_controller(cfg, DATA)):
@@ -579,7 +789,10 @@ def main():
     companion.controller(target)
 
     zc = Zeroconf(interfaces=[cfg["ip"]], ip_version=IPVersion.V4Only)
-    heard, heard_lock = set(), threading.Lock()  # Devices whose mDNS address records reached the companion.
+    heard, heard_lock = (
+        set(),
+        threading.Lock(),
+    )  # Devices whose mDNS address records reached the companion.
 
     class Heard(RecordUpdateListener):
         def async_update_records(self, zc, now, records):
@@ -588,10 +801,17 @@ def main():
 
     zc.add_listener(Heard(), None)
     if cfg["mdns_publish"]:
-        zc.register_service(ServiceInfo(
-            "_https._tcp.local.", f"{cfg['hostname'].removesuffix('.local')}._https._tcp.local.",
-            addresses=[socket.inet_aton(cfg["ip"])], port=cfg["https_port"],
-            server=cfg["hostname"] + ".", properties={"path": "/"}), allow_name_change=True)
+        zc.register_service(
+            ServiceInfo(
+                "_https._tcp.local.",
+                f"{cfg['hostname'].removesuffix('.local')}._https._tcp.local.",
+                addresses=[socket.inet_aton(cfg["ip"])],
+                port=cfg["https_port"],
+                server=cfg["hostname"] + ".",
+                properties={"path": "/"},
+            ),
+            allow_name_change=True,
+        )
         log(f"publishing {cfg['hostname']} at {cfg['ip']}")
 
     def on_change(zeroconf, service_type, name, state_change):
@@ -599,9 +819,18 @@ def main():
             return  # Keep the last address; a restarting controller announces itself again.
         instance = name.removesuffix("." + service_type)
         info = zeroconf.get_service_info(service_type, name, timeout=INFO_TIMEOUT_MS)
-        found, reason = match_controller(
-            cfg, instance, info.server, info.properties, info.parsed_addresses(IPVersion.V4Only),
-            info.port) if info and info.server else (None, "no answer yet")
+        found, reason = (
+            match_controller(
+                cfg,
+                instance,
+                info.server,
+                info.properties,
+                info.parsed_addresses(IPVersion.V4Only),
+                info.port,
+            )
+            if info and info.server
+            else (None, "no answer yet")
+        )
         is_controller = bool(info and info.properties.get(b"obbw") == b"1")
         events.put(("found", found) if found else ("skip", instance, is_controller, reason))
 
@@ -615,12 +844,18 @@ def main():
     browser = None
     if source != "manual" or not target:
         browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
-        log("looking for " + (cfg["controller"][0] if cfg["controller"] else "the controller") + " over mDNS")
+        log(
+            "looking for "
+            + (cfg["controller"][0] if cfg["controller"] else "the controller")
+            + " over mDNS"
+        )
     if target:
         log(f"using the controller at {target[1][0]}:{target[1][1]} ({source})")
     stop = threading.Event()
     if not cfg["controller"] and (not target or source == "scan"):
-        threading.Thread(target=fallback, args=(cfg, lambda: (target, source), events, stop), daemon=True).start()
+        threading.Thread(
+            target=fallback, args=(cfg, lambda: (target, source), events, stop), daemon=True
+        ).start()
     retries = iter(RETRY_S)
     status = 0
     unhandled = 0
@@ -628,16 +863,26 @@ def main():
         while True:
             searching = browser and source != "mdns"
             try:
-                event = events.get(timeout=next(retries, RETRY_S[-1]) if searching else CERT_CHECK_S)
+                event = events.get(
+                    timeout=next(retries, RETRY_S[-1]) if searching else CERT_CHECK_S
+                )
             except queue.Empty:
                 event = ("tick",)
             try:
                 if event[0] == "tick" and searching:
                     with heard_lock:
-                        others = sorted(n.removesuffix(".local.") for n in heard - {cfg["hostname"] + "."})
-                    log("no controller confirmed yet; asking the network again (" + (
-                        f"mDNS reaches the companion from {len(others)} devices: {', '.join(others[:5])}"
-                        if others else f"no mDNS answer from any device has reached {cfg['ip']}") + ")")
+                        others = sorted(
+                            n.removesuffix(".local.") for n in heard - {cfg["hostname"] + "."}
+                        )
+                    log(
+                        "no controller confirmed yet; asking the network again ("
+                        + (
+                            f"mDNS reaches the companion from {len(others)} devices: {', '.join(others[:5])}"
+                            if others
+                            else f"no mDNS answer from any device has reached {cfg['ip']}"
+                        )
+                        + ")"
+                    )
                     browser.cancel()
                     browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
                 site_changed = status_changed = False
@@ -652,8 +897,12 @@ def main():
                 if event[0] == "skip" and note(*event[1:]):
                     log(f"skipping {event[1]}: {event[3]}")
                     status_changed = True
-                elif event[0] == "found" and source == "mdns" and event[1][0] != target[0] \
-                        and not cfg["controller_name"]:
+                elif (
+                    event[0] == "found"
+                    and source == "mdns"
+                    and event[1][0] != target[0]
+                    and not cfg["controller_name"]
+                ):
                     reason = "another controller; set OBBW_CONTROLLER_NAME to choose"
                     if note(event[1][0], True, reason):
                         log(f"ignoring {event[1][0]}: {reason}")
@@ -667,20 +916,30 @@ def main():
                 elif event[0] == "scanned" and source != "mdns":
                     found = scan_target(event[1][0])
                     for other in event[1][1:]:
-                        status_changed |= note(other["name"], True, f"another controller, at {other['ip']}; "
-                                                                    "set OBBW_CONTROLLER_NAME to choose")
+                        status_changed |= note(
+                            other["name"],
+                            True,
+                            f"another controller, at {other['ip']}; "
+                            "set OBBW_CONTROLLER_NAME to choose",
+                        )
                     if found != target:
                         remember_controller(cfg, DATA, found, "scan")
-                        log(f"controller {found[0]} at {found[1][0]}:{found[1][1]}, found by searching the network "
-                            f"(firmware {event[1][0]['firmware']})")
+                        log(
+                            f"controller {found[0]} at {found[1][0]}:{found[1][1]}, found by searching the network "
+                            f"(firmware {event[1][0]['firmware']})"
+                        )
                         note(found[0], True, "in use")
                         site_changed = True
                     status_changed |= source != "scan"
                     target, source = found, "scan"
                 elif event[0] == "tick" and ensure_certificates(cfg, DATA):
                     site_changed = True
-                if (event[0] == "found" and event[1] == target) or (event[0] == "scanned" and source == "scan"):
-                    companion.controller(target)  # Every announcement: reconnect now if the link is down.
+                if (event[0] == "found" and event[1] == target) or (
+                    event[0] == "scanned" and source == "scan"
+                ):
+                    companion.controller(
+                        target
+                    )  # Every announcement: reconnect now if the link is down.
                 if site_changed:
                     write_site(cfg, DATA, RUN, target)
                     nginx.send_signal(signal.SIGHUP)

@@ -35,7 +35,10 @@ def raises(call, code="PROTOCOL"):
 # --- Crypto: every value of the shared vectors -------------------------------
 companion_private = crypto.load_key(bytes.fromhex(V["companionPrivate"]))
 controller_private = crypto.load_key(bytes.fromhex(V["controllerPrivate"]))
-companion_key, controller_key = crypto.unb64(V["companionKey"], 65), crypto.unb64(V["controllerKey"], 65)
+companion_key, controller_key = (
+    crypto.unb64(V["companionKey"], 65),
+    crypto.unb64(V["controllerKey"], 65),
+)
 assert crypto.public_point(companion_private) == companion_key
 assert crypto.public_point(controller_private) == controller_key
 assert crypto.scalar(companion_private).hex() == V["companionPrivate"]
@@ -53,11 +56,15 @@ assert crypto.b64(crypto.mac(secret, b"F", nc, ns)) == V["ready"]
 assert crypto.b64(crypto.mac(secret, b"E", nc)) == V["erase"]
 assert crypto.credentials_key(secret).hex() == V["credentialsKey"]
 bundle = V["credentials"]
-plain = crypto.decrypt_credentials(secret, bundle["gen"], crypto.unb64(bundle["iv"], 12), crypto.unb64(bundle["ct"]))
+plain = crypto.decrypt_credentials(
+    secret, bundle["gen"], crypto.unb64(bundle["iv"], 12), crypto.unb64(bundle["ct"])
+)
 assert plain.decode() == bundle["plaintext"]
 for generation, key in ((bundle["gen"] + 1, secret), (bundle["gen"], bytes(32))):
     try:
-        crypto.decrypt_credentials(key, generation, crypto.unb64(bundle["iv"]), crypto.unb64(bundle["ct"]))
+        crypto.decrypt_credentials(
+            key, generation, crypto.unb64(bundle["iv"]), crypto.unb64(bundle["ct"])
+        )
         raise AssertionError("a wrong generation or secret must not decrypt")
     except Exception as error:  # cryptography's InvalidTag
         assert type(error).__name__ == "InvalidTag"
@@ -77,14 +84,23 @@ except ValueError:
 companion = FrameCodec(session)
 controller = FrameCodec(session, send=b"f", receive=b"c")
 assert companion.encode({"t": "ping", "up": True}) == V["companionFrame"]
-assert controller.encode({"t": "cfg", "lm": True, "conn": "ws", "observe": True}) == V["controllerFrame"]
-assert FrameCodec(session, send=b"f").encode({"t": "dev", "name": "openbrewbyweight"}) == V["deviceFrame"]
+assert (
+    controller.encode({"t": "cfg", "lm": True, "conn": "ws", "observe": True})
+    == V["controllerFrame"]
+)
+assert (
+    FrameCodec(session, send=b"f").encode({"t": "dev", "name": "openbrewbyweight"})
+    == V["deviceFrame"]
+)
 assert controller.decode(V["companionFrame"]) == {"q": 1, "t": "ping", "up": True}
 assert companion.decode(V["controllerFrame"])["conn"] == "ws"
 second = controller.encode({"t": "route", "to": "companion"})
 assert companion.decode(second) == {"q": 2, "t": "route", "to": "companion"}
 raises(lambda: companion.decode(second))  # A replay repeats q.
-third, fourth = controller.encode({"t": "hold", "on": True}), controller.encode({"t": "hold", "on": False})
+third, fourth = (
+    controller.encode({"t": "hold", "on": True}),
+    controller.encode({"t": "hold", "on": False}),
+)
 raises(lambda: FrameCodec(session).decode(fourth))  # q must start at 1...
 fresh = FrameCodec(session)
 fresh.decode(V["controllerFrame"])
@@ -109,48 +125,101 @@ try:
 except ValueError:
     pass
 receiver = FrameCodec(session, send=b"f", receive=b"c")
-assert receiver.decode(sender.encode({"t": "ping", "up": False}))["q"] == 1, "a dropped frame uses no sequence number"
+assert receiver.decode(sender.encode({"t": "ping", "up": False}))["q"] == 1, (
+    "a dropped frame uses no sequence number"
+)
 
 # --- Dashboard filter -------------------------------------------------------------
 read = dashboard.reduce(D["read"], push=False)
-assert read == {"connected": True, "widgets": [
-    {"code": "CMMachineStatus", "output": {"mode": "BrewingMode"}},
-    {"code": "CMCoffeeBoiler", "output": {"status": "HeatingUp", "targetTemperature": 93.0,
-                                          "readyStartTime": 1760000460000}},
-    {"code": "CMSteamBoilerLevel", "output": {"status": "HeatingUp", "targetLevel": "Level3",
-                                              "readyStartTime": 1760000820500}}]}, read
+assert read == {
+    "connected": True,
+    "widgets": [
+        {"code": "CMMachineStatus", "output": {"mode": "BrewingMode"}},
+        {
+            "code": "CMCoffeeBoiler",
+            "output": {
+                "status": "HeatingUp",
+                "targetTemperature": 93.0,
+                "readyStartTime": 1760000460000,
+            },
+        },
+        {
+            "code": "CMSteamBoilerLevel",
+            "output": {
+                "status": "HeatingUp",
+                "targetLevel": "Level3",
+                "readyStartTime": 1760000820500,
+            },
+        },
+    ],
+}, read
 as_push = dashboard.reduce(D["read"], push=True)
-assert as_push["widgets"][-1] == {"code": "CMBackFlush", "output": {"status": "Off"}}, "CMBackFlush only in pushes"
+assert as_push["widgets"][-1] == {"code": "CMBackFlush", "output": {"status": "Off"}}, (
+    "CMBackFlush only in pushes"
+)
 assert len(json.dumps(read)) < 400 < len(json.dumps(D["read"]))
 pushes = D["pushes"]
-assert dashboard.reduce(pushes["standby"], push=True) == {"connected": True, "widgets": [
-    {"code": "CMMachineStatus", "output": {"mode": "StandBy"}},
-    {"code": "CMCoffeeBoiler", "output": {"status": "StandBy", "targetTemperature": 93.0, "readyStartTime": None}}]}
-assert dashboard.reduce(pushes["standby"], push=True) == dashboard.reduce(copy.deepcopy(pushes["standby"]), push=True), \
-    "the same event is forwarded again: filter, never diff"
-assert dashboard.reduce(pushes["commandsOnly"], push=True) is None, "an event carrying no consumed field is dropped"
+assert dashboard.reduce(pushes["standby"], push=True) == {
+    "connected": True,
+    "widgets": [
+        {"code": "CMMachineStatus", "output": {"mode": "StandBy"}},
+        {
+            "code": "CMCoffeeBoiler",
+            "output": {"status": "StandBy", "targetTemperature": 93.0, "readyStartTime": None},
+        },
+    ],
+}
+assert dashboard.reduce(pushes["standby"], push=True) == dashboard.reduce(
+    copy.deepcopy(pushes["standby"]), push=True
+), "the same event is forwarded again: filter, never diff"
+assert dashboard.reduce(pushes["commandsOnly"], push=True) is None, (
+    "an event carrying no consumed field is dropped"
+)
 assert dashboard.reduce(pushes["backflush"], push=True)["widgets"] == [
-    {"code": "CMBackFlush", "output": {"status": "Requested"}}]
+    {"code": "CMBackFlush", "output": {"status": "Requested"}}
+]
 assert dashboard.reduce(pushes["backflush"], push=False) == {"connected": True}
-assert dashboard.reduce(pushes["removed"], push=True) == {"removedWidgets": ["CMBackFlush", "CMSteamBoilerLevel"]}
+assert dashboard.reduce(pushes["removed"], push=True) == {
+    "removedWidgets": ["CMBackFlush", "CMSteamBoilerLevel"]
+}
 assert dashboard.reduce(pushes["removed"], push=False) == {"removedWidgets": ["CMSteamBoilerLevel"]}
 assert dashboard.reduce(pushes["offline"], push=True) == {"connected": False}
 assert dashboard.reduce({}, push=True) is None
 # Values pass through untouched: the controller's decoder keeps its own strictness.
-odd = {"widgets": [{"code": "CMCoffeeBoiler", "output": {"targetTemperature": "93"}},
-                   {"code": "CMMachineStatus", "output": "broken"}, "note", {"code": 7},
-                   {"code": "CMSteamBoilerLevel", "output": {"enabled": True}}], "removedWidgets": "x"}
-assert dashboard.reduce(odd, push=True) == {"widgets": [{"code": "CMCoffeeBoiler", "output": {"targetTemperature": "93"}}]}
-assert dashboard.parse('{"widgets":[],"serialNumber":"a","serialNumber":"b"}') == {"widgets": [], "serialNumber": "b"}
-for repeated in ('{"connected":true,"connected":false}', '{"widgets":[{"code":"CMMachineStatus","output":{"mode":"a","mode":"b"}}]}',
-                 '[]', 'nope'):
+odd = {
+    "widgets": [
+        {"code": "CMCoffeeBoiler", "output": {"targetTemperature": "93"}},
+        {"code": "CMMachineStatus", "output": "broken"},
+        "note",
+        {"code": 7},
+        {"code": "CMSteamBoilerLevel", "output": {"enabled": True}},
+    ],
+    "removedWidgets": "x",
+}
+assert dashboard.reduce(odd, push=True) == {
+    "widgets": [{"code": "CMCoffeeBoiler", "output": {"targetTemperature": "93"}}]
+}
+assert dashboard.parse('{"widgets":[],"serialNumber":"a","serialNumber":"b"}') == {
+    "widgets": [],
+    "serialNumber": "b",
+}
+for repeated in (
+    '{"connected":true,"connected":false}',
+    '{"widgets":[{"code":"CMMachineStatus","output":{"mode":"a","mode":"b"}}]}',
+    "[]",
+    "nope",
+):
     try:
         dashboard.parse(repeated)
         raise AssertionError(f"{repeated} must be rejected like the controller rejects it")
     except ValueError:
         pass
-assert dashboard.confirms(pushes["temperature"], "temp", 935) and not dashboard.confirms(pushes["temperature"], "temp", 930)
-assert dashboard.confirms(pushes["standby"], "standby", None) and not dashboard.confirms(pushes["standby"], "on", None)
+assert dashboard.confirms(pushes["temperature"], "temp", 935) and not dashboard.confirms(
+    pushes["temperature"], "temp", 930
+)
+assert dashboard.confirms(pushes["standby"], "standby", None) and not dashboard.confirms(
+    pushes["standby"], "on", None
+)
 assert not dashboard.confirms(pushes["commandsOnly"], "on", None)
 
 print("Companion protocol: shared vectors, frame codec and dashboard filter OK")

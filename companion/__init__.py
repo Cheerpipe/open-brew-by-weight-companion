@@ -47,8 +47,9 @@ def configure_logging(data, max_bytes=512 * 1024, backups=8):
     handlers = [_stdout]
     try:
         (data / "log").mkdir(mode=0o700, parents=True, exist_ok=True)
-        file = logging.handlers.RotatingFileHandler(data / "log" / "companion.log",
-                                                   maxBytes=max_bytes, backupCount=backups)
+        file = logging.handlers.RotatingFileHandler(
+            data / "log" / "companion.log", maxBytes=max_bytes, backupCount=backups
+        )
         file.setFormatter(logging.Formatter(_FORMAT, _DATEFMT))
         handlers.append(file)
     except OSError as error:

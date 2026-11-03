@@ -36,23 +36,31 @@ async def archived(cases):
         await logs.open()
         store, merged = ArchiveStore(logs), []
         for n, case in enumerate(cases):
-            await store.put(f"case{n}", "shots", 1, [(row["id"], f"7:{row['id']}", 0, row, {}) for row in case["rows"]])
+            await store.put(
+                f"case{n}",
+                "shots",
+                1,
+                [(row["id"], f"7:{row['id']}", 0, row, {}) for row in case["rows"]],
+            )
             merged.append(await store.merged(f"case{n}"))
         await logs.close()
         return merged
 
 
 def main():
-    assert hashlib.sha256(VECTORS.read_bytes()).hexdigest() == SHA256, \
+    assert hashlib.sha256(VECTORS.read_bytes()).hexdigest() == SHA256, (
         "the vectors differ from the firmware's: copy its file again"
+    )
     vectors = json.loads(VECTORS.read_text())
     assert vectors["version"] == 1 and len(vectors["cases"]) >= 7
     for case in vectors["cases"]:
         for row in case["rows"]:
             assert stats.Record(row).bad_reason() == row["badReason"], (case["name"], row["id"])
         built = stats.header(case["rows"], case["window"], case["presetId"])
-        assert built == case["header"], (case["name"], [key for key in case["header"]
-                                                        if built.get(key) != case["header"][key]])
+        assert built == case["header"], (
+            case["name"],
+            [key for key in case["header"] if built.get(key) != case["header"][key]],
+        )
         assert json.loads(json.dumps(built)) == case["header"]
     rows = vectors["cases"][0]["rows"]
     good = [row for row in rows if row["badReason"] is None]
@@ -62,10 +70,13 @@ def main():
     pearl = stats.scale_key("Pearl S")
     assert stats.good(rows, [], [], [pearl]) == sum(row["scaleName"] == "Pearl S" for row in good)
     for case, rows in zip(vectors["cases"], asyncio.run(archived(vectors["cases"]))):
-        assert stats.header(rows, case["window"], case["presetId"]) == case["header"], \
+        assert stats.header(rows, case["window"], case["presetId"]) == case["header"], (
             f"{case['name']}: the archive's copy gives another header than the controller's"
-    print(f"Companion Stats header: {len(vectors['cases'])} golden cases, the archive's parity and the "
-          "window count OK")
+        )
+    print(
+        f"Companion Stats header: {len(vectors['cases'])} golden cases, the archive's parity and the "
+        "window count OK"
+    )
 
 
 main()

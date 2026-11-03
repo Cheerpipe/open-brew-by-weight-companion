@@ -24,16 +24,22 @@ CLAIM, LOGIN, COMPANION_ADMIN = "/api/v1/ui/claim", "/api/v1/auth/login", "/api/
 TRACE = "/api/v1/diagnostic/shot-trace"
 # Changes a screen makes to the controller's records: the replica's store is not current from the moment
 # one leaves until it caught up after the controller's answer.
-CHANGES = {"/api/v1/stats/rate": "shots", "/api/v1/stats/delete": "shots", "/api/v1/stats/clear": "shots",
-           "/api/v1/history/delete": "history", "/api/v1/history/clear": "history"}
+CHANGES = {
+    "/api/v1/stats/rate": "shots",
+    "/api/v1/stats/delete": "shots",
+    "/api/v1/stats/clear": "shots",
+    "/api/v1/history/delete": "history",
+    "/api/v1/history/clear": "history",
+}
 COMMAND_SETTLE_S = 10
 CHUNK = 16 * 1024
 HEARTBEAT_S = 30  # A screen that stops answering pongs is closed and frees its slot.
 
 
 def _error(status, code, message):
-    return web.json_response({"error": code, "message": message}, status=status,
-                             headers={"Cache-Control": "no-store"})
+    return web.json_response(
+        {"error": code, "message": message}, status=status, headers={"Cache-Control": "no-store"}
+    )
 
 
 def _json(data):
@@ -58,8 +64,11 @@ class Screens:
         if self.companion.controller is None:
             return _error(503, "NO_CONTROLLER", "The companion has not found the controller yet")
         if self.relay.mode == "disabled":
-            return _error(409, "COMPANION_UI_OFF", "The Web UI opens directly on the controller at "
-                          + self.companion.base_url())
+            return _error(
+                409,
+                "COMPANION_UI_OFF",
+                "The Web UI opens directly on the controller at " + self.companion.base_url(),
+            )
         return None
 
     # --- Live updates ------------------------------------------------------------------
@@ -86,9 +95,12 @@ class Screens:
         host = self.companion.base_url().removeprefix("http://")
         try:
             upstream = await self.relay.session().ws_connect(
-                self.companion.base_url("ws") + STREAM, headers={"Origin": f"http://{host}"}, autoping=True,
-                max_msg_size=MAX_FRAME)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                self.companion.base_url("ws") + STREAM,
+                headers={"Origin": f"http://{host}"},
+                autoping=True,
+                max_msg_size=MAX_FRAME,
+            )
+        except aiohttp.ClientError, asyncio.TimeoutError, OSError:
             return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
         ws = web.WebSocketResponse(max_msg_size=MAX_FRAME, autoping=True, heartbeat=HEARTBEAT_S)
         await ws.prepare(request)
@@ -105,7 +117,7 @@ class Screens:
         tasks = [asyncio.create_task(pipe(ws, upstream)), asyncio.create_task(pipe(upstream, ws))]
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        except (aiohttp.ClientError, ConnectionError):
+        except aiohttp.ClientError, ConnectionError:
             pass
         finally:
             for task in tasks:
@@ -126,13 +138,22 @@ class Screens:
         client = request.headers.get("X-WebUI-Client", "")
         screen = client if CLIENT_ID.fullmatch(client) else None
         archive = self.companion.archive
-        if method == "GET" and path == TRACE and archive.serving() and \
-                await self.companion.ui_access(request.headers) is True:
+        if (
+            method == "GET"
+            and path == TRACE
+            and archive.serving()
+            and await self.companion.ui_access(request.headers) is True
+        ):
             data = await archive.held_trace(request.query)
-            if data is not None:  # The replica holds this shot's trace: the controller is not asked.
+            if (
+                data is not None
+            ):  # The replica holds this shot's trace: the controller is not asked.
                 archive.counters["served"] += 1
-                return web.Response(body=data, content_type="application/octet-stream",
-                                    headers={"Cache-Control": "no-store"})
+                return web.Response(
+                    body=data,
+                    content_type="application/octet-stream",
+                    headers={"Cache-Control": "no-store"},
+                )
         changes = CHANGES.get(path) if method == "POST" else None
         session_route = path == CLAIM or path.startswith("/api/v1/auth/")
         lane = self.reads if method in ("GET", "HEAD") or session_route else self.commands
@@ -147,16 +168,22 @@ class Screens:
                 if changes:
                     archive.invalidate(changes)
                 if self.relay.mode == "ready":
-                    reply = await self.relay.request(method, uri, request.headers, body,
-                                                     address(request.headers.get("X-Real-IP")),
-                                                     screen or self.relay.client_id, rewrite)
+                    reply = await self.relay.request(
+                        method,
+                        uri,
+                        request.headers,
+                        body,
+                        address(request.headers.get("X-Real-IP")),
+                        screen or self.relay.client_id,
+                        rewrite,
+                    )
                 if reply is None:
                     refusal = self._refusal()
                     if refusal is not None:
                         return refusal
                     reply = await self.relay.passthrough(method, uri, request.headers, body)
                     rewrite = False
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            except aiohttp.ClientError, asyncio.TimeoutError, OSError:
                 return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
             finally:
                 if changes:
@@ -164,13 +191,18 @@ class Screens:
             try:
                 request_id = self._observe(path, screen, rewrite, reply)
                 if reply.data is not None:
-                    response = web.Response(status=reply.status, body=reply.data,
-                                            headers=CIMultiDict(response_headers(reply)))
+                    response = web.Response(
+                        status=reply.status,
+                        body=reply.data,
+                        headers=CIMultiDict(response_headers(reply)),
+                    )
                     if request_id and lane is self.commands and self.mux.upstream.state == "open":
                         held = True  # The next mutation waits for this one's lastCommand.
                         self.companion.spawn(self._settle(lane, request_id))
                     return response
-                response = web.StreamResponse(status=reply.status, headers=CIMultiDict(response_headers(reply)))
+                response = web.StreamResponse(
+                    status=reply.status, headers=CIMultiDict(response_headers(reply))
+                )
                 if reply.content_length is not None:
                     response.content_length = reply.content_length
                 await response.prepare(request)
@@ -187,12 +219,18 @@ class Screens:
     def _observe(self, path, screen, rewrite, reply):
         """Claims, takeovers and accepted commands as the controller answered them."""
         data = _json(reply.data) if reply.data is not None else {}
-        if screen and reply.status == 200 and (path == CLAIM or (path == LOGIN and data.get("active") is True)):
+        if (
+            screen
+            and reply.status == 200
+            and (path == CLAIM or (path == LOGIN and data.get("active") is True))
+        ):
             self.mux.claimed.add(screen)
         elif rewrite and reply.status == 409 and data.get("error") == "UI_TAKEN_OVER":
             self.mux.takeover()
         elif path == COMPANION_ADMIN and reply.status == 200:
-            self.companion.spawn(self.relay.handshake())  # Its switches may have changed what it wants.
+            self.companion.spawn(
+                self.relay.handshake()
+            )  # Its switches may have changed what it wants.
         request_id = data.get("requestId")
         if reply.status == 202 and isinstance(request_id, int) and not isinstance(request_id, bool):
             return request_id
@@ -201,6 +239,8 @@ class Screens:
     async def _settle(self, lane, request_id):
         try:
             if not await self.mux.command_done(request_id, COMMAND_SETTLE_S):
-                log(f"command {request_id} did not settle within {COMMAND_SETTLE_S} s; the next one goes anyway")
+                log(
+                    f"command {request_id} did not settle within {COMMAND_SETTLE_S} s; the next one goes anyway"
+                )
         finally:
             lane.release()

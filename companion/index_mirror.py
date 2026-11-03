@@ -22,8 +22,11 @@ U32 = 0xFFFFFFFF
 
 
 def _values(values, width):
-    if not isinstance(values, list) or len(values) % width or \
-            not all(type(value) is int and 0 <= value <= U32 for value in values):
+    if (
+        not isinstance(values, list)
+        or len(values) % width
+        or not all(type(value) is int and 0 <= value <= U32 for value in values)
+    ):
         raise ValueError("malformed")
     return values
 
@@ -47,7 +50,9 @@ class IndexMirror:
         return self.answered and self.pairs is not None and epoch == self.epoch
 
     def clear(self, reason):
-        log(f"the {self.name} did not match the controller's ({reason}); the whole index is asked next")
+        log(
+            f"the {self.name} did not match the controller's ({reason}); the whole index is asked next"
+        )
         self.epoch, self.pairs = 0, None
 
     def apply(self, frame):

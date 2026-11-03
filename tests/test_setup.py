@@ -45,8 +45,13 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
     env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"}
 
     def run():
-        return subprocess.run(["bash", str(folder / "setup"), "--yes"], env=env, capture_output=True,
-                              text=True, stdin=subprocess.DEVNULL)
+        return subprocess.run(
+            ["bash", str(folder / "setup"), "--yes"],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
 
     (folder / ".env").write_text(OLD)
     result = run()
@@ -84,16 +89,18 @@ exit 0
 SCENARIOS = {
     "one": "range 192.168.4.0/24 253 9\ncontroller 192.168.4.194 1.1.0+abc openbrewbyweight\n",
     "several": "range 192.168.4.0/24 253 9\ncontroller 192.168.4.20 1.0.0 Cafe Bar\n"
-               "controller 192.168.4.194 1.1.0 openbrewbyweight\n",
+    "controller 192.168.4.194 1.1.0 openbrewbyweight\n",
     "twins": "range 192.168.4.0/24 253 9\ncontroller 192.168.4.20 1.0.0 openbrewbyweight\n"
-             "controller 192.168.4.194 1.1.0 openbrewbyweight\n",
+    "controller 192.168.4.194 1.1.0 openbrewbyweight\n",
     "none": "range 192.168.4.0/24 253 9\n",
     "skip": "skip 172.17.0.0/16 is larger than /22\n",
 }
 with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
     runs = {}
     for name, scan in SCENARIOS.items():
-        folder, tools, state = (Path(temporary) / name / part for part in ("companion", "bin", "state"))
+        folder, tools, state = (
+            Path(temporary) / name / part for part in ("companion", "bin", "state")
+        )
         for path in (folder, tools, state):
             path.mkdir(parents=True)
         shutil.copy(ROOT / "setup", folder / "setup")
@@ -103,9 +110,18 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
             (tools / tool).write_text(body)
             (tools / tool).chmod(0o755)
         env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "FAKE_STATE": str(state)}
-        runs[name] = (folder, state, subprocess.Popen(
-            ["bash", str(folder / "setup"), "--yes"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL, text=True))
+        runs[name] = (
+            folder,
+            state,
+            subprocess.Popen(
+                ["bash", str(folder / "setup"), "--yes"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=True,
+            ),
+        )
     results = {}
     for name, (folder, state, process) in runs.items():
         out, err = process.communicate(timeout=120)
@@ -114,15 +130,24 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
     code, out, err, env_file, state = results["one"]
     assert code == 0, (out, err)
     steps = [line.strip() for line in out.splitlines() if line.startswith("  ")]
-    expected = ["Building the companion image (about a minute the first time)…", "Image ready (",
-                "Starting the companion…", "Running (", "Looking for the controller over mDNS (up to 20 s)…",
-                "Not found over mDNS (2", "Searching 192.168.4.0/24 for a controller (253 addresses, about 9 s)…",
-                'Found Open Brew by Weight "openbrewbyweight" at 192.168.4.194, firmware 1.1.0+abc (',
-                "Starting the companion…", "Running (",
-                'Using "openbrewbyweight" at 192.168.4.194, found by searching your network.']
-    assert [line[:len(want)] for line, want in zip(steps[1:], expected)] == expected, steps
+    expected = [
+        "Building the companion image (about a minute the first time)…",
+        "Image ready (",
+        "Starting the companion…",
+        "Running (",
+        "Looking for the controller over mDNS (up to 20 s)…",
+        "Not found over mDNS (2",
+        "Searching 192.168.4.0/24 for a controller (253 addresses, about 9 s)…",
+        'Found Open Brew by Weight "openbrewbyweight" at 192.168.4.194, firmware 1.1.0+abc (',
+        "Starting the companion…",
+        "Running (",
+        'Using "openbrewbyweight" at 192.168.4.194, found by searching your network.',
+    ]
+    assert [line[: len(want)] for line, want in zip(steps[1:], expected)] == expected, steps
     assert "OBBW_CONTROLLER_URL=http://192.168.1.50" in env_file, "the search sets nothing in .env"
-    assert (state / "up").read_text().splitlines()[-1].endswith("--force-recreate"), "restarted to use it"
+    assert (state / "up").read_text().splitlines()[-1].endswith("--force-recreate"), (
+        "restarted to use it"
+    )
 
     code, out, err, env_file, state = results["several"]
     assert code == 0 and "Found 2 controllers (" in out, (out, err)
@@ -135,11 +160,17 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
     assert "OBBW_CONTROLLER_URL=http://192.168.4.20" in env_file, "same names: its address instead"
 
     code, out, err, env_file, state = results["none"]
-    assert code == 1 and "No controller answered (" in out and "Set OBBW_CONTROLLER_URL" in err, (out, err)
+    assert code == 1 and "No controller answered (" in out and "Set OBBW_CONTROLLER_URL" in err, (
+        out,
+        err,
+    )
     code, out, err, env_file, state = results["skip"]
-    assert code == 1 and "Not searching your network for it: 172.17.0.0/16 is larger than /22." in out, out
+    assert (
+        code == 1 and "Not searching your network for it: 172.17.0.0/16 is larger than /22." in out
+    ), out
     assert "Searching" not in out and "Set OBBW_CONTROLLER_URL" in err
-    assert all((result[4] / "scans").read_text().count("scan") == 1 for result in results.values()), \
-        "one search per ./setup run"
+    assert all(
+        (result[4] / "scans").read_text().count("scan") == 1 for result in results.values()
+    ), "one search per ./setup run"
 
 print("Setup: .env migration and controller search OK")

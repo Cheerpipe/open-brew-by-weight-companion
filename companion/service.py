@@ -34,13 +34,19 @@ from .store import Store, offload
 
 HERE = Path(__file__).resolve().parent
 BACKOFF_S = (0, 5, 15, 60, 300)  # The first reopen is immediate; then it backs off.
-RETRY_LATER_S = 15  # The controller is busy with its scale: a steady short retry, never a longer one.
-FROM_CONTROLLER = frozenset({"cfg", "creds", "route", "hold", "cmd", "dev", "log", "rs", "rec", "trc"})
+RETRY_LATER_S = (
+    15  # The controller is busy with its scale: a steady short retry, never a longer one.
+)
+FROM_CONTROLLER = frozenset(
+    {"cfg", "creds", "route", "hold", "cmd", "dev", "log", "rs", "rec", "trc"}
+)
 RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT = 30, 50
 RETENTION_S = 24 * 3600
 LOG_LEVELS = {"c": 0, "e": 1, "w": 2, "i": 3, "d": 4}
 LOG_CATEGORY_MAX, LOG_MESSAGE_MAX = 24, 1024
-LOG_ACCESS_RECHECK_S = 300  # How often a session's right to read the history is asked of the controller.
+LOG_ACCESS_RECHECK_S = (
+    300  # How often a session's right to read the history is asked of the controller.
+)
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
 STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
@@ -55,7 +61,9 @@ HTTP_TIMEOUT_S = 10
 # The controller's list filters (docs/INTEGRATION_API.md): at most eight values each.
 FILTER_MAX = 8
 RESULTS = frozenset({"on_recipe", "fast", "slow"})
-HISTORY_TYPES = frozenset({"shot", "rinse", "backflush", "power_on", "other", "no_scale_guard_aborted"})
+HISTORY_TYPES = frozenset(
+    {"shot", "rinse", "backflush", "power_on", "other", "no_scale_guard_aborted"}
+)
 SERIAL_FORBIDDEN = set("\r\n:\\/")
 
 
@@ -67,7 +75,9 @@ class Companion:
         self.public = crypto.public_point(self.key)
         self.controller = None  # (name, (ip, port)) from the supervisor
         self.device_name = None  # The controller's own name, from its `dev` frame.
-        self.device_id = None  # Its stable id (the webhook's deviceId), the log store's key, kept there.
+        self.device_id = (
+            None  # Its stable id (the webhook's deviceId), the log store's key, kept there.
+        )
         self.tasks = set()
         self.wake = asyncio.Event()
         self.pairing = Pairing(self)
@@ -79,8 +89,16 @@ class Companion:
         self.unknown_frames, self.unknown_kinds = 0, set()
         self.cfg = {"lm": False, "conn": "ws", "observe": True}
         self.logs = LogStore(data)
-        self.log_on, self.log_subscribed, self.log_identified, self.configured = False, False, False, False
-        self.log_error, self.log_dropped = None, 0  # Why the store is closed; frames that could not be keyed.
+        self.log_on, self.log_subscribed, self.log_identified, self.configured = (
+            False,
+            False,
+            False,
+            False,
+        )
+        self.log_error, self.log_dropped = (
+            None,
+            0,
+        )  # Why the store is closed; frames that could not be keyed.
         self.log_grants = {}  # sha256 of a Web UI session -> when the controller last accepted it.
         self.log_denials = {}  # ...and when it last refused one, so a refused page does not keep asking.
         self.log_unreachable = 0.0  # When the controller last could not answer that question.
@@ -133,14 +151,15 @@ class Companion:
     async def controller_request(self, method, url, body=None):
         """(status, JSON object) from the controller, or (None, {}) when it did not answer."""
         try:
-            async with self.http.request(method, url, json=body,
-                                         timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)) as reply:
+            async with self.http.request(
+                method, url, json=body, timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)
+            ) as reply:
                 try:
                     data = await reply.json(content_type=None)
                 except ValueError:
                     data = None
                 return reply.status, data if isinstance(data, dict) else {}
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        except aiohttp.ClientError, asyncio.TimeoutError, OSError:
             return None, {}
 
     async def paired(self, secret):
@@ -167,10 +186,14 @@ class Companion:
         self.screens.mux.unpark()
         if history:
             await self.erase_log()
-            log(f"{why}; its pairing, La Marzocco account, installation key, log history and archive are erased")
+            log(
+                f"{why}; its pairing, La Marzocco account, installation key, log history and archive are erased"
+            )
         else:
-            log(f"{why}; its pairing, La Marzocco account and installation key are erased, the log history and "
-                "the archive are kept")
+            log(
+                f"{why}; its pairing, La Marzocco account and installation key are erased, the log history and "
+                "the archive are kept"
+            )
         self.wake.set()
 
     def not_recognized(self):
@@ -218,9 +241,15 @@ class Companion:
                 delay = BACKOFF_S[min(self.failures, len(BACKOFF_S) - 1)]
                 self.failures += 1
             self.link, self.link_reason = "retry", reason
-            age = f"; last controller frame {time.monotonic() - self.heard_at:.0f} s ago" if self.heard_at else ""
-            log(f"link closed ({reason}){age}; reopening in {delay} s, "
-                "or as soon as the controller announces itself")
+            age = (
+                f"; last controller frame {time.monotonic() - self.heard_at:.0f} s ago"
+                if self.heard_at
+                else ""
+            )
+            log(
+                f"link closed ({reason}){age}; reopening in {delay} s, "
+                "or as soon as the controller announces itself"
+            )
             try:
                 await asyncio.wait_for(self.wake.wait(), delay)
             except asyncio.TimeoutError:
@@ -245,8 +274,9 @@ class Companion:
         self.link = "connecting"
         hello = {"id": self.id, "name": self.name, "version": VERSION}
         try:
-            ws, codec = await open_link(self.http, self.base_url("ws") + "/api/v1/companion/link",
-                                        hello, pairing["secret"])
+            ws, codec = await open_link(
+                self.http, self.base_url("ws") + "/api/v1/companion/link", hello, pairing["secret"]
+            )
         except Erased:
             self.failures = 0
             await self.erase("the controller forgot this companion")
@@ -356,7 +386,7 @@ class Companion:
                 continue
             try:
                 await ws.send_str(text)
-            except (aiohttp.ClientError, ConnectionError, RuntimeError):
+            except aiohttp.ClientError, ConnectionError, RuntimeError:
                 await ws.close()
                 return
 
@@ -396,18 +426,29 @@ class Companion:
         self.heard_at = time.monotonic()
         self._hold_state(frame)
         kind = frame.get("t")
-        if not isinstance(kind, str) or kind not in FROM_CONTROLLER:  # A newer controller's: counted, shown.
+        if (
+            not isinstance(kind, str) or kind not in FROM_CONTROLLER
+        ):  # A newer controller's: counted, shown.
             self.unknown_frames += 1
             if len(self.unknown_kinds) < 8 and str(kind)[:32] not in self.unknown_kinds:
                 self.unknown_kinds.add(str(kind)[:32])
-                log(f"ignored a frame this version does not know ({str(kind)[:32]!r}); update the companion")
+                log(
+                    f"ignored a frame this version does not know ({str(kind)[:32]!r}); update the companion"
+                )
         elif kind == "cfg":
-            self.cfg = {"lm": frame.get("lm") is True, "conn": "api" if frame.get("conn") == "api" else "ws",
-                        "observe": frame.get("observe") is not False}
+            self.cfg = {
+                "lm": frame.get("lm") is True,
+                "conn": "api" if frame.get("conn") == "api" else "ws",
+                "observe": frame.get("observe") is not False,
+            }
             await self._apply_account()
             self.log_on, self.configured = frame.get("log") is True, True
-            self.archive.configure(frame)  # First: it says whether this firmware holds sync during a shot.
-            if self._log_usable():  # Kept, so a restart with the controller off still reads the archive.
+            self.archive.configure(
+                frame
+            )  # First: it says whether this firmware holds sync during a shot.
+            if (
+                self._log_usable()
+            ):  # Kept, so a restart with the controller off still reads the archive.
                 try:
                     await self.logs.set_meta("archive", json.dumps(frame.get("archive")))
                 except sqlite3.Error as error:
@@ -437,7 +478,8 @@ class Companion:
             if type(command_id) is not int or command_id < 1:
                 raise LinkClosed("PROTOCOL", "command without an id")
             if op not in ("temp", "standby", "on", "refresh") or (
-                    op == "temp" and (type(value) is not int or not 0 < value < 2000)):
+                op == "temp" and (type(value) is not int or not 0 < value < 2000)
+            ):
                 self.post({"t": "res", "id": command_id, "r": "failed", "http": 0})
             else:
                 self.spawn(self._command(command_id, op, value))
@@ -520,15 +562,22 @@ class Companion:
         stream on and `dev` named the controller (so the cursor is that
         controller's); `resync` asks again from it after a frame was lost.
         Either leaves right after a frame that shows no hold (S17)."""
-        if not self.log_on or not self.configured or not self.log_identified or self.outbox is None or \
-                not self._log_usable() or (
-                self.log_subscribed and not resync):
+        if (
+            not self.log_on
+            or not self.configured
+            or not self.log_identified
+            or self.outbox is None
+            or not self._log_usable()
+            or (self.log_subscribed and not resync)
+        ):
             return
         self.log_subscribed = True
         try:
             boot, after = await self.logs.cursor(self.device_id) or (0, 0)
         except sqlite3.Error as error:
-            log(f"the log store could not read its cursor ({error}); the log stream waits for the next link")
+            log(
+                f"the log store could not read its cursor ({error}); the log stream waits for the next link"
+            )
             return
         self.post_sync({"t": "logsub", "on": True, "boot": boot, "after": after}, "logsub")
 
@@ -548,10 +597,19 @@ class Companion:
             log("dropped a log frame whose events have no usable boot or sequence")
             return
         try:
-            await self.logs.apply(self.device_id, {"b": frame["b"], "e": rows, "miss": frame.get("miss", 0),
-                                                   "reset": frame.get("reset") is True})
+            await self.logs.apply(
+                self.device_id,
+                {
+                    "b": frame["b"],
+                    "e": rows,
+                    "miss": frame.get("miss", 0),
+                    "reset": frame.get("reset") is True,
+                },
+            )
         except sqlite3.Error as error:
-            log(f"the log store failed ({error}); asking the controller again from the stored cursor")
+            log(
+                f"the log store failed ({error}); asking the controller again from the stored cursor"
+            )
             await self._log_subscribe(resync=True)
 
     async def ui_access(self, headers, live=False):
@@ -579,13 +637,19 @@ class Companion:
             if live:
                 return None
             if session in self.log_grants:
-                self.log_grants[session] = now  # What the controller said last stands until it can answer.
+                self.log_grants[session] = (
+                    now  # What the controller said last stands until it can answer.
+                )
             return session in self.log_grants
-        answers, other = (self.log_grants, self.log_denials) if allowed else (self.log_denials, self.log_grants)
+        answers, other = (
+            (self.log_grants, self.log_denials) if allowed else (self.log_denials, self.log_grants)
+        )
         other.pop(session, None)
         answers[session] = now
         if not allowed:  # Kept in memory only, and only while it counts.
-            self.log_denials = {key: at for key, at in self.log_denials.items() if now - at < LOG_ACCESS_RECHECK_S}
+            self.log_denials = {
+                key: at for key, at in self.log_denials.items() if now - at < LOG_ACCESS_RECHECK_S
+            }
         try:
             await self.logs.grant(session, allowed)
         except sqlite3.Error as error:
@@ -604,22 +668,32 @@ class Companion:
         try:
             reply = None
             if self.relay.mode != "disabled":
-                reply = await self.relay.request("GET", "/api/v1/auth", headers, b"",
-                                                 address(headers.get("X-Real-IP")), screen or self.relay.client_id,
-                                                 False)
+                reply = await self.relay.request(
+                    "GET",
+                    "/api/v1/auth",
+                    headers,
+                    b"",
+                    address(headers.get("X-Real-IP")),
+                    screen or self.relay.client_id,
+                    False,
+                )
             relayed = reply is not None
-            if reply is None:  # No relay session: the session would cross the LAN in clear, so ask as nobody.
+            if (
+                reply is None
+            ):  # No relay session: the session would cross the LAN in clear, so ask as nobody.
                 reply = await self.relay.passthrough("GET", "/api/v1/auth", {}, b"")
             try:
                 answer = json.loads(reply.data) if reply.status == 200 and reply.data else None
             finally:
                 reply.release()
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError):
+        except aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError:
             return None
         if not isinstance(answer, dict):
             return None
-        return (answer.get("loginRequired") is False or answer.get("signedIn") is True,
-                relayed and screen is not None and answer.get("adminUnlocked") is True)
+        return (
+            answer.get("loginRequired") is False or answer.get("signedIn") is True,
+            relayed and screen is not None and answer.get("adminUnlocked") is True,
+        )
 
     # --- La Marzocco account ---------------------------------------------------
     async def _apply_account(self):
@@ -637,15 +711,19 @@ class Companion:
             log("the controller erased the La Marzocco account")
             return
         try:
-            plain = crypto.decrypt_credentials((await offload(self.store.pairing))["secret"],
-                                               generation,
-                                               crypto.unb64(frame.get("iv"), 12), crypto.unb64(frame.get("ct")))
+            plain = crypto.decrypt_credentials(
+                (await offload(self.store.pairing))["secret"],
+                generation,
+                crypto.unb64(frame.get("iv"), 12),
+                crypto.unb64(frame.get("ct")),
+            )
             decoded = json.loads(plain)
             account = {key: decoded[key] for key in ("email", "password", "serial")}
-            if not all(isinstance(value, str) and value for value in account.values()) or \
-                    SERIAL_FORBIDDEN.intersection(account["serial"]):
+            if not all(
+                isinstance(value, str) and value for value in account.values()
+            ) or SERIAL_FORBIDDEN.intersection(account["serial"]):
                 raise ValueError()
-        except (ValueError, KeyError, TypeError, InvalidTag):
+        except ValueError, KeyError, TypeError, InvalidTag:
             raise LinkClosed("PROTOCOL", "credentials did not decrypt") from None
         await offload(self.store.save_credentials, generation, account)
         self.creds_gen = generation
@@ -660,7 +738,9 @@ class Companion:
     # --- Events from the La Marzocco client ------------------------------------
     def account(self, ok):
         """A sign-in (also one a read or command needed) or a refusal: report it with the new token's life."""
-        if self.creds_gen is not None and self.post({"t": "creds", "gen": self.creds_gen, "ok": ok}):
+        if self.creds_gen is not None and self.post(
+            {"t": "creds", "gen": self.creds_gen, "ok": ok}
+        ):
             self.creds_gen = None
         self._report(force=True)
 
@@ -722,15 +802,26 @@ class Companion:
     async def _full(self):
         """The read after a new subscription, sent as `full` once per route start and epoch."""
         for index in range(len(FULL_RETRY_S)):
-            if self.route != "companion" or self.outbox is None or not self.lm.sub or self.full_ep == self.lm.ep:
+            if (
+                self.route != "companion"
+                or self.outbox is None
+                or not self.lm.sub
+                or self.full_ep == self.lm.ep
+            ):
                 return
             ep = self.lm.ep
             _, data, ac = await self.lm.read()
-            if data is not None and ep == self.lm.ep != self.full_ep and self._forward("full", data, ac, ep):
+            if (
+                data is not None
+                and ep == self.lm.ep != self.full_ep
+                and self._forward("full", data, ac, ep)
+            ):
                 self.full_ep = ep
                 return
             if index + 1 < len(FULL_RETRY_S):
-                await asyncio.sleep(FULL_RETRY_S[index])  # Bounded: a route restart or epoch re-arms it.
+                await asyncio.sleep(
+                    FULL_RETRY_S[index]
+                )  # Bounded: a route restart or epoch re-arms it.
 
     async def _read_and_forward(self):
         status, data, ac = await self.lm.read()
@@ -745,18 +836,29 @@ class Companion:
                 accepted = data is not None
             else:
                 expected = (op, value)
-                self.expect = expected  # A push may confirm it before La Marzocco answers the request.
+                self.expect = (
+                    expected  # A push may confirm it before La Marzocco answers the request.
+                )
                 status = await self.lm.command(command_id, op, value)
                 accepted = 200 <= status < 300
                 if self.expect == expected:
                     if self.confirm_timer:
                         self.confirm_timer.cancel()
                     self.expect = expected if accepted else None
-                    self.confirm_timer = asyncio.get_running_loop().call_later(
-                        CONFIRM_S, self._unconfirmed) if accepted else None
-            log(f"command {command_id} ({op}): " + ("accepted" if accepted else f"failed, HTTP {status}"))
-            self.post({"t": "res", "id": command_id, "r": "accepted"} if accepted else
-                      {"t": "res", "id": command_id, "r": "failed", "http": status})
+                    self.confirm_timer = (
+                        asyncio.get_running_loop().call_later(CONFIRM_S, self._unconfirmed)
+                        if accepted
+                        else None
+                    )
+            log(
+                f"command {command_id} ({op}): "
+                + ("accepted" if accepted else f"failed, HTTP {status}")
+            )
+            self.post(
+                {"t": "res", "id": command_id, "r": "accepted"}
+                if accepted
+                else {"t": "res", "id": command_id, "r": "failed", "http": status}
+            )
 
     def _unconfirmed(self):
         """No push showed the command's outcome in time: read the machine once instead."""
@@ -767,32 +869,57 @@ class Companion:
     async def status(self):
         pairing = await offload(self.store.pairing)
         credentials = await offload(self.store.credentials)
-        log_facts = {"enabled": self.log_on, "days": self.retention[0], "mb": self.retention[1],
-                     "dropped": self.log_dropped}
+        log_facts = {
+            "enabled": self.log_on,
+            "days": self.retention[0],
+            "mb": self.retention[1],
+            "dropped": self.log_dropped,
+        }
         try:
-            log_facts.update(await self.logs.stats(self.device_id) if self._log_usable()
-                             else {"error": self.log_error or "not open"})
+            log_facts.update(
+                await self.logs.stats(self.device_id)
+                if self._log_usable()
+                else {"error": self.log_error or "not open"}
+            )
         except sqlite3.Error as error:
             log_facts["error"] = str(error)
         try:
             archive_facts = await self.archive.facts()
         except sqlite3.Error as error:
-            archive_facts = {"on": self.archive.on, "available": self.archive.available, "error": str(error)}
+            archive_facts = {
+                "on": self.archive.on,
+                "available": self.archive.available,
+                "error": str(error),
+            }
         return {
-            "name": self.name, "version": VERSION, "id": self.id,
+            "name": self.name,
+            "version": VERSION,
+            "id": self.id,
             "paired": pairing is not None,
             "pairedWith": (self.device_name or pairing.get("controller")) if pairing else None,
-            "controller": {"name": self.device_name or self.controller[0],
-                           "address": self.base_url().removeprefix("http://")}
-            if self.controller else None,
+            "controller": {
+                "name": self.device_name or self.controller[0],
+                "address": self.base_url().removeprefix("http://"),
+            }
+            if self.controller
+            else None,
             "pairing": self.pairing.status(),
-            "link": self.link, "linkReason": self.link_reason or None,
-            "route": self.route, "unknownFrames": self.unknown_frames,
-            "laMarzocco": {"enabled": self.cfg["lm"], "account": credentials is not None,
-                           "connection": self.cfg["conn"], "subscribed": self.lm.sub, "up": self.lm.up,
-                           "refused": self.lm.refused},
-            "log": log_facts, "archive": archive_facts,
-            "relay": self.relay.mode, **self.screens.mux.status(),
+            "link": self.link,
+            "linkReason": self.link_reason or None,
+            "route": self.route,
+            "unknownFrames": self.unknown_frames,
+            "laMarzocco": {
+                "enabled": self.cfg["lm"],
+                "account": credentials is not None,
+                "connection": self.cfg["conn"],
+                "subscribed": self.lm.sub,
+                "up": self.lm.up,
+                "refused": self.lm.refused,
+            },
+            "log": log_facts,
+            "archive": archive_facts,
+            "relay": self.relay.mode,
+            **self.screens.mux.status(),
         }
 
 
@@ -808,27 +935,37 @@ def _log_rows(frame):
         if not isinstance(entry, list) or len(entry) != 6 or not _uint32(entry[0]) or entry[0] == 0:
             return None
         sequence, at_ms, wall_sec, level, category, message = entry
-        rows.append([sequence, at_ms if _uint32(at_ms) else 0, wall_sec if _uint32(wall_sec) else 0,
-                     level if level in LOG_LEVELS else "i", str(category)[:LOG_CATEGORY_MAX],
-                     str(message)[:LOG_MESSAGE_MAX]])
+        rows.append(
+            [
+                sequence,
+                at_ms if _uint32(at_ms) else 0,
+                wall_sec if _uint32(wall_sec) else 0,
+                level if level in LOG_LEVELS else "i",
+                str(category)[:LOG_CATEGORY_MAX],
+                str(message)[:LOG_MESSAGE_MAX],
+            ]
+        )
     return rows
 
 
 def _uint32(value):
-    return type(value) is int and 0 <= value < 2 ** 32
+    return type(value) is int and 0 <= value < 2**32
 
 
 def render_page(name="page.html"):
     """A companion page, styled like the setup page it sits beside."""
     setup = (HERE.parent / "gateway" / "setup.html").read_text()
-    style = setup[setup.index("<style>") + 7:setup.index("</style>")]
+    style = setup[setup.index("<style>") + 7 : setup.index("</style>")]
     return (HERE / name).read_text().replace("@STYLE@", style)
 
 
 def web_app(companion):
     page = render_page()
-    notice = render_page("ui-off.html").replace("@VERSION@", html.escape(VERSION)).replace(
-        "@NAME@", html.escape(companion.name))
+    notice = (
+        render_page("ui-off.html")
+        .replace("@VERSION@", html.escape(VERSION))
+        .replace("@NAME@", html.escape(companion.name))
+    )
     no_store = {"Cache-Control": "no-store"}
 
     async def show(request):
@@ -842,27 +979,41 @@ def web_app(companion):
 
     async def ui_off(request):
         address = html.escape(companion.base_url()) if companion.controller else ""
-        return web.Response(text=notice.replace("@ADDRESS@", address), content_type="text/html",
-                            headers=no_store)
+        return web.Response(
+            text=notice.replace("@ADDRESS@", address), content_type="text/html", headers=no_store
+        )
 
     async def status(request):
         return web.json_response(await companion.status(), headers=no_store)
 
     async def pair(request):
-        if request.content_type != "application/json":  # A web page elsewhere cannot send this without asking.
+        if (
+            request.content_type != "application/json"
+        ):  # A web page elsewhere cannot send this without asking.
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
         if companion.controller is None:
-            return web.json_response({"error": "NO_CONTROLLER", "message": "No controller found yet"}, status=409)
+            return web.json_response(
+                {"error": "NO_CONTROLLER", "message": "No controller found yet"}, status=409
+            )
         companion.pairing.start(manual=True)
         return web.json_response(companion.pairing.status(), status=202, headers=no_store)
 
     async def erase(request):
         if request.content_type != "application/json":
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
-        if await offload(companion.store.pairing) is None or companion.ws is not None or companion.pairing.state in (
-                "paired", "requesting", "pending"):
-            return web.json_response({"error": "IN_USE", "message": "Only a pairing the controller no longer "
-                                      "recognizes can be erased here; use Forget in Admin"}, status=409)
+        if (
+            await offload(companion.store.pairing) is None
+            or companion.ws is not None
+            or companion.pairing.state in ("paired", "requesting", "pending")
+        ):
+            return web.json_response(
+                {
+                    "error": "IN_USE",
+                    "message": "Only a pairing the controller no longer "
+                    "recognizes can be erased here; use Forget in Admin",
+                },
+                status=409,
+            )
         await companion.erase("erased on the companion's page", history=False)
         return web.json_response(await companion.status(), headers=no_store)
 
@@ -871,7 +1022,7 @@ def web_app(companion):
         if value is None:
             return None
         value = int(value)
-        if not 0 <= value < 2 ** 32:
+        if not 0 <= value < 2**32:
             raise ValueError()
         return value
 
@@ -888,8 +1039,12 @@ def web_app(companion):
         except ValueError:
             return None
         levels, category = query.get("level"), query.get("category")
-        if boot < 0 or before < 0 or (levels is not None and not (levels and set(levels) <= set(LOG_LEVELS))) \
-                or (category is not None and not re.fullmatch(r"[a-z_]{1,24}", category)):
+        if (
+            boot < 0
+            or before < 0
+            or (levels is not None and not (levels and set(levels) <= set(LOG_LEVELS)))
+            or (category is not None and not re.fullmatch(r"[a-z_]{1,24}", category))
+        ):
             return None
         return boot, before, limit, levels and tuple(sorted(set(levels))), category, at
 
@@ -898,18 +1053,37 @@ def web_app(companion):
         changing the archive (`live`) needs the controller's answer now, and deleting (`admin`) also
         needs Admin unlocked on the screen asking."""
         if not companion._log_usable():
-            return web.json_response({"error": "STORE", "message": companion.log_error or "not open"}, status=503)
+            return web.json_response(
+                {"error": "STORE", "message": companion.log_error or "not open"}, status=503
+            )
         answer = await companion.ui_access(request.headers, live or admin)
         if answer is None:
-            return web.json_response({"error": "CONTROLLER_UNREACHABLE", "message": "The controller must be on "
-                                      "to confirm your sign-in"}, status=503)
+            return web.json_response(
+                {
+                    "error": "CONTROLLER_UNREACHABLE",
+                    "message": "The controller must be on to confirm your sign-in",
+                },
+                status=503,
+            )
         if not (answer[0] if live or admin else answer):
-            return web.json_response({"error": "AUTH_REQUIRED", "message": "Sign in to the Web UI through "
-                                      "the companion while the controller is on"}, status=401)
+            return web.json_response(
+                {
+                    "error": "AUTH_REQUIRED",
+                    "message": "Sign in to the Web UI through "
+                    "the companion while the controller is on",
+                },
+                status=401,
+            )
         if admin and not answer[1]:
             log(f"refused {request.path}: Admin is not unlocked on the screen that asked")
-            return web.json_response({"error": "ADMIN_LOCKED", "message": "Unlock Admin in the Web UI opened "
-                                      "through the companion, then try again"}, status=401)
+            return web.json_response(
+                {
+                    "error": "ADMIN_LOCKED",
+                    "message": "Unlock Admin in the Web UI opened "
+                    "through the companion, then try again",
+                },
+                status=401,
+            )
         return None
 
     async def log_page(request):
@@ -923,10 +1097,15 @@ def web_app(companion):
             entries, following, has_more = await companion.logs.page(companion.device_id, *query)
         except sqlite3.Error as error:
             return web.json_response({"error": "STORE", "message": str(error)}, status=500)
-        return web.json_response({
-            "device": companion.device_id, "entries": entries,
-            "next": {"boot": following[0], "before": following[1]} if following else None,
-            "hasMore": has_more}, headers=no_store)
+        return web.json_response(
+            {
+                "device": companion.device_id,
+                "entries": entries,
+                "next": {"boot": following[0], "before": following[1]} if following else None,
+                "hasMore": has_more,
+            },
+            headers=no_store,
+        )
 
     async def log_export(request):
         """The whole history, or the events between wall times `from` and `to` (either may be absent)."""
@@ -943,9 +1122,13 @@ def web_app(companion):
         except sqlite3.Error as error:
             return web.json_response({"error": "STORE", "message": str(error)}, status=500)
         name = "obbw-log" + ("-" + re.sub(r"[^A-Za-z0-9]", "-", device) if device else "")
-        answer = web.StreamResponse(headers={"Content-Type": "application/json",
-                                             "Content-Disposition": f'attachment; filename="{name}.json"',
-                                             "Cache-Control": "no-store"})
+        answer = web.StreamResponse(
+            headers={
+                "Content-Type": "application/json",
+                "Content-Disposition": f'attachment; filename="{name}.json"',
+                "Cache-Control": "no-store",
+            }
+        )
         await answer.prepare(request)
         head = {"format": FORMAT, "version": EXPORT_VERSION, "device": device}
         await answer.write(json.dumps(head)[:-1].encode() + b',"entries":[')
@@ -957,7 +1140,9 @@ def web_app(companion):
                     await answer.write((("" if first else ",") + json.dumps(entry)).encode())
                     first = False
         except sqlite3.Error as error:
-            await answer.write((("" if first else ",") + json.dumps({"error": str(error)})).encode())
+            await answer.write(
+                (("" if first else ",") + json.dumps({"error": str(error)})).encode()
+            )
         await answer.write(b"]}")
         await answer.write_eof()
         return answer
@@ -980,12 +1165,20 @@ def web_app(companion):
         """Whole numbers in uint32 range, a `generation` also below zero (records set aside); a name in
         `optional` may be absent (None)."""
         try:
-            values = [None if name in optional and source.get(name) is None else int(source[name])
-                      for name in names]
-        except (KeyError, TypeError, ValueError):
+            values = [
+                None if name in optional and source.get(name) is None else int(source[name])
+                for name in names
+            ]
+        except KeyError, TypeError, ValueError:
             return None
-        return values if all(value is None or (-2 ** 31 if name == "generation" else 0) <= value < 2 ** 32
-                             for name, value in zip(names, values)) else None
+        return (
+            values
+            if all(
+                value is None or (-(2**31) if name == "generation" else 0) <= value < 2**32
+                for name, value in zip(names, values)
+            )
+            else None
+        )
 
     def _invalid():
         return web.json_response({"error": "INVALID_REQUEST"}, status=400)
@@ -1005,31 +1198,46 @@ def web_app(companion):
 
     def _archive_query(store, query):
         """The tail's sort, direction, cursor and filters with the controller's whitelists, or None."""
+
         def listed(name, allowed=None):
             values = [value for value in query.get(name, "").split(",") if value]
             if allowed is None:
                 values = [int(value) for value in values]
-                if not all(0 <= value < 2 ** 32 for value in values):
+                if not all(0 <= value < 2**32 for value in values):
                     raise ValueError()
             elif not set(values) <= allowed:
                 raise ValueError()
             if len(values) > FILTER_MAX:
                 raise ValueError()
             return values
+
         try:
-            parsed = {"sort": query.get("sort", "date"), "dir": query.get("dir", "desc"), "bad": query.get("bad") == "1",
-                      "all": query.get("all") == "1",
-                      "result": listed("result", RESULTS) if store == "shots" else [],
-                      "preset": listed("preset") if store == "shots" else [],
-                      "scale": listed("scale") if store == "shots" else [],
-                      "types": listed("types", HISTORY_TYPES) if store == "history" else [],
-                      "cursor": tuple(int(part) for part in query["cursor"].split(":")) if "cursor" in query else None}
+            parsed = {
+                "sort": query.get("sort", "date"),
+                "dir": query.get("dir", "desc"),
+                "bad": query.get("bad") == "1",
+                "all": query.get("all") == "1",
+                "result": listed("result", RESULTS) if store == "shots" else [],
+                "preset": listed("preset") if store == "shots" else [],
+                "scale": listed("scale") if store == "shots" else [],
+                "types": listed("types", HISTORY_TYPES) if store == "history" else [],
+                "cursor": tuple(int(part) for part in query["cursor"].split(":"))
+                if "cursor" in query
+                else None,
+            }
             limit = int(query.get("limit", 20))
         except ValueError:
             return None
         sorts = ("date", "rating") if store == "shots" else ("date",)
-        if parsed["sort"] not in sorts or parsed["dir"] not in ("desc", "asc") or not 1 <= limit <= FETCH_MAX[store] \
-                or (parsed["cursor"] is not None and len(parsed["cursor"]) != (4 if parsed["sort"] == "rating" else 2)):
+        if (
+            parsed["sort"] not in sorts
+            or parsed["dir"] not in ("desc", "asc")
+            or not 1 <= limit <= FETCH_MAX[store]
+            or (
+                parsed["cursor"] is not None
+                and len(parsed["cursor"]) != (4 if parsed["sort"] == "rating" else 2)
+            )
+        ):
             return None
         return parsed, limit
 
@@ -1041,12 +1249,20 @@ def web_app(companion):
         refusal = await _log_refusal(request)
         if refusal is not None:
             return refusal
-        if query[0]["all"] and not companion.archive.on:  # The controller-off view follows the switch.
+        if (
+            query[0]["all"] and not companion.archive.on
+        ):  # The controller-off view follows the switch.
             return web.json_response({"error": "ARCHIVE_OFF"}, status=409)
         rows, following, holes, generations, presets = await companion.archive.store.tail(
-            companion.device_id, store, *query)
-        answer = {"device": companion.device_id, "rows": rows, "next": following, "holes": holes,
-                  "generations": generations}
+            companion.device_id, store, *query
+        )
+        answer = {
+            "device": companion.device_id,
+            "rows": rows,
+            "next": following,
+            "holes": holes,
+            "generations": generations,
+        }
         if presets is not None:
             answer["presets"] = presets
         return web.json_response(answer, headers=no_store)
@@ -1056,18 +1272,32 @@ def web_app(companion):
         shows the controller's own header, labelled as covering only its shots, and asks again."""
         query = request.query
         try:
-            window, active, epoch = int(query["window"]), int(query.get("active", 0)), int(query["epoch"])
-            filters = _archive_query("shots", {key: query[key] for key in ("result", "preset", "scale") if key in query})
-        except (KeyError, ValueError):
+            window, active, epoch = (
+                int(query["window"]),
+                int(query.get("active", 0)),
+                int(query["epoch"]),
+            )
+            filters = _archive_query(
+                "shots", {key: query[key] for key in ("result", "preset", "scale") if key in query}
+            )
+        except KeyError, ValueError:
             filters = None
-        if filters is None or window not in STATS_WINDOWS or not 0 <= active < 256 or not 0 <= epoch < 2 ** 32:
+        if (
+            filters is None
+            or window not in STATS_WINDOWS
+            or not 0 <= active < 256
+            or not 0 <= epoch < 2**32
+        ):
             return _invalid()
         refusal = await _log_refusal(request)
         if refusal is not None:
             return refusal
         parsed = filters[0]
-        chosen = (tuple(stats.VERDICTS[name] for name in parsed["result"]), tuple(parsed["preset"]),
-                  tuple(parsed["scale"]))
+        chosen = (
+            tuple(stats.VERDICTS[name] for name in parsed["result"]),
+            tuple(parsed["preset"]),
+            tuple(parsed["scale"]),
+        )
         try:
             header, good, synced = await companion.archive.header(window, active, epoch, chosen)
         except (Unavailable, sqlite3.Error) as error:
@@ -1088,8 +1318,11 @@ def web_app(companion):
         return web.Response(body=data, content_type="application/octet-stream", headers=no_store)
 
     def _found(done):
-        return web.json_response({"ok": True}, headers=no_store) if done else \
-            web.json_response({"error": "NOT_FOUND"}, status=404)
+        return (
+            web.json_response({"ok": True}, headers=no_store)
+            if done
+            else web.json_response({"error": "NOT_FOUND"}, status=404)
+        )
 
     async def archive_rate(request):
         body, refusal = await _archive_body(request)
@@ -1110,7 +1343,9 @@ def web_app(companion):
         values = _numbers(body, "generation", "id", optional=("generation",))
         if values is None or body.get("store") not in FETCH_MAX:
             return _invalid()
-        return _found(await companion.archive.store.remove(companion.device_id, body["store"], *values))
+        return _found(
+            await companion.archive.store.remove(companion.device_id, body["store"], *values)
+        )
 
     async def archive_export(request):
         refusal = await _log_refusal(request)
@@ -1118,17 +1353,23 @@ def web_app(companion):
             return refusal
         device, store = companion.device_id, companion.archive.store
         name = "obbw-archive" + ("-" + re.sub(r"[^A-Za-z0-9]", "-", device) if device else "")
-        answer = web.StreamResponse(headers={"Content-Type": "application/json",
-                                             "Content-Disposition": f'attachment; filename="{name}.json"',
-                                             "Cache-Control": "no-store"})
+        answer = web.StreamResponse(
+            headers={
+                "Content-Type": "application/json",
+                "Content-Disposition": f'attachment; filename="{name}.json"',
+                "Cache-Control": "no-store",
+            }
+        )
         await answer.prepare(request)
         head = {"format": "openbrewbyweight-companion-archive", "version": 1, "device": device}
         await answer.write(json.dumps(head)[:-1].encode())
-        for key, read in (("shots", lambda after: store.chunk(device, "shots", after)),
-                          ("history", lambda after: store.chunk(device, "history", after)),
-                          ("traces", lambda after: store.trace_chunk(device, after))):
+        for key, read in (
+            ("shots", lambda after: store.chunk(device, "shots", after)),
+            ("history", lambda after: store.chunk(device, "history", after)),
+            ("traces", lambda after: store.trace_chunk(device, after)),
+        ):
             await answer.write(f',"{key}":['.encode())
-            after, first = (-2 ** 63, 0), True  # Records set aside sit below generation 1.
+            after, first = (-(2**63), 0), True  # Records set aside sit below generation 1.
             while after is not None:
                 items, after = await read(after)
                 for item in items:
@@ -1192,19 +1433,28 @@ async def _retention(companion):
 
 async def _serve(cfg, data, socket_path, handle, ready):
     # One connection per request: the controller has few sockets.
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as controller, \
-            aiohttp.ClientSession() as cloud:
-        companion = Companion(cfg["name"], data, controller,
-                              lambda store, events: LaMarzocco(store, cloud, events))
-        companion.retention = (cfg.get("log_retention_days", RETENTION_DAYS_DEFAULT),
-                               cfg.get("log_retention_mb", RETENTION_MB_DEFAULT))
+    async with (
+        aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as controller,
+        aiohttp.ClientSession() as cloud,
+    ):
+        companion = Companion(
+            cfg["name"], data, controller, lambda store, events: LaMarzocco(store, cloud, events)
+        )
+        companion.retention = (
+            cfg.get("log_retention_days", RETENTION_DAYS_DEFAULT),
+            cfg.get("log_retention_mb", RETENTION_MB_DEFAULT),
+        )
         await companion.open_log()
         runner = web.AppRunner(web_app(companion), access_log=None)
         await runner.setup()
         socket_path.unlink(missing_ok=True)
         await web.UnixSite(runner, str(socket_path)).start()
         socket_path.chmod(0o666)  # nginx workers run as the nginx user.
-        handle.loop, handle.companion, handle.stopping = asyncio.get_running_loop(), companion, asyncio.Event()
+        handle.loop, handle.companion, handle.stopping = (
+            asyncio.get_running_loop(),
+            companion,
+            asyncio.Event(),
+        )
         ready.set()
         log(f"'{cfg['name']}' version {VERSION} is running")
         link = companion.spawn(companion.run_link())
@@ -1230,7 +1480,9 @@ async def _loop_watchdog():
         await asyncio.sleep(WATCHDOG_S)
         late = loop.time() - before - WATCHDOG_S
         if late >= STALL_BREACH_S:
-            log(f"the event loop stood still {late:.0f} s: long enough for the controller to miss its pings")
+            log(
+                f"the event loop stood still {late:.0f} s: long enough for the controller to miss its pings"
+            )
         elif late >= STALL_WARN_S:
             log(f"the event loop stood still {late:.0f} s")
 

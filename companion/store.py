@@ -23,6 +23,7 @@ _DISK = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=
 async def offload(work, *args):
     return await asyncio.get_running_loop().run_in_executor(_DISK, functools.partial(work, *args))
 
+
 IDENTITY, PAIRING, CREDENTIALS, INSTALLATION = "identity", "pairing", "credentials", "lamarzocco"
 
 
@@ -36,7 +37,7 @@ class Store:
     def read(self, name):
         try:
             return json.loads(self._path(name).read_text())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return None
 
     def write(self, name, value):

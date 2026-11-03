@@ -15,23 +15,62 @@ import json
 import zlib
 
 # kStatsRowColumns, in the firmware's order.
-COLUMNS = ("id,bootId,endedAtMs,hasWallTime,endedAtLocalSec,endedAtUnixSec,timezoneOffsetMinutesAtCommit,"
-           "durationS,presetId,presetName,scaleName,goalG,actualG,offsetG,bbwAlgorithm,bbwAlgorithmVersion,"
-           "bbwAlpha,bbwLearningApplied,avgFlowGS,targetTempDeciC,doseG,ratio,firstDropS,tareS,shotType,cutType,"
-           "extractionGuardEnabled,extractionExtended,slowExtractionGuardEnabled,slowExtractionExtended,"
-           "stopDetail,cutLineG,arrivalS,verdict,channeling,scaleLossSource,estimatedG,blind,fastBeforeS,"
-           "slowAfterS,fastMarginG,slowMarginG,delayS,wallS,fastRampS,slowRampS,fastCurve,slowCurve,"
-           "fastCurveHardness,slowCurveHardness,dripDelayS,actualWeightSource,rating,badReason,number")
+COLUMNS = (
+    "id,bootId,endedAtMs,hasWallTime,endedAtLocalSec,endedAtUnixSec,timezoneOffsetMinutesAtCommit,"
+    "durationS,presetId,presetName,scaleName,goalG,actualG,offsetG,bbwAlgorithm,bbwAlgorithmVersion,"
+    "bbwAlpha,bbwLearningApplied,avgFlowGS,targetTempDeciC,doseG,ratio,firstDropS,tareS,shotType,cutType,"
+    "extractionGuardEnabled,extractionExtended,slowExtractionGuardEnabled,slowExtractionExtended,"
+    "stopDetail,cutLineG,arrivalS,verdict,channeling,scaleLossSource,estimatedG,blind,fastBeforeS,"
+    "slowAfterS,fastMarginG,slowMarginG,delayS,wallS,fastRampS,slowRampS,fastCurve,slowCurve,"
+    "fastCurveHardness,slowCurveHardness,dripDelayS,actualWeightSource,rating,badReason,number"
+)
 NAMES = COLUMNS.split(",")
 FRAME_BYTES = 8192  # kStatsStreamFrameBytes
 # Decimals each number is printed with (%.1f, %.2f, FixedText(ms, 3)); every other number is an integer.
-PLACES = {**dict.fromkeys(("durationS", "goalG", "doseG", "firstDropS", "tareS", "arrivalS", "fastBeforeS",
-                           "slowAfterS", "fastMarginG", "slowMarginG", "delayS", "wallS", "fastRampS",
-                           "slowRampS", "fastCurveHardness", "slowCurveHardness", "dripDelayS",
-                           "avgDurationS", "avgYieldG", "avgErrorPct", "shotsPerDay", "a", "b"), 1),
-          **dict.fromkeys(("actualG", "offsetG", "bbwAlpha", "avgFlowGS", "ratio", "cutLineG", "estimatedG",
-                           "avgFlowGps"), 2),
-          **dict.fromkeys(("dropS", "extendedS", "atmS", "atmClearedS", "endS"), 3)}
+PLACES = {
+    **dict.fromkeys(
+        (
+            "durationS",
+            "goalG",
+            "doseG",
+            "firstDropS",
+            "tareS",
+            "arrivalS",
+            "fastBeforeS",
+            "slowAfterS",
+            "fastMarginG",
+            "slowMarginG",
+            "delayS",
+            "wallS",
+            "fastRampS",
+            "slowRampS",
+            "fastCurveHardness",
+            "slowCurveHardness",
+            "dripDelayS",
+            "avgDurationS",
+            "avgYieldG",
+            "avgErrorPct",
+            "shotsPerDay",
+            "a",
+            "b",
+        ),
+        1,
+    ),
+    **dict.fromkeys(
+        (
+            "actualG",
+            "offsetG",
+            "bbwAlpha",
+            "avgFlowGS",
+            "ratio",
+            "cutLineG",
+            "estimatedG",
+            "avgFlowGps",
+        ),
+        2,
+    ),
+    **dict.fromkeys(("dropS", "extendedS", "atmS", "atmClearedS", "endS"), 3),
+}
 
 
 def text(value, key=None):
@@ -45,21 +84,34 @@ def text(value, key=None):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
         return "[" + ",".join(text(item, key) for item in value) + "]"
-    return "{" + ",".join(f"{json.dumps(name)}:{text(item, name)}" for name, item in value.items()) + "}"
+    return (
+        "{"
+        + ",".join(f"{json.dumps(name)}:{text(item, name)}" for name, item in value.items())
+        + "}"
+    )
 
 
 def marks(only, generation, trace=None):
     """The archive's markers on a row it alone holds."""
     if not only:
         return {}
-    return {"archiveOnly": True, "archiveGeneration": generation,
-            **({} if trace is None else {"archiveTrace": trace})}
+    return {
+        "archiveOnly": True,
+        "archiveGeneration": generation,
+        **({} if trace is None else {"archiveTrace": trace}),
+    }
 
 
 def stats_row(body, marked=None):
     """formatShotStatsRow: the values in column order, then the curve object (and the markers)."""
     curve = {name: value for name, value in body.items() if name not in NAMES_SET}
-    return "[" + ",".join(text(body.get(name), name) for name in NAMES) + "," + text({**curve, **(marked or {})}) + "]"
+    return (
+        "["
+        + ",".join(text(body.get(name), name) for name in NAMES)
+        + ","
+        + text({**curve, **(marked or {})})
+        + "]"
+    )
 
 
 def history_row(body, marked=None):
@@ -85,20 +137,28 @@ def stats_frames(page, seq, request, snapshot, header=None, kept=0):
     their ids (whole when only the archive holds them: an id may repeat across histories).
     Returns (frames, tag)."""
     header_text = text(header) if header is not None else ""
-    tag = _tag(header_text, COLUMNS, json.dumps([page[name] for name in ("epoch", "total", "offset", "limit")]),
-               *(row for _, row, _ in page["rows"]))
+    tag = _tag(
+        header_text,
+        COLUMNS,
+        json.dumps([page[name] for name in ("epoch", "total", "offset", "limit")]),
+        *(row for _, row, _ in page["rows"]),
+    )
     rows = _rows(page, kept == tag)
     frames, sent = [], 0
     while True:
         first = sent == 0
-        out = (f'{{"v":1,"type":"stats","boot":{page["boot"]},"snapshot":{_flag(first and snapshot)},'
-               f'"epoch":{page["epoch"]},"seq":{seq},"request":{request},')
+        out = (
+            f'{{"v":1,"type":"stats","boot":{page["boot"]},"snapshot":{_flag(first and snapshot)},'
+            f'"epoch":{page["epoch"]},"seq":{seq},"request":{request},'
+        )
         if first and header is not None:
             out += f'"stats":{header_text},'
         if first:
             out += f'"cols":"{COLUMNS}","tag":{tag},"good":{page["good"]},'
-        out += (f'"total":{page["total"]},"offset":{page["offset"]},"limit":{page["limit"]},'
-                f'"hasMore":{_flag(page["hasMore"])},"rows":[')
+        out += (
+            f'"total":{page["total"]},"offset":{page["offset"]},"limit":{page["limit"]},'
+            f'"hasMore":{_flag(page["hasMore"])},"rows":['
+        )
         used = base = len(out.encode())
         start = sent
         while sent < len(rows):
@@ -116,13 +176,17 @@ def stats_frames(page, seq, request, snapshot, header=None, kept=0):
 
 def history_frame(page, request, snapshot, kept=0):
     """A History page's one frame (at most 120 records stay under the frame budget). Returns (frame, tag)."""
-    tag = _tag(json.dumps([page[name] for name in ("epoch", "total", "offset", "limit")]),
-               *(row for _, row, _ in page["rows"]))
+    tag = _tag(
+        json.dumps([page[name] for name in ("epoch", "total", "offset", "limit")]),
+        *(row for _, row, _ in page["rows"]),
+    )
     rows = _rows(page, kept == tag)
-    return (f'{{"v":1,"type":"history","boot":{page["boot"]},"snapshot":{_flag(snapshot)},'
-            f'"epoch":{page["epoch"]},"request":{request},"tag":{tag},"total":{page["total"]},'
-            f'"offset":{page["offset"]},"limit":{page["limit"]},"hasMore":{_flag(page["hasMore"])},'
-            f'"records":[{",".join(rows)}]}}'), tag
+    return (
+        f'{{"v":1,"type":"history","boot":{page["boot"]},"snapshot":{_flag(snapshot)},'
+        f'"epoch":{page["epoch"]},"request":{request},"tag":{tag},"total":{page["total"]},'
+        f'"offset":{page["offset"]},"limit":{page["limit"]},"hasMore":{_flag(page["hasMore"])},'
+        f'"records":[{",".join(rows)}]}}'
+    ), tag
 
 
 NAMES_SET = frozenset(NAMES)

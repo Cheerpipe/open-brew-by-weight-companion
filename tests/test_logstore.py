@@ -53,10 +53,14 @@ def version_1(path):
         pragma user_version = 1;
     """)
     for sequence in (1, 2, 3, 8):
-        connection.execute("insert into log_events values (?, 7, ?, 0, 0, 'i', 'state', 'x')", (DEVICE, sequence))
+        connection.execute(
+            "insert into log_events values (?, 7, ?, 0, 0, 'i', 'state', 'x')", (DEVICE, sequence)
+        )
     connection.execute("insert into log_marks values (?, 7, 3, 'gap', 4, 0)", (DEVICE,))
     connection.execute("insert into log_marks values (?, 7, 0, 'reset', 0, 0)", (DEVICE,))
-    connection.execute("insert into log_marks values (?, 6, 9, 'gap', 2, 0)", (DEVICE,))  # Hidden in v1: dropped.
+    connection.execute(
+        "insert into log_marks values (?, 6, 9, 'gap', 2, 0)", (DEVICE,)
+    )  # Hidden in v1: dropped.
     connection.close()
 
 
@@ -88,11 +92,17 @@ def version_3(path):
     the closed generation 1 (12 too), and an exclusion."""
     connection = sqlite3.connect(path, isolation_level=None)
     connection.executescript(TABLES + RENAME + ARCHIVE_V3 + "pragma user_version = 3;")
-    connection.execute("insert into archive_sync values (?, 'shots', 1, 5, 1, '[]', null, null)", (DEVICE,))
-    connection.execute("insert into archive_sync values (?, 'shots', 2, 9, 10, '[]', 1789000000, null)", (DEVICE,))
+    connection.execute(
+        "insert into archive_sync values (?, 'shots', 1, 5, 1, '[]', null, null)", (DEVICE,)
+    )
+    connection.execute(
+        "insert into archive_sync values (?, 'shots', 2, 9, 10, '[]', 1789000000, null)", (DEVICE,)
+    )
     for generation, rid, kept in ((1, 12, 1), (2, 5, 1), (2, 12, 1), (2, 13, 0)):
-        connection.execute("insert into archive_records values (?, 'shots', ?, ?, '', 0, 'good', 0, ?, 0, '{}')",
-                           (DEVICE, generation, rid, kept))
+        connection.execute(
+            "insert into archive_records values (?, 'shots', ?, ?, '', 0, 'good', 0, ?, 0, '{}')",
+            (DEVICE, generation, rid, kept),
+        )
     connection.execute("insert into archive_traces values (?, 2, 12, 7, 12017, x'01')", (DEVICE,))
     connection.execute("insert into archive_exclusions values (?, 'shots', 2, 14, null)", (DEVICE,))
     connection.execute("insert into meta values ('archiveKeepDeleted', '1')")
@@ -104,7 +114,9 @@ def version_2(path):
     connection = sqlite3.connect(path, isolation_level=None)
     connection.executescript(TABLES + RENAME + "pragma user_version = 2;")
     connection.execute("insert into log_boots values (?, 1, 7)", (DEVICE,))
-    connection.execute("insert into log_events values (?, 1, 1, 7, 0, 0, 'i', 'state', 'kept')", (DEVICE,))
+    connection.execute(
+        "insert into log_events values (?, 1, 1, 7, 0, 0, 'i', 'state', 'kept')", (DEVICE,)
+    )
     connection.close()
 
 
@@ -132,11 +144,16 @@ async def main():
         await store.open()
         assert await sql(store, "pragma user_version") == [(4,)]
         assert await sql(store, "select message from log_events") == [("kept",)]
-        tables = {name for (name,) in await sql(store, "select name from sqlite_master where type = 'table'")}
+        tables = {
+            name
+            for (name,) in await sql(store, "select name from sqlite_master where type = 'table'")
+        }
         assert tables >= {"archive_records", "archive_traces", "archive_sync", "archive_holes"}
         assert "archive_exclusions" not in tables
-        assert {name for (name,) in await sql(store, "select name from sqlite_master where type = 'index'")} >= {
-            "log_events_wall", "log_events_category"}
+        assert {
+            name
+            for (name,) in await sql(store, "select name from sqlite_master where type = 'index'")
+        } >= {"log_events_wall", "log_events_category"}
         await store.close()
 
         # --- Version 3: kept records become ordinary archive-only rows (D7) ----------
@@ -146,24 +163,38 @@ async def main():
         store = LogStore(third)
         await store.open()
         assert await sql(store, "pragma user_version") == [(4,)]
-        assert await sql(store, "select generation, id from archive_records order by generation, id") == [
-            (0, 12), (1, 12), (2, 5), (2, 13)], "the open kept record the controller may list is set aside"
-        assert await sql(store, "select generation, id from archive_traces") == [(0, 12)], "with its trace"
-        assert "kept" not in [row[1] for row in await sql(store, "pragma table_info(archive_records)")]
-        assert not await sql(store, "select name from sqlite_master where name = 'archive_exclusions'")
+        assert await sql(
+            store, "select generation, id from archive_records order by generation, id"
+        ) == [(0, 12), (1, 12), (2, 5), (2, 13)], (
+            "the open kept record the controller may list is set aside"
+        )
+        assert await sql(store, "select generation, id from archive_traces") == [(0, 12)], (
+            "with its trace"
+        )
+        assert "kept" not in [
+            row[1] for row in await sql(store, "pragma table_info(archive_records)")
+        ]
+        assert not await sql(
+            store, "select name from sqlite_master where name = 'archive_exclusions'"
+        )
         assert await store.meta("archiveKeepDeleted") is None, "the retired switch goes too"
         await store.close()
 
         # --- A newer schema is refused, never relabeled -----------------------------
         newer = data / "newer"
         newer.mkdir()
-        sqlite3.connect(newer / "companion.db").execute("pragma user_version = 9").connection.close()
+        sqlite3.connect(newer / "companion.db").execute(
+            "pragma user_version = 9"
+        ).connection.close()
         try:
             await LogStore(newer).open()
             raise AssertionError("a newer schema opened")
         except sqlite3.DatabaseError as error:
             assert "newer" in str(error)
-        assert sqlite3.connect(newer / "companion.db").execute("pragma user_version").fetchone()[0] == 9
+        assert (
+            sqlite3.connect(newer / "companion.db").execute("pragma user_version").fetchone()[0]
+            == 9
+        )
 
         store = LogStore(data)
         await store.open()
@@ -192,55 +223,117 @@ async def main():
         # --- A reused boot id is a new boot: nothing stored is overwritten ---------
         # `reset` (the controller could not resume the cursor) only comes from
         # an id it reused; the rows stay and the boundary is marked.
-        await store.apply(DEVICE, {"b": 10, "reset": True, "e": [event(8, text="reused"), event(11)]})
+        await store.apply(
+            DEVICE, {"b": 10, "reset": True, "e": [event(8, text="reused"), event(11)]}
+        )
         entries, _, _ = await store.page(DEVICE, FIRST_PAGE, FIRST_PAGE, 4)
         assert kinds(entries) == [11, 8, "reset", "boot", 9, 8, "gap"], entries
-        assert entries[1]["m"] == "reused" and entries[5]["m"] == "event 8", "the earlier boot's 8 is kept"
+        assert entries[1]["m"] == "reused" and entries[5]["m"] == "event 8", (
+            "the earlier boot's 8 is kept"
+        )
         assert await store.cursor(DEVICE) == (10, 11)
         # A boot id that comes back later (a counter a flash erase restarted) is new too.
         await store.apply(DEVICE, {"b": 7, "e": [event(1, text="again")]})
         assert await store.cursor(DEVICE) == (7, 1)
         entries, _, _ = await store.page(DEVICE, FIRST_PAGE, FIRST_PAGE, 2)
-        assert kinds(entries) == [1, "boot", 11] and entries[0]["m"] == "again" and entries[1]["boot"] == 7
+        assert (
+            kinds(entries) == [1, "boot", 11]
+            and entries[0]["m"] == "again"
+            and entries[1]["boot"] == 7
+        )
 
         # --- The export walks oldest first, every marker before its event -----------
         exported, cursor = [], (0, 0)
         while cursor is not None:
             chunk, cursor = await store.chunk(DEVICE, *cursor, limit=3)
             exported += chunk
-        assert kinds(exported) == [1, 2, 3, "boot", 1, 2, "boot", "gap", 8, 9, "boot", "reset", 8, 11,
-                                   "boot", 1], exported
+        assert kinds(exported) == [
+            1,
+            2,
+            3,
+            "boot",
+            1,
+            2,
+            "boot",
+            "gap",
+            8,
+            9,
+            "boot",
+            "reset",
+            8,
+            11,
+            "boot",
+            1,
+        ], exported
         assert [entry["boot"] for entry in exported if entry.get("g") == "boot"] == [9, 10, 10, 7]
 
         # --- Filters and a moment (D16): every page holds matching events only, the
         # markers stay where they belong, and a page can start at a wall time ------
         FILTER = "FF:FF:FF:FF:FF:01"
         wall = 1790000000
-        await store.apply(FILTER, {"b": 1, "e": [[1, 0, wall, "i", "state", "a"], [2, 0, wall + 10, "e", "ble", "b"],
-                                                 [3, 0, 0, "i", "ble", "unsynced"], [4, 0, wall + 30, "w", "state", "c"]]})
-        await store.apply(FILTER, {"b": 1, "miss": 2, "e": [[7, 0, wall + 60, "d", "state", "after gap"],
-                                                            [8, 0, wall + 70, "e", "ble", "d"]]})
+        await store.apply(
+            FILTER,
+            {
+                "b": 1,
+                "e": [
+                    [1, 0, wall, "i", "state", "a"],
+                    [2, 0, wall + 10, "e", "ble", "b"],
+                    [3, 0, 0, "i", "ble", "unsynced"],
+                    [4, 0, wall + 30, "w", "state", "c"],
+                ],
+            },
+        )
+        await store.apply(
+            FILTER,
+            {
+                "b": 1,
+                "miss": 2,
+                "e": [
+                    [7, 0, wall + 60, "d", "state", "after gap"],
+                    [8, 0, wall + 70, "e", "ble", "d"],
+                ],
+            },
+        )
         await store.apply(FILTER, {"b": 2, "e": [[1, 0, wall + 100, "i", "state", "boot 2"]]})
         entries, _, _ = await store.page(FILTER, FIRST_PAGE, FIRST_PAGE, 10, ("c", "e"))
         assert [e.get("m", e.get("g")) for e in entries] == ["boot", "d", "gap", "b"], entries
         entries, following, more = await store.page(FILTER, FIRST_PAGE, FIRST_PAGE, 1, None, "ble")
-        assert [e.get("m", e.get("g")) for e in entries] == ["boot", "d"] and more, "a page of one matching event"
+        assert [e.get("m", e.get("g")) for e in entries] == ["boot", "d"] and more, (
+            "a page of one matching event"
+        )
         entries, _, _ = await store.page(FILTER, *following, 10, None, "ble")
-        assert [e.get("m", e.get("g")) for e in entries] == ["gap", "unsynced", "b"], \
+        assert [e.get("m", e.get("g")) for e in entries] == ["gap", "unsynced", "b"], (
             "the gap stays by time though its event is filtered out; an unsynced event keeps its place"
+        )
         entries, _, _ = await store.page(FILTER, FIRST_PAGE, FIRST_PAGE, 10, None, None, wall + 35)
-        assert [e.get("m", e.get("g")) for e in entries] == ["c", "unsynced", "b", "a"], "starts at that moment"
-        assert await store.page(FILTER, FIRST_PAGE, FIRST_PAGE, 10, None, None, wall - 1) == ([], None, False)
+        assert [e.get("m", e.get("g")) for e in entries] == ["c", "unsynced", "b", "a"], (
+            "starts at that moment"
+        )
+        assert await store.page(FILTER, FIRST_PAGE, FIRST_PAGE, 10, None, None, wall - 1) == (
+            [],
+            None,
+            False,
+        )
         span = await store.bounds(FILTER, wall + 5, wall + 65)
         chunk, _ = await store.chunk(FILTER, *span[0], through=span[1])
-        assert [e.get("m", e.get("g")) for e in chunk] == ["b", "unsynced", "c", "gap", "after gap"], chunk
+        assert [e.get("m", e.get("g")) for e in chunk] == [
+            "b",
+            "unsynced",
+            "c",
+            "gap",
+            "after gap",
+        ], chunk
         assert await store.bounds(FILTER, wall + 200, None) is None
 
         # --- Size retention: another controller's rows go first, by their own key ---
         filler = "filler " * 30
         for batch in range(20):
-            await store.apply(OTHER, {"b": 3, "e": [event(batch * 100 + n, text=filler) for n in range(1, 101)]})
-            await store.apply(DEVICE, {"b": 12, "e": [event(batch * 100 + n, text=filler) for n in range(1, 101)]})
+            await store.apply(
+                OTHER, {"b": 3, "e": [event(batch * 100 + n, text=filler) for n in range(1, 101)]}
+            )
+            await store.apply(
+                DEVICE, {"b": 12, "e": [event(batch * 100 + n, text=filler) for n in range(1, 101)]}
+            )
         mine_before = (await store.stats(DEVICE))["rows"]
         assert (await store.stats(DEVICE))["bytes"] > 1048576, "the filler filled"
         assert await store.prune(days=3650, megabytes=1, device=DEVICE) > 0
@@ -248,25 +341,44 @@ async def main():
         others, mine = (await store.stats(OTHER))["rows"], (await store.stats(DEVICE))["rows"]
         assert others == 0 or mine == mine_before, (others, mine, mine_before)
         assert (await store.cursor(DEVICE))[0] == 12, "the newest events survive the trim"
-        assert not await sql(store, "select * from log_marks where not exists (select 1 from log_events e "
-                                    "where e.device_id = log_marks.device_id and e.ordinal = log_marks.ordinal "
-                                    "and e.sequence = log_marks.sequence)"), "marks go with their events"
-        assert await sql(store, "select count(*) from log_boots where device_id = ?", OTHER) == [(1,)], \
-            "an emptied boot goes, except a controller's newest"
+        assert not await sql(
+            store,
+            "select * from log_marks where not exists (select 1 from log_events e "
+            "where e.device_id = log_marks.device_id and e.ordinal = log_marks.ordinal "
+            "and e.sequence = log_marks.sequence)",
+        ), "marks go with their events"
+        assert await sql(store, "select count(*) from log_boots where device_id = ?", OTHER) == [
+            (1,)
+        ], "an emptied boot goes, except a controller's newest"
 
         # --- The archive beside it is not the log's: its size never prunes the log --
         log_rows = (await store.stats(DEVICE))["rows"]
-        await offload(lambda: store.connection.executemany(
-            "insert into archive_records values (?, 'shots', 1, ?, '', 0, 'good', 0, 0, ?)",
-            [(DEVICE, n, "x" * 4000) for n in range(1, 600)]))
+        await offload(
+            lambda: store.connection.executemany(
+                "insert into archive_records values (?, 'shots', 1, ?, '', 0, 'good', 0, 0, ?)",
+                [(DEVICE, n, "x" * 4000) for n in range(1, 600)],
+            )
+        )
         assert await store.prune(days=3650, megabytes=1, device=DEVICE) == 0
-        assert (await store.stats(DEVICE))["rows"] == log_rows and (await store.stats(DEVICE))["bytes"] <= 1048576
+        assert (await store.stats(DEVICE))["rows"] == log_rows and (await store.stats(DEVICE))[
+            "bytes"
+        ] <= 1048576
 
         # --- Age retention: dated events go; events without a clock stay ------------
-        await store.apply(DEVICE, {"b": 13, "e": [[1, 10, 0, "i", "state", "no clock yet"],
-                                                  [2, 20, 1000, "i", "state", "1970"]]})
+        await store.apply(
+            DEVICE,
+            {
+                "b": 13,
+                "e": [
+                    [1, 10, 0, "i", "state", "no clock yet"],
+                    [2, 20, 1000, "i", "state", "1970"],
+                ],
+            },
+        )
         await store.prune(days=30, megabytes=50, device=DEVICE)
-        rows = await sql(store, "select sequence from log_events where device_id = ? and boot_id = 13", DEVICE)
+        rows = await sql(
+            store, "select sequence from log_events where device_id = ? and boot_id = 13", DEVICE
+        )
         assert rows == [(1,)], rows
 
         # --- Access grants persist until refused ------------------------------------
@@ -278,8 +390,10 @@ async def main():
         # --- A backup is a consistent store of its own ------------------------------
         await store.backup()
         copy = sqlite3.connect(data / "companion.db.backup")
-        assert copy.execute("select count(*) from log_events").fetchone()[0] == \
-            (await sql(store, "select count(*) from log_events"))[0][0]
+        assert (
+            copy.execute("select count(*) from log_events").fetchone()[0]
+            == (await sql(store, "select count(*) from log_events"))[0][0]
+        )
         copy.close()
         assert not (data / "companion.db.backup.partial").exists()
 
@@ -288,10 +402,14 @@ async def main():
         await store.erase(history_only=True)
         assert (await store.stats(DEVICE))["rows"] == 0 and await store.meta("device") == DEVICE
         assert "abc" in await store.grants()
-        assert await sql(store, "select count(*) from archive_records") == [(599,)], "Delete history is the log's"
+        assert await sql(store, "select count(*) from archive_records") == [(599,)], (
+            "Delete history is the log's"
+        )
         await store.erase()
         assert await store.meta("device") is None and not await store.grants()
-        assert await sql(store, "select count(*) from archive_records") == [(0,)], "Forget takes the archive too"
+        assert await sql(store, "select count(*) from archive_records") == [(0,)], (
+            "Forget takes the archive too"
+        )
         assert not (data / "companion.db.backup").exists()
         await store.close()
     print("Companion log store: migration, markers, export, retention, erase, backup and access OK")

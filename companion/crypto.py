@@ -42,7 +42,9 @@ def scalar(key):
 
 def public_point(key):
     """65-byte uncompressed P-256 point."""
-    return key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    return key.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+    )
 
 
 def load_point(raw):
@@ -70,7 +72,9 @@ def commitment(companion_key):
 
 def sas(companion_key, controller_key):
     """Six-digit verification code the user types in Admin → Companion."""
-    value = int.from_bytes(sha256(b"obbw-companion-sas-v1", companion_key, controller_key)[:4], "big")
+    value = int.from_bytes(
+        sha256(b"obbw-companion-sas-v1", companion_key, controller_key)[:4], "big"
+    )
     return f"{value % 1000000:06d}"
 
 
@@ -88,7 +92,9 @@ def credentials_key(secret):
 
 
 def decrypt_credentials(secret, generation, iv, ciphertext):
-    return AESGCM(credentials_key(secret)).decrypt(iv, ciphertext, f"obbw-creds|{generation}".encode())
+    return AESGCM(credentials_key(secret)).decrypt(
+        iv, ciphertext, f"obbw-creds|{generation}".encode()
+    )
 
 
 def relay_key(secret, challenge, nonce):

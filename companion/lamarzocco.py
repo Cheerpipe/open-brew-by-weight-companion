@@ -32,7 +32,14 @@ PING_S = 15
 PONG_TIMEOUT_S = 30
 SUBSCRIBE_TIMEOUT_S = 10
 CONNECT_TIMEOUT_S = 25
-RETRY_S = (0, 1, 3, 6, 9, 60)  # An immediate first retry, then the controller's delays and cooldown.
+RETRY_S = (
+    0,
+    1,
+    3,
+    6,
+    9,
+    60,
+)  # An immediate first retry, then the controller's delays and cooldown.
 COMMANDS = {
     "temp": "CoffeeMachineSettingCoffeeBoilerTargetTemperature",
     "standby": "CoffeeMachineChangeMode",
@@ -74,16 +81,22 @@ class Installation:
     def __init__(self, key):
         self.key = key
         self.id = _uuid(crypto.sha256(crypto.scalar(key)))
-        self.public_der = key.public_key().public_bytes(serialization.Encoding.DER,
-                                                        serialization.PublicFormat.SubjectPublicKeyInfo)
+        self.public_der = key.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
         self.public_b64 = crypto.b64(self.public_der)
         id_hash = crypto.b64(crypto.sha256(self.id.encode()))
         self.secret = crypto.sha256(f"{self.id}.{self.public_b64}.{id_hash}".encode())
 
     def registration(self):
         """Headers and body of POST /auth/init."""
-        proof = request_proof(f"{self.id}.{crypto.b64(crypto.sha256(self.public_der))}", self.secret)
-        return {"X-App-Installation-Id": self.id, "X-Request-Proof": proof}, f'{{"pk":"{self.public_b64}"}}'
+        proof = request_proof(
+            f"{self.id}.{crypto.b64(crypto.sha256(self.public_der))}", self.secret
+        )
+        return {
+            "X-App-Installation-Id": self.id,
+            "X-Request-Proof": proof,
+        }, f'{{"pk":"{self.public_b64}"}}'
 
     def signed_headers(self):
         nonce = str(uuid.uuid4())
@@ -91,12 +104,23 @@ class Installation:
         base = f"{self.id}.{nonce}.{timestamp}"
         message = f"{base}.{request_proof(base, self.secret)}".encode()
         signature = self.key.sign(message, ec.ECDSA(hashes.SHA256()))
-        return {"X-App-Installation-Id": self.id, "X-Timestamp": timestamp, "X-Nonce": nonce,
-                "X-Request-Signature": crypto.b64(signature)}
+        return {
+            "X-App-Installation-Id": self.id,
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "X-Request-Signature": crypto.b64(signature),
+        }
 
 
 def stomp_frame(command, headers, body=""):
-    return command + "\n" + "".join(f"{key}:{value}\n" for key, value in headers.items()) + "\n" + body + "\0"
+    return (
+        command
+        + "\n"
+        + "".join(f"{key}:{value}\n" for key, value in headers.items())
+        + "\n"
+        + body
+        + "\0"
+    )
 
 
 def stomp_parse(frame):
@@ -208,7 +232,9 @@ class LaMarzocco:
     def _done(self, task):
         self.tasks.discard(task)
         if not task.cancelled() and task.exception():
-            log("La Marzocco task failed:\n" + "".join(traceback.format_exception(task.exception())))
+            log(
+                "La Marzocco task failed:\n" + "".join(traceback.format_exception(task.exception()))
+            )
 
     def _set_subscribed(self, subscribed):
         if subscribed:
@@ -222,8 +248,11 @@ class LaMarzocco:
         """Reads or commands answered 401/403: the subscription lives, but the data plane does not."""
         if refused != self.refused:
             self.refused = refused
-            log("La Marzocco answers 401/403 to reads and commands; the subscription still lives"
-                if refused else "La Marzocco accepts reads and commands again")
+            log(
+                "La Marzocco answers 401/403 to reads and commands; the subscription still lives"
+                if refused
+                else "La Marzocco accepts reads and commands again"
+            )
             self.events.upstream()
 
     async def _run(self):
@@ -241,11 +270,19 @@ class LaMarzocco:
             except AuthRejected:
                 self._reject()
                 return
-            except (TransportError, aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError) as error:
+            except (
+                TransportError,
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                ValueError,
+                OSError,
+            ) as error:
                 self._set_subscribed(False)
                 delay = RETRY_S[min(attempt, len(RETRY_S) - 1)]
                 attempt = attempt + 1 if attempt < len(RETRY_S) - 1 else 0
-                log(f"La Marzocco connection lost ({error or type(error).__name__}); retrying in {delay} s")
+                log(
+                    f"La Marzocco connection lost ({error or type(error).__name__}); retrying in {delay} s"
+                )
                 await asyncio.sleep(delay)
 
     def _reject(self):
@@ -270,9 +307,14 @@ class LaMarzocco:
         if body is not None:
             headers["Content-Type"] = "application/json"
         try:
-            async with self.http.request(method, self.api_root + path, data=body, headers=headers,
-                                         allow_redirects=False,
-                                         timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)) as reply:
+            async with self.http.request(
+                method,
+                self.api_root + path,
+                data=body,
+                headers=headers,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S),
+            ) as reply:
                 return reply.status, await reply.text()
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
             why = clip(f"{type(error).__name__}: {error}")
@@ -280,7 +322,9 @@ class LaMarzocco:
 
     def _tokens(self, text):
         tokens = dashboard.parse(text)
-        if not isinstance(tokens.get("accessToken"), str) or not isinstance(tokens.get("refreshToken"), str):
+        if not isinstance(tokens.get("accessToken"), str) or not isinstance(
+            tokens.get("refreshToken"), str
+        ):
             raise TransportError("sign-in answer without tokens")
         self.access, self.refresh = tokens["accessToken"], tokens["refreshToken"]
         self.issued_at = time.monotonic()
@@ -288,7 +332,9 @@ class LaMarzocco:
     async def _sign_in(self):
         account = await offload(self.store.credentials) or {}
         if not (await offload(self.store.installation_key))[1]:
-            status, text = await self._request("POST", "/auth/init", authenticated=False, registration=True)
+            status, text = await self._request(
+                "POST", "/auth/init", authenticated=False, registration=True
+            )
             if not 200 <= status < 300:
                 raise TransportError(_answered("installation registration", status, text))
             await offload(self.store.installation_registered)
@@ -313,11 +359,13 @@ class LaMarzocco:
                 account = await offload(self.store.credentials) or {}
                 body = json.dumps({"username": account.get("email"), "refreshToken": self.refresh})
                 try:
-                    status, text = await self._request("POST", "/auth/refreshtoken", body, authenticated=False)
+                    status, text = await self._request(
+                        "POST", "/auth/refreshtoken", body, authenticated=False
+                    )
                     if status == 200:
                         self._tokens(text)
                         refreshed = True
-                except (TransportError, ValueError):
+                except TransportError, ValueError:
                     pass
             if not refreshed:
                 self.access = None
@@ -335,7 +383,9 @@ class LaMarzocco:
                 self._reject()
                 return
             except (TransportError, ValueError) as error:
-                log(f"La Marzocco token renewal failed ({error}); trying again in {RENEW_RETRY_S} s")
+                log(
+                    f"La Marzocco token renewal failed ({error}); trying again in {RENEW_RETRY_S} s"
+                )
                 await asyncio.sleep(RENEW_RETRY_S)
                 continue
             self.events.renewed()
@@ -364,19 +414,28 @@ class LaMarzocco:
         try:
             return status, dashboard.parse(text) if status == 200 else None, ac
         except ValueError as error:
-            log(f"La Marzocco sent a dashboard the controller could not decode ({clip(error)}); dropped")
+            log(
+                f"La Marzocco sent a dashboard the controller could not decode ({clip(error)}); dropped"
+            )
             return status, None, ac
 
     async def command(self, command_id, op, value=None):
         """Send one command; returns its HTTP status (0 for a transport failure)."""
         if not self._usable():
             return 0
-        body = (f'{{"boilerIndex":1,"targetTemperature":{value // 10}.{value % 10}}}' if op == "temp"
-                else '{"mode":"StandBy"}' if op == "standby" else '{"mode":"BrewingMode"}')
+        body = (
+            f'{{"boilerIndex":1,"targetTemperature":{value // 10}.{value % 10}}}'
+            if op == "temp"
+            else '{"mode":"StandBy"}'
+            if op == "standby"
+            else '{"mode":"BrewingMode"}'
+        )
         self.last_command = command_id
         try:
             await self._session()
-            status, _ = await self._request("POST", f"/things/{self.account[2]}/command/{COMMANDS[op]}", body)
+            status, _ = await self._request(
+                "POST", f"/things/{self.account[2]}/command/{COMMANDS[op]}", body
+            )
         except AuthRejected:
             self._reject()
             return 0
@@ -409,25 +468,43 @@ class LaMarzocco:
         destination, subscription = f"/ws/sn/{serial}/dashboard", "companion"
         headers = {"User-Agent": "OpenBrewByWeight/1", **self.installation.signed_headers()}
         try:
-            ws = await asyncio.wait_for(self.http.ws_connect(self.ws_url, headers=headers, autoping=False),
-                                        CONNECT_TIMEOUT_S)
+            ws = await asyncio.wait_for(
+                self.http.ws_connect(self.ws_url, headers=headers, autoping=False),
+                CONNECT_TIMEOUT_S,
+            )
         except aiohttp.WSServerHandshakeError as error:
             if error.status in (401, 403):
                 self.access = None
             raise TransportError(f"WebSocket upgrade answered {error.status}") from None
         async with ws:
-            await ws.send_str(stomp_frame("CONNECT", {"host": STOMP_HOST, "accept-version": "1.2,1.1",
-                                                      "heart-beat": "0,0", "Authorization": f"Bearer {self.access}"}))
+            await ws.send_str(
+                stomp_frame(
+                    "CONNECT",
+                    {
+                        "host": STOMP_HOST,
+                        "accept-version": "1.2,1.1",
+                        "heart-beat": "0,0",
+                        "Authorization": f"Bearer {self.access}",
+                    },
+                )
+            )
             connected_at = next_ping = time.monotonic()
             next_ping += PING_S
             buffer = ""
             try:
                 while True:
                     now = time.monotonic()
-                    deadline = self.alive_at + PONG_TIMEOUT_S if self.sub else connected_at + SUBSCRIBE_TIMEOUT_S
+                    deadline = (
+                        self.alive_at + PONG_TIMEOUT_S
+                        if self.sub
+                        else connected_at + SUBSCRIBE_TIMEOUT_S
+                    )
                     if now >= deadline:
-                        raise TransportError(f"no pong within {PONG_TIMEOUT_S} s" if self.sub
-                                             else f"no CONNECTED frame within {SUBSCRIBE_TIMEOUT_S} s")
+                        raise TransportError(
+                            f"no pong within {PONG_TIMEOUT_S} s"
+                            if self.sub
+                            else f"no CONNECTED frame within {SUBSCRIBE_TIMEOUT_S} s"
+                        )
                     try:
                         message = await ws.receive(timeout=min(deadline, next_ping) - now)
                     except asyncio.TimeoutError:
@@ -442,12 +519,20 @@ class LaMarzocco:
                         self.alive_at = time.monotonic()
                         continue
                     if message.type not in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
-                        why = type(message.data).__name__ if isinstance(message.data, BaseException) else \
-                            f"code {message.data if isinstance(message.data, int) else ws.close_code}"
-                        idle = (f"{time.monotonic() - self.last_message_at:.0f} s since its last message"
-                                if self.last_message_at else "no message ever arrived")
+                        why = (
+                            type(message.data).__name__
+                            if isinstance(message.data, BaseException)
+                            else f"code {message.data if isinstance(message.data, int) else ws.close_code}"
+                        )
+                        idle = (
+                            f"{time.monotonic() - self.last_message_at:.0f} s since its last message"
+                            if self.last_message_at
+                            else "no message ever arrived"
+                        )
                         raise TransportError(f"La Marzocco closed the WebSocket ({why}, {idle})")
-                    buffer += message.data if isinstance(message.data, str) else message.data.decode()
+                    buffer += (
+                        message.data if isinstance(message.data, str) else message.data.decode()
+                    )
                     *frames, buffer = buffer.split("\0")
                     for frame in frames:
                         await self._stomp(ws, frame, destination, subscription)
@@ -460,12 +545,25 @@ class LaMarzocco:
             return
         command, headers, body = parsed
         if command == "CONNECTED" and not self.sub and headers.get("version") in ("1.2", "1.1"):
-            await ws.send_str(stomp_frame("SUBSCRIBE", {"destination": destination, "ack": "auto",
-                                                        "id": subscription, "content-length": "0"}))
+            await ws.send_str(
+                stomp_frame(
+                    "SUBSCRIBE",
+                    {
+                        "destination": destination,
+                        "ack": "auto",
+                        "id": subscription,
+                        "content-length": "0",
+                    },
+                )
+            )
             self._set_subscribed(True)
             self.events.subscribed()
-        elif command == "MESSAGE" and self.sub and headers.get("destination") == destination \
-                and headers.get("subscription") == subscription:
+        elif (
+            command == "MESSAGE"
+            and self.sub
+            and headers.get("destination") == destination
+            and headers.get("subscription") == subscription
+        ):
             self.last_message_at = time.monotonic()
             self.events.pushed(dashboard.parse(body), self.last_command)
         else:
@@ -475,4 +573,3 @@ class LaMarzocco:
 def _identity(account):
     """What makes a different La Marzocco session: email, password and machine serial."""
     return (account["email"], account["password"], account["serial"]) if account else None
-

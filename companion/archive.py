@@ -58,14 +58,27 @@ REQUEST_S = 300  # A request unanswered this long is asked again (a long hold on
 TRACE_RETRY_S = 60
 RUN_GAP = 3  # Unwanted rows a fetch window may span to join two runs of wanted ones.
 NAMES = {"shots": "shot", "history": "activation"}
-HISTORY_IDENT = ("type", "durationS", "hasWallTime", "noWeight", "endedAtUnixSec", "endedAtLocalSec")
+HISTORY_IDENT = (
+    "type",
+    "durationS",
+    "hasWallTime",
+    "noWeight",
+    "endedAtUnixSec",
+    "endedAtLocalSec",
+)
 # Archive-only: a closed generation, or below the open one's oldest (rotated out of the controller).
 ONLY = "(r.generation < :open or (s.oldest is not null and r.id < s.oldest))"
-JOIN = ("archive_records r left join archive_sync s on s.device_id = r.device_id and s.store = r.store "
-        "and s.generation = r.generation")
+JOIN = (
+    "archive_records r left join archive_sync s on s.device_id = r.device_id and s.store = r.store "
+    "and s.generation = r.generation"
+)
 COLUMNS = "(device_id, store, generation, id, ident, rev, kind, bad, ended_at, body)"
 # Only what the Stats header reads, never the curve.
-HEADER_FIELDS = "json_object(" + ", ".join(f"'{name}', json_extract(body, '$.{name}')" for name in stats.FIELDS) + ")"
+HEADER_FIELDS = (
+    "json_object("
+    + ", ".join(f"'{name}', json_extract(body, '$.{name}')" for name in stats.FIELDS)
+    + ")"
+)
 
 
 class Gone(Exception):
@@ -83,14 +96,20 @@ class Unavailable(Exception):
 def ident(store, fields):
     if store == "shots":
         return f"{fields.get('bootId')}:{fields.get('endedAtMs')}"
-    return ":".join(str(fields.get(key, False if key == "noWeight" else None)) for key in HISTORY_IDENT)
+    return ":".join(
+        str(fields.get(key, False if key == "noWeight" else None)) for key in HISTORY_IDENT
+    )
 
 
 def windows(positions, most):
     """Fetch windows (offset, count) covering the wanted index positions, runs joined across small gaps."""
     runs = []
     for position in sorted(positions):
-        if runs and position - runs[-1][0] < most and position - (runs[-1][0] + runs[-1][1]) < RUN_GAP:
+        if (
+            runs
+            and position - runs[-1][0] < most
+            and position - (runs[-1][0] + runs[-1][1]) < RUN_GAP
+        ):
             runs[-1][1] = position - runs[-1][0] + 1
         else:
             runs.append([position, 1])
@@ -117,21 +136,27 @@ class ArchiveStore:
 
     async def _user(self, work):
         """A change the user made: any sync pass in flight starts over, cached answers go."""
-        self.revision += 1  # Before the work is queued: a pass's next write sees it (the disk thread is serial).
+        self.revision += (
+            1  # Before the work is queued: a pass's next write sees it (the disk thread is serial).
+        )
         result = await self._call(work)
         for callback in self.changed:
             callback()
         return result
 
     def _open(self, device, store):
-        row = self.connection.execute("select max(generation) from archive_sync where device_id = ? and store = ?",
-                                      (device, store)).fetchone()
+        row = self.connection.execute(
+            "select max(generation) from archive_sync where device_id = ? and store = ?",
+            (device, store),
+        ).fetchone()
         return row[0] or 1
 
     def _sync_row(self, device, store, generation):
         return self.connection.execute(
             "select epoch, oldest, listed, restarted, counters from archive_sync where device_id = ? "
-            "and store = ? and generation = ?", (device, store, generation)).fetchone()
+            "and store = ? and generation = ?",
+            (device, store, generation),
+        ).fetchone()
 
     def _write(self, statement, args):
         with self.connection:
@@ -141,28 +166,46 @@ class ArchiveStore:
     async def sync_state(self, device, store):
         """(open generation, epoch, oldest, last listed ids, last counters) of one store; the open
         generation always has its sync row, so rows never land in one without it."""
+
         def read():
             generation = self._open(device, store)
             row = self._sync_row(device, store, generation)
             if row is None:
                 with self.connection:
-                    self.connection.execute("insert into archive_sync values (?, ?, ?, 0, null, '[]', null, null)",
-                                            (device, store, generation))
+                    self.connection.execute(
+                        "insert into archive_sync values (?, ?, ?, 0, null, '[]', null, null)",
+                        (device, store, generation),
+                    )
                 return generation, 0, None, [], None
-            return (generation, row["epoch"], row["oldest"], json.loads(row["listed"]),
-                    json.loads(row["counters"]) if row["counters"] else None)
+            return (
+                generation,
+                row["epoch"],
+                row["oldest"],
+                json.loads(row["listed"]),
+                json.loads(row["counters"]) if row["counters"] else None,
+            )
+
         return await self._call(read)
 
     async def records(self, device, store, generation):
         """{id: (ident, rev)} of one generation."""
-        return await self._call(lambda: {row["id"]: (row["ident"], row["rev"]) for row in self.connection.execute(
-            "select id, ident, rev from archive_records where device_id = ? and store = ? and generation = ?",
-            (device, store, generation))})
+        return await self._call(
+            lambda: {
+                row["id"]: (row["ident"], row["rev"])
+                for row in self.connection.execute(
+                    "select id, ident, rev from archive_records where device_id = ? and store = ? and generation = ?",
+                    (device, store, generation),
+                )
+            }
+        )
 
     def _aside(self, device, store, generation, record_id):
         """Set a record aside (generation 0 or below, archive-only) instead of overwriting it."""
-        lowest = self.connection.execute("select min(generation) from archive_records where device_id = ? "
-                                         "and store = ? and id = ?", (device, store, record_id)).fetchone()[0]
+        lowest = self.connection.execute(
+            "select min(generation) from archive_records where device_id = ? "
+            "and store = ? and id = ?",
+            (device, store, record_id),
+        ).fetchone()[0]
         target = min(lowest, 1) - 1
         for table in ("archive_records", "archive_traces"):
             if table == "archive_traces" and store != "shots":
@@ -170,115 +213,191 @@ class ArchiveStore:
             self.connection.execute(
                 f"update {table} set generation = ? where device_id = ? and generation = ? and id = ?"
                 + (" and store = ?" if table == "archive_records" else ""),
-                (target, device, generation, record_id) + ((store,) if table == "archive_records" else ()))
+                (target, device, generation, record_id)
+                + ((store,) if table == "archive_records" else ()),
+            )
 
     async def put(self, device, store, generation, rows):
         """Rows as (id, ident, rev, fields, curve). A stored record with another identity is never
         overwritten: it is set aside first, with its trace."""
+
         def write():
             with self.connection:
                 for record_id, identity, rev, fields, curve in rows:
                     old = self.connection.execute(
                         "select ident, body from archive_records where device_id = ? and store = ? "
-                        "and generation = ? and id = ?", (device, store, generation, record_id)).fetchone()
+                        "and generation = ? and id = ?",
+                        (device, store, generation, record_id),
+                    ).fetchone()
                     body = {**fields, **curve}
                     if old and old["ident"] == identity:
                         before = json.loads(old["body"])
-                        if not curve.get("wD") and before.get("wD"):  # A recycled curve: keep the copy.
+                        if not curve.get("wD") and before.get(
+                            "wD"
+                        ):  # A recycled curve: keep the copy.
                             body = {**before, **fields}
                     elif old:
                         self._aside(device, store, generation, record_id)
-                    kind = (fields.get("badReason") or "good") if store == "shots" else str(fields.get("type"))
+                    kind = (
+                        (fields.get("badReason") or "good")
+                        if store == "shots"
+                        else str(fields.get("type"))
+                    )
                     ended = fields.get("endedAtUnixSec") if fields.get("hasWallTime") else 0
                     self.connection.execute(
                         f"insert or replace into archive_records {COLUMNS} values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (device, store, generation, record_id, identity, rev, kind,
-                         int(store == "shots" and bool(fields.get("badReason"))),
-                         ended if isinstance(ended, int) else 0, json.dumps(body, separators=(",", ":"))))
+                        (
+                            device,
+                            store,
+                            generation,
+                            record_id,
+                            identity,
+                            rev,
+                            kind,
+                            int(store == "shots" and bool(fields.get("badReason"))),
+                            ended if isinstance(ended, int) else 0,
+                            json.dumps(body, separators=(",", ":")),
+                        ),
+                    )
+
         await self._call(write)
 
     def _drop_traces(self, device, generation, ids):
-        self.connection.executemany("delete from archive_traces where device_id = ? and generation = ? and id = ?",
-                                    ((device, generation, record_id) for record_id in ids))
+        self.connection.executemany(
+            "delete from archive_traces where device_id = ? and generation = ? and id = ?",
+            ((device, generation, record_id) for record_id in ids),
+        )
 
     async def forget_deleted(self, device, store, generation, ids):
         """Records the user deleted on the controller: gone from the archive too."""
+
         def write():
             with self.connection:
-                self.connection.executemany("delete from archive_records where device_id = ? and store = ? "
-                                            "and generation = ? and id = ?",
-                                            [(device, store, generation, rid) for rid in ids])
+                self.connection.executemany(
+                    "delete from archive_records where device_id = ? and store = ? "
+                    "and generation = ? and id = ?",
+                    [(device, store, generation, rid) for rid in ids],
+                )
                 if store == "shots":
                     self._drop_traces(device, generation, ids)
+
         await self._call(write)
 
     async def restart(self, device, store, generation, counters, cleared=False):
         """Close `generation` and open the next, which starts from the controller's `counters`; after a
         Clear the user made (`cleared`), every generation of the store goes first. Returns how many records
         the closed generation keeps, or how many a Clear deleted."""
+
         def write():
             with self.connection:
                 count = self.connection.execute(
                     "select count(*) from archive_records where device_id = ? and store = ?"
                     + ("" if cleared else " and generation = ?"),
-                    (device, store) + (() if cleared else (generation,))).fetchone()[0]
+                    (device, store) + (() if cleared else (generation,)),
+                ).fetchone()[0]
                 if cleared:
                     if store == "shots":
-                        self.connection.execute("delete from archive_traces where device_id = ?", (device,))
+                        self.connection.execute(
+                            "delete from archive_traces where device_id = ?", (device,)
+                        )
                     for table in ("archive_records", "archive_holes", "archive_sync"):
-                        self.connection.execute(f"delete from {table} where device_id = ? and store = ?",
-                                                (device, store))
-                self.connection.execute("insert into archive_sync values (?, ?, ?, 0, null, '[]', ?, ?)",
-                                        (device, store, generation + 1, time.time(),
-                                         json.dumps(counters) if counters else None))
+                        self.connection.execute(
+                            f"delete from {table} where device_id = ? and store = ?",
+                            (device, store),
+                        )
+                self.connection.execute(
+                    "insert into archive_sync values (?, ?, ?, 0, null, '[]', ?, ?)",
+                    (
+                        device,
+                        store,
+                        generation + 1,
+                        time.time(),
+                        json.dumps(counters) if counters else None,
+                    ),
+                )
                 return count
+
         count = await self._call(write)
         self.synced += 1
         return count
 
     async def adopt(self, device, store, generation, epoch, oldest, listed, counters):
         """A complete sync: its epoch, the controller's oldest id, the ids it listed and its counters."""
+
         def write():
             row = self._sync_row(device, store, generation)
-            self._write("insert or replace into archive_sync values (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (device, store, generation, epoch, oldest, json.dumps(listed),
-                         row["restarted"] if row else None,
-                         json.dumps(counters) if counters else row["counters"] if row else None))
+            self._write(
+                "insert or replace into archive_sync values (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    device,
+                    store,
+                    generation,
+                    epoch,
+                    oldest,
+                    json.dumps(listed),
+                    row["restarted"] if row else None,
+                    json.dumps(counters) if counters else row["counters"] if row else None,
+                ),
+            )
+
         await self._call(write)
         self.synced += 1
 
     async def hole(self, device, store, generation, below, above):
-        await self._call(self._write, "insert or ignore into archive_holes values (?, ?, ?, ?, ?, ?, ?)",
-                         (device, store, generation, below, above, above - below - 1, time.time()))
+        await self._call(
+            self._write,
+            "insert or ignore into archive_holes values (?, ?, ?, ?, ?, ?, ?)",
+            (device, store, generation, below, above, above - below - 1, time.time()),
+        )
 
     async def missing_traces(self, device, limit=20):
         """The open generation's shots (id, bootId, endedAtMs) without a trace row, newest first."""
+
         def read():
             rows = self.connection.execute(
                 "select r.id, r.ident from archive_records r where r.device_id = ? and r.store = 'shots' "
                 "and r.generation = ? and r.ident glob '[0-9]*:[0-9]*' and r.ident not glob '*[^0-9:]*' "
                 "and not exists (select 1 from archive_traces t where t.device_id = r.device_id "
                 "and t.generation = r.generation and t.id = r.id) order by r.id desc limit ?",
-                (device, self._open(device, "shots"), limit)).fetchall()
+                (device, self._open(device, "shots"), limit),
+            ).fetchall()
             return [(row["id"], *map(int, row["ident"].split(":"))) for row in rows]
+
         return await self._call(read)
 
     async def put_trace(self, device, record_id, boot, end, data):
-        await self._call(lambda: self._write("insert or replace into archive_traces values (?, ?, ?, ?, ?, ?)",
-                                             (device, self._open(device, "shots"), record_id, boot, end, data)))
+        await self._call(
+            lambda: self._write(
+                "insert or replace into archive_traces values (?, ?, ?, ?, ?, ?)",
+                (device, self._open(device, "shots"), record_id, boot, end, data),
+            )
+        )
 
     # --- Reading ---------------------------------------------------------------
     def _generations(self, device, store):
         opened = self._open(device, store)
-        restarted = dict(self.connection.execute(
-            "select generation, restarted from archive_sync where device_id = ? and store = ?", (device, store)))
-        counts = dict(self.connection.execute(
-            "select generation, count(*) from archive_records where device_id = ? and store = ? "
-            "group by generation", (device, store)))
-        return [{"generation": generation, "count": counts.get(generation, 0),
-                 "restartedAt": int(restarted[generation]) if restarted.get(generation) else None,
-                 "current": generation == opened}
-                for generation in sorted(set(restarted) | set(counts) | {opened}, reverse=True)]
+        restarted = dict(
+            self.connection.execute(
+                "select generation, restarted from archive_sync where device_id = ? and store = ?",
+                (device, store),
+            )
+        )
+        counts = dict(
+            self.connection.execute(
+                "select generation, count(*) from archive_records where device_id = ? and store = ? "
+                "group by generation",
+                (device, store),
+            )
+        )
+        return [
+            {
+                "generation": generation,
+                "count": counts.get(generation, 0),
+                "restartedAt": int(restarted[generation]) if restarted.get(generation) else None,
+                "current": generation == opened,
+            }
+            for generation in sorted(set(restarted) | set(counts) | {opened}, reverse=True)
+        ]
 
     def _order(self, store, sort, direction):
         """The sort key as SQL expressions, compared ascending: the controller's date order is its id
@@ -286,19 +405,31 @@ class ArchiveStore:
         the rating, then the newest first (shotLogCompareRatingOrder)."""
         if sort == "rating":
             rating = "coalesce(json_extract(r.body, '$.rating'), 0)"
-            return [f"({rating} = 0)", rating if direction == "asc" else f"-{rating}", "-r.generation", "-r.id"]
+            return [
+                f"({rating} = 0)",
+                rating if direction == "asc" else f"-{rating}",
+                "-r.generation",
+                "-r.id",
+            ]
         return ["r.generation", "r.id"] if direction == "asc" else ["-r.generation", "-r.id"]
 
     def _filter(self, device, store, query, args):
         """The WHERE clause of the controller's own filter (shotListFilterMatches, History types)."""
         self.connection.create_function("obbw_scale_key", 1, stats.scale_key, deterministic=True)
         args.update(device=device, store=store, open=self._open(device, store))
-        where = "r.device_id = :device and r.store = :store" + ("" if query.get("all", True) else f" and {ONLY}")
+        where = "r.device_id = :device and r.store = :store" + (
+            "" if query.get("all", True) else f" and {ONLY}"
+        )
 
         def among(name, expression, values):
             nonlocal where
-            where += f" and {expression} in (" + ",".join(f":{name}{n}" for n in range(len(values))) + ")"
+            where += (
+                f" and {expression} in ("
+                + ",".join(f":{name}{n}" for n in range(len(values)))
+                + ")"
+            )
             args.update({f"{name}{n}": value for n, value in enumerate(values)})
+
         if store == "shots":
             if not query["bad"]:
                 where += " and r.bad = 0"
@@ -314,34 +445,59 @@ class ArchiveStore:
         return where
 
     def _trace_held(self, device, generation, record_id):
-        return self.connection.execute(
-            "select 1 from archive_traces where device_id = ? and generation = ? and id = ? and data is not null",
-            (device, generation, record_id)).fetchone() is not None
+        return (
+            self.connection.execute(
+                "select 1 from archive_traces where device_id = ? and generation = ? and id = ? and data is not null",
+                (device, generation, record_id),
+            ).fetchone()
+            is not None
+        )
 
     async def page(self, device, store, query, offset, limit):
         """One page of the whole history, controller-held and archive-only rows alike, filtered, ordered and
         sliced as the controller pages its own (shotLogPageSlice): (total, good, rows), each row (generation,
         id, body, archive-only, trace held). `good` counts the matches the Stats header calls good."""
+
         def read():
             args = {}
             where = self._filter(device, store, query, args)
             order = ", ".join(self._order(store, query.get("sort", "date"), query["dir"]))
             total, good = self.connection.execute(
-                f"select count(*), coalesce(sum(r.bad = 0), 0) from {JOIN} where {where}", args).fetchone()
+                f"select count(*), coalesce(sum(r.bad = 0), 0) from {JOIN} where {where}", args
+            ).fetchone()
             start = min(offset, total)
             rows = self.connection.execute(
                 f"select r.generation, r.id, r.body, {ONLY} as only from {JOIN} where {where} order by {order} "
-                "limit :limit offset :offset", {**args, "limit": limit, "offset": start}).fetchall()
-            listed = [(row["generation"], row["id"], json.loads(row["body"]), bool(row["only"]),
-                       store == "shots" and self._trace_held(device, row["generation"], row["id"]))
-                      for row in rows]
+                "limit :limit offset :offset",
+                {**args, "limit": limit, "offset": start},
+            ).fetchall()
+            listed = [
+                (
+                    row["generation"],
+                    row["id"],
+                    json.loads(row["body"]),
+                    bool(row["only"]),
+                    store == "shots" and self._trace_held(device, row["generation"], row["id"]),
+                )
+                for row in rows
+            ]
             meta = None
             if any(row[3] for row in listed):  # Markers need the histories and the copy's gaps.
-                meta = {"generations": self._generations(device, store), "holes": [dict(row) for row in (
-                    self.connection.execute("select generation, below, above, count from archive_holes where "
-                                            "device_id = ? and store = ? order by generation desc, below desc",
-                                            (device, store)))]}
+                meta = {
+                    "generations": self._generations(device, store),
+                    "holes": [
+                        dict(row)
+                        for row in (
+                            self.connection.execute(
+                                "select generation, below, above, count from archive_holes where "
+                                "device_id = ? and store = ? order by generation desc, below desc",
+                                (device, store),
+                            )
+                        )
+                    ],
+                }
             return total, good, start, listed, meta
+
         return await self._call(read)
 
     async def tail(self, device, store, query, limit):
@@ -350,6 +506,7 @@ class ArchiveStore:
         sort, dir, cursor (the previous page's last sort key), the filters and `all`: every copied row,
         each marked `archiveOnly`, for a browser reading with the controller off. Returns the rows, the
         next cursor, the holes, the generations and, for shots, the presets found among these rows."""
+
         def read():
             order = self._order(store, query["sort"], query["dir"])
             args = {"limit": limit + 1}
@@ -360,7 +517,9 @@ class ArchiveStore:
             keys = ", ".join(f"{expression} as k{n}" for n, expression in enumerate(order))
             rows = self.connection.execute(
                 f"select r.generation, r.id, r.body, {ONLY} as only, {keys} from {JOIN} where {where} "
-                f"order by {', '.join(f'k{n}' for n in range(len(order)))} limit :limit", args).fetchall()
+                f"order by {', '.join(f'k{n}' for n in range(len(order)))} limit :limit",
+                args,
+            ).fetchall()
             bodies = []
             for row in rows[:limit]:
                 body = {**json.loads(row["body"]), "archiveGeneration": row["generation"]}
@@ -371,66 +530,116 @@ class ArchiveStore:
                 bodies.append(body)
             last = rows[limit - 1] if len(rows) > limit else None
             following = ":".join(str(last[f"k{n}"]) for n in range(len(order))) if last else None
-            holes = [dict(row) for row in self.connection.execute(
-                "select generation, below, above, count from archive_holes where device_id = ? and store = ? "
-                "order by generation desc, below desc", (device, store))]
+            holes = [
+                dict(row)
+                for row in self.connection.execute(
+                    "select generation, below, above, count from archive_holes where device_id = ? and store = ? "
+                    "order by generation desc, below desc",
+                    (device, store),
+                )
+            ]
             presets = None
             if store == "shots":
                 presets, seen = [], set()
                 for preset, name in self.connection.execute(
-                        f"select json_extract(r.body, '$.presetId'), json_extract(r.body, '$.presetName') "
-                        f"from {JOIN} where r.device_id = :device and r.store = 'shots' and r.bad = 0 and {ONLY} "
-                        "order by r.generation desc, r.id desc", args):
+                    f"select json_extract(r.body, '$.presetId'), json_extract(r.body, '$.presetName') "
+                    f"from {JOIN} where r.device_id = :device and r.store = 'shots' and r.bad = 0 and {ONLY} "
+                    "order by r.generation desc, r.id desc",
+                    args,
+                ):
                     if preset is not None and preset not in seen and len(presets) < 8:
                         seen.add(preset)
                         presets.append([preset, name])
             return bodies, following, holes, self._generations(device, store), presets
+
         return await self._call(read)
 
     async def trace(self, device, record_id, boot, end):
-        row = await self._call(lambda: self.connection.execute(
-            "select data from archive_traces where device_id = ? and id = ? and boot_id = ? and ended_ms = ? "
-            "order by generation desc limit 1", (device, record_id, boot, end)).fetchone())
+        row = await self._call(
+            lambda: self.connection.execute(
+                "select data from archive_traces where device_id = ? and id = ? and boot_id = ? and ended_ms = ? "
+                "order by generation desc limit 1",
+                (device, record_id, boot, end),
+            ).fetchone()
+        )
         return row["data"] if row else None
 
     async def merged(self, device):
         """The whole history the Stats header counts, newest first by (generation, id): every stored shot,
         with only the fields the header reads."""
-        return await self._call(lambda: [json.loads(row[0]) for row in self.connection.execute(
-            f"select {HEADER_FIELDS} from archive_records where device_id = ? and store = 'shots' "
-            "order by generation desc, id desc", (device,))])
+        return await self._call(
+            lambda: [
+                json.loads(row[0])
+                for row in self.connection.execute(
+                    f"select {HEADER_FIELDS} from archive_records where device_id = ? and store = 'shots' "
+                    "order by generation desc, id desc",
+                    (device,),
+                )
+            ]
+        )
 
     # --- The user's changes ------------------------------------------------------
     async def rate(self, device, generation, record_id, rating):
         """Rate an archive-only shot (the controller rates the ones it holds); False when there is none."""
+
         def write():
             opened = self._open(device, "shots")
-            key = {"device": device, "g": opened if generation is None else generation, "i": record_id,
-                   "open": opened}
-            if self.connection.execute(f"select 1 from {JOIN} where r.device_id = :device and r.store = 'shots' "
-                                       f"and r.generation = :g and r.id = :i and {ONLY}", key).fetchone() is None:
+            key = {
+                "device": device,
+                "g": opened if generation is None else generation,
+                "i": record_id,
+                "open": opened,
+            }
+            if (
+                self.connection.execute(
+                    f"select 1 from {JOIN} where r.device_id = :device and r.store = 'shots' "
+                    f"and r.generation = :g and r.id = :i and {ONLY}",
+                    key,
+                ).fetchone()
+                is None
+            ):
                 return False
-            self._write("update archive_records set body = json_set(body, '$.rating', ?) where device_id = ? "
-                        "and store = 'shots' and generation = ? and id = ?", (rating, device, key["g"], record_id))
+            self._write(
+                "update archive_records set body = json_set(body, '$.rating', ?) where device_id = ? "
+                "and store = 'shots' and generation = ? and id = ?",
+                (rating, device, key["g"], record_id),
+            )
             return True
+
         return await self._user(write)
 
     async def remove(self, device, store, generation, record_id):
         """Delete one record the archive alone holds, with its trace; False when there is none (the
         controller deletes its own, and the archive follows)."""
+
         def write():
             opened = self._open(device, store)
-            key = {"device": device, "store": store, "g": opened if generation is None else generation,
-                   "i": record_id, "open": opened}
-            if self.connection.execute(f"select 1 from {JOIN} where r.device_id = :device and r.store = :store "
-                                       f"and r.generation = :g and r.id = :i and {ONLY}", key).fetchone() is None:
+            key = {
+                "device": device,
+                "store": store,
+                "g": opened if generation is None else generation,
+                "i": record_id,
+                "open": opened,
+            }
+            if (
+                self.connection.execute(
+                    f"select 1 from {JOIN} where r.device_id = :device and r.store = :store "
+                    f"and r.generation = :g and r.id = :i and {ONLY}",
+                    key,
+                ).fetchone()
+                is None
+            ):
                 return False
             with self.connection:
-                self.connection.execute("delete from archive_records where device_id = ? and store = ? "
-                                        "and generation = ? and id = ?", (device, store, key["g"], record_id))
+                self.connection.execute(
+                    "delete from archive_records where device_id = ? and store = ? "
+                    "and generation = ? and id = ?",
+                    (device, store, key["g"], record_id),
+                )
                 if store == "shots":
                     self._drop_traces(device, key["g"], (record_id,))
             return True
+
         return await self._user(write)
 
     # --- Facts and export ----------------------------------------------------------
@@ -442,40 +651,69 @@ class ArchiveStore:
                     f"select count(*) as total, coalesce(sum({ONLY}), 0) as only, "
                     "min(nullif(r.ended_at, 0)) as first, max(nullif(r.ended_at, 0)) as last "
                     f"from {JOIN} where r.device_id = :device and r.store = :store",
-                    {"device": device, "store": store, "open": self._open(device, store)}).fetchone()
+                    {"device": device, "store": store, "open": self._open(device, store)},
+                ).fetchone()
                 facts[store], facts[store + "Total"] = row["only"], row["total"]
                 facts[store + "First"], facts[store + "Last"] = row["first"], row["last"]
                 facts["generations"][store] = self._generations(device, store)
             facts["traces"] = self.connection.execute(
                 "select count(*) from archive_traces where device_id = ? and data is not null",
-                (device,)).fetchone()[0]
+                (device,),
+            ).fetchone()[0]
             facts["holes"] = self.connection.execute(
-                "select coalesce(sum(count), 0) from archive_holes where device_id = ?", (device,)).fetchone()[0]
+                "select coalesce(sum(count), 0) from archive_holes where device_id = ?", (device,)
+            ).fetchone()[0]
             return facts
+
         return await self._call(read)
 
     async def chunk(self, device, store, after, limit=200):
         """The next rows of an export, oldest first by (generation, id): (bodies, cursor), cursor None at the end."""
-        rows = await self._call(lambda: self.connection.execute(
-            "select generation, id, body from archive_records where device_id = ? and store = ? "
-            "and (generation, id) > (?, ?) order by generation, id limit ?",
-            (device, store, *after, limit)).fetchall())
-        return ([{**json.loads(row["body"]), "archiveGeneration": row["generation"]}
-                 for row in rows], (rows[-1]["generation"], rows[-1]["id"]) if rows else None)
+        rows = await self._call(
+            lambda: self.connection.execute(
+                "select generation, id, body from archive_records where device_id = ? and store = ? "
+                "and (generation, id) > (?, ?) order by generation, id limit ?",
+                (device, store, *after, limit),
+            ).fetchall()
+        )
+        return (
+            [{**json.loads(row["body"]), "archiveGeneration": row["generation"]} for row in rows],
+            (rows[-1]["generation"], rows[-1]["id"]) if rows else None,
+        )
 
     async def trace_chunk(self, device, after, limit=50):
-        rows = await self._call(lambda: self.connection.execute(
-            "select generation, id, boot_id, ended_ms, data from archive_traces where device_id = ? "
-            "and data is not null and (generation, id) > (?, ?) order by generation, id limit ?",
-            (device, *after, limit)).fetchall())
-        return ([{"generation": row["generation"], "id": row["id"], "boot": row["boot_id"], "end": row["ended_ms"],
-                  "data": base64.b64encode(row["data"]).decode()} for row in rows],
-                (rows[-1]["generation"], rows[-1]["id"]) if rows else None)
+        rows = await self._call(
+            lambda: self.connection.execute(
+                "select generation, id, boot_id, ended_ms, data from archive_traces where device_id = ? "
+                "and data is not null and (generation, id) > (?, ?) order by generation, id limit ?",
+                (device, *after, limit),
+            ).fetchall()
+        )
+        return (
+            [
+                {
+                    "generation": row["generation"],
+                    "id": row["id"],
+                    "boot": row["boot_id"],
+                    "end": row["ended_ms"],
+                    "data": base64.b64encode(row["data"]).decode(),
+                }
+                for row in rows
+            ],
+            (rows[-1]["generation"], rows[-1]["id"]) if rows else None,
+        )
 
     async def holes(self, device):
-        return await self._call(lambda: [dict(row) for row in self.connection.execute(
-            "select store, generation, below, above, count from archive_holes where device_id = ? "
-            "order by store, generation, below", (device,))])
+        return await self._call(
+            lambda: [
+                dict(row)
+                for row in self.connection.execute(
+                    "select store, generation, below, above, count from archive_holes where device_id = ? "
+                    "order by store, generation, below",
+                    (device,),
+                )
+            ]
+        )
 
 
 class Archive:
@@ -490,7 +728,9 @@ class Archive:
         self.companion = companion
         self.store = ArchiveStore(companion.logs)
         self.store.changed.append(self._user_changed)
-        self.available = False  # The archive switch is known: from a cfg, or remembered from the last.
+        self.available = (
+            False  # The archive switch is known: from a cfg, or remembered from the last.
+        )
         self.on = False  # ...and the switch is on.
         self.notified = {}  # The epochs of the controller's last `rs`, per store.
         self.subscribed = False  # This session's rx went out.
@@ -501,12 +741,17 @@ class Archive:
         self.waiters, self.pages, self.request = {}, {}, 0
         self.syncing, self.synced_at, self.error = None, None, None
         self.trace_wait, self.busy_until = {}, 0.0  # Traces not given yet: asked again after these.
-        self.headers, self.complete = {}, {}  # Stats headers: by full key, and the last whole one per view.
+        self.headers, self.complete = (
+            {},
+            {},
+        )  # Stats headers: by full key, and the last whole one per view.
         self.facts_cache, self.unavailable_at = None, None
         self.epochs = {}  # The epoch each store's copy is at, as the controller named it last.
         self.current = dict.fromkeys(STORES, False)
         self.ready_at = {store: asyncio.Event() for store in STORES}
-        self.marks = dict.fromkeys(STORES, 0)  # Moves on every reason a pass in flight may be stale.
+        self.marks = dict.fromkeys(
+            STORES, 0
+        )  # Moves on every reason a pass in flight may be stale.
         # Pages the replica served, pages that went to the controller instead, and requests sent to catch up.
         self.counters = {"served": 0, "fallbacks": 0, "catchUpFetches": 0}
 
@@ -574,19 +819,37 @@ class Archive:
     async def page(self, store, query, offset, limit, boot):
         """One page from the copy, as pages.py frames it: boot, epoch, good, total, offset, limit, hasMore,
         the row texts with their ids and, when the page holds rows only the archive keeps, `archive`."""
-        total, good, start, rows, meta = await self.store.page(self.companion.device_id, store, query, offset, limit)
+        total, good, start, rows, meta = await self.store.page(
+            self.companion.device_id, store, query, offset, limit
+        )
         shots = store == "shots"
-        texts = [(rid, (pages.stats_row if shots else pages.history_row)(
-            body, pages.marks(only, generation, trace if shots else None)), only)
-            for generation, rid, body, only, trace in rows]
-        return {"boot": boot, "epoch": self.epochs.get(store, 0), "good": good, "total": total, "offset": start,
-                "limit": limit, "hasMore": start + len(rows) < total, "rows": texts, "archive": meta}
+        texts = [
+            (
+                rid,
+                (pages.stats_row if shots else pages.history_row)(
+                    body, pages.marks(only, generation, trace if shots else None)
+                ),
+                only,
+            )
+            for generation, rid, body, only, trace in rows
+        ]
+        return {
+            "boot": boot,
+            "epoch": self.epochs.get(store, 0),
+            "good": good,
+            "total": total,
+            "offset": start,
+            "limit": limit,
+            "hasMore": start + len(rows) < total,
+            "rows": texts,
+            "archive": meta,
+        }
 
     async def held_trace(self, query):
         """A shot's trace as the controller's trace route answers it, when the replica holds it."""
         try:
             identity = [int(query[name]) for name in ("id", "boot", "end")]
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             return None
         if not self.serving():
             return None
@@ -634,7 +897,10 @@ class Archive:
         """A store changed and its change is saved: catch up now."""
         if self.subscribed:
             self.on_heartbeat(frame)
-            self.trace_wait, self.busy_until = {}, 0.0  # A notice is when a trace not given yet is asked again.
+            self.trace_wait, self.busy_until = (
+                {},
+                0.0,
+            )  # A notice is when a trace not given yet is asked again.
 
     def on_heartbeat(self, frame):
         """The epochs the controller names (`rs`, its ping answer): one the copy is not at starts a catch-up."""
@@ -667,7 +933,10 @@ class Archive:
             self._resolve(("records", inner.get("store")), inner)
         elif kind == "history":
             if isinstance(inner.get("records"), list):
-                self._resolve(("page", inner.get("request")), [r for r in inner["records"] if isinstance(r, dict)])
+                self._resolve(
+                    ("page", inner.get("request")),
+                    [r for r in inner["records"] if isinstance(r, dict)],
+                )
         elif kind == "stats":
             self._stats_frame(inner)
 
@@ -686,11 +955,19 @@ class Archive:
             return
         page = self.pages.get(request)
         if frame.get("rowBase") == 0 and isinstance(frame.get("cols"), str):
-            page = self.pages[request] = {"seq": frame.get("seq"), "cols": frame["cols"].split(","), "rows": []}
+            page = self.pages[request] = {
+                "seq": frame.get("seq"),
+                "cols": frame["cols"].split(","),
+                "rows": [],
+            }
         elif page is None or page["seq"] != frame.get("seq"):
             return
         for values in rows:
-            if isinstance(values, list) and len(values) == len(page["cols"]) + 1 and isinstance(values[-1], dict):
+            if (
+                isinstance(values, list)
+                and len(values) == len(page["cols"]) + 1
+                and isinstance(values[-1], dict)
+            ):
                 page["rows"].append((dict(zip(page["cols"], values[:-1])), values[-1]))
         if frame.get("more") is not True:
             self._resolve(("page", request), self.pages.pop(request)["rows"])
@@ -706,7 +983,9 @@ class Archive:
             try:
                 return await asyncio.wait_for(waiter, REQUEST_S)
             except asyncio.TimeoutError:
-                log(f"the controller did not answer the archive's {frame['t']} request; asking again")
+                log(
+                    f"the controller did not answer the archive's {frame['t']} request; asking again"
+                )
 
     # --- The sync ------------------------------------------------------------------
     async def _run(self):
@@ -731,7 +1010,9 @@ class Archive:
                     if isinstance(error, Gone):
                         raise
                     self.error = str(error)
-                    log(f"the archive sync stopped ({error}); it resumes at the controller's next notice")
+                    log(
+                        f"the archive sync stopped ({error}); it resumes at the controller's next notice"
+                    )
                 finally:
                     self.syncing = None
         except Gone:
@@ -744,22 +1025,31 @@ class Archive:
 
     async def _restart(self, store, generation, counters, revision, cleared=False):
         self._steady(revision)
-        count = await self.store.restart(self.companion.device_id, store, generation, counters, cleared)
-        log(f"the {NAMES[store]} history was cleared on the controller; the archive deleted its {count} "
-            "record(s) too" if cleared else
-            f"the controller's {NAMES[store]} history restarted; the archive keeps its {count} earlier record(s)")
+        count = await self.store.restart(
+            self.companion.device_id, store, generation, counters, cleared
+        )
+        log(
+            f"the {NAMES[store]} history was cleared on the controller; the archive deleted its {count} "
+            "record(s) too"
+            if cleared
+            else f"the controller's {NAMES[store]} history restarted; the archive keeps its {count} earlier record(s)"
+        )
         return generation + 1
 
     async def _fetch(self, store, order, listed, ids, sink=None):
         """The records `ids` (positions in `order`), as (id, ident, rev, fields, curve), by fetch windows;
         with a `sink`, each page goes there as it arrives instead (so a broken-off pass keeps it)."""
         wanted, found = set(ids), []
-        for offset, count in windows([i for i, rid in enumerate(order) if rid in wanted], FETCH_MAX[store]):
-            self.request = (self.request + 1) % 2 ** 32 or 1
-            page = await self._ask({"t": "rf", "s": store, "o": offset, "n": count, "r": self.request},
-                                   ("page", self.request))
+        for offset, count in windows(
+            [i for i, rid in enumerate(order) if rid in wanted], FETCH_MAX[store]
+        ):
+            self.request = (self.request + 1) % 2**32 or 1
+            page = await self._ask(
+                {"t": "rf", "s": store, "o": offset, "n": count, "r": self.request},
+                ("page", self.request),
+            )
             rows = []
-            for fields, curve in (page if store == "shots" else ((record, {}) for record in page)):
+            for fields, curve in page if store == "shots" else ((record, {}) for record in page):
                 rid = fields.get("id")
                 if rid in wanted:
                     wanted.discard(rid)
@@ -787,14 +1077,19 @@ class Archive:
             raise ValueError("a malformed record index")
         rows, new_epoch = index.get("rows"), index.get("epoch")
         if type(new_epoch) is int:
-            self.notified[store] = new_epoch  # The controller's own word on its epoch, newer than any notice.
+            self.notified[store] = (
+                new_epoch  # The controller's own word on its epoch, newer than any notice.
+            )
         if rows is None or type(new_epoch) is not int:
             if epoch and new_epoch == epoch:
                 self._synced(store, mark, epoch)  # Unchanged since the epoch this archive holds.
             return
         named, gone = [index.get("gen"), index.get("next"), index.get("clr")], index.get("gone")
-        if not all(type(value) is int for value in named) or not isinstance(gone, list) or not all(
-                type(rid) is int for rid in gone):
+        if (
+            not all(type(value) is int for value in named)
+            or not isinstance(gone, list)
+            or not all(type(rid) is int for rid in gone)
+        ):
             raise ValueError("a record index without its counters or deletions")
         marked, listed, order = set(gone), dict(zip(rows[0::2], rows[1::2])), rows[0::2]
         # Exact, and decided before anything is written (an empty index included, so the counters
@@ -803,10 +1098,15 @@ class Archive:
         # otherwise either counter falling back is a restarted history.
         cleared = bool(counters) and len(counters) > 2 and named[2] > counters[2]
         restarted = cleared or bool(counters) and (named[0] < counters[0] or named[1] < counters[1])
-        if not listed:  # Nothing to compare ids with: everything stays until the store records again.
+        if (
+            not listed
+        ):  # Nothing to compare ids with: everything stays until the store records again.
             if restarted:
-                generation, oldest, previous = await self._restart(store, generation, named, revision,
-                                                                   cleared), None, []
+                generation, oldest, previous = (
+                    await self._restart(store, generation, named, revision, cleared),
+                    None,
+                    [],
+                )
             self._steady(revision)
             await self.store.adopt(device, store, generation, new_epoch, oldest, previous, named)
             self._synced(store, mark, new_epoch)
@@ -822,11 +1122,14 @@ class Archive:
         shared = [rid for rid in order if rid in archived]
         # Shared records first, decided before anything new is written: a changed revision is a rating,
         # or another record under a reused id. One that differs needs every shared one to decide.
-        found, missing = await self._fetch(store, order, listed,
-                                           [rid for rid in shared if archived[rid][1] != listed[rid]])
+        found, missing = await self._fetch(
+            store, order, listed, [rid for rid in shared if archived[rid][1] != listed[rid]]
+        )
         replaced = [row for row in found if archived[row[0]][0] != row[1]]
         if replaced:
-            more, still = await self._fetch(store, order, listed, [rid for rid in shared if archived[rid][1] == listed[rid]])
+            more, still = await self._fetch(
+                store, order, listed, [rid for rid in shared if archived[rid][1] == listed[rid]]
+            )
             found, missing = found + more, missing | still
             replaced = [row for row in found if archived[row[0]][0] != row[1]]
         if missing:
@@ -837,28 +1140,44 @@ class Archive:
             generation = await self._restart(store, generation, named, revision)
             archived = {}
         for row in replaced if ambiguous else ():
-            log(f"the controller's {NAMES[store]} {row[0]} may be a different record now; the archive keeps "
-                "both")
+            log(
+                f"the controller's {NAMES[store]} {row[0]} may be a different record now; the archive keeps "
+                "both"
+            )
         self._steady(revision)
-        await self.store.put(device, store, generation, found)  # An ambiguous old record is set aside.
+        await self.store.put(
+            device, store, generation, found
+        )  # An ambiguous old record is set aside.
         fetched = {row[0] for row in found}
 
         async def page(rows):
             self._steady(revision)
             await self.store.put(device, store, generation, rows)
-        _, missing = await self._fetch(store, order, listed,
-                                       [rid for rid in order if rid not in archived and rid not in fetched], page)
+
+        _, missing = await self._fetch(
+            store,
+            order,
+            listed,
+            [rid for rid in order if rid not in archived and rid not in fetched],
+            page,
+        )
         if missing:
             return self._again(store)
-        if not restarted and not ambiguous:  # A pass that could not tell records apart mirrors no deletion.
+        if (
+            not restarted and not ambiguous
+        ):  # A pass that could not tell records apart mirrors no deletion.
             # Missing at or above the oldest, or named as deleted: the user deleted it; below the oldest
             # and not named, it rotated out and stays.
-            deleted = [rid for rid in archived if rid not in listed and (rid >= low or rid in marked)]
+            deleted = [
+                rid for rid in archived if rid not in listed and (rid >= low or rid in marked)
+            ]
             await self.store.forget_deleted(device, store, generation, deleted)
         if not restarted and newest is not None and newest < low - 1:
             await self.store.hole(device, store, generation, newest, low)
-            log(f"up to {low - newest - 1} {NAMES[store]} record(s) rotated out of the controller before they "
-                "could be copied")
+            log(
+                f"up to {low - newest - 1} {NAMES[store]} record(s) rotated out of the controller before they "
+                "could be copied"
+            )
         self._steady(revision)
         await self.store.adopt(device, store, generation, new_epoch, low, order, named)
         self._synced(store, mark, new_epoch)
@@ -875,19 +1194,24 @@ class Archive:
         if now < self.busy_until:
             return
         while True:
-            missing = [entry for entry in await self.store.missing_traces(device, len(self.trace_wait) + 20)
-                       if self.trace_wait.get(entry, 0) <= now]
+            missing = [
+                entry
+                for entry in await self.store.missing_traces(device, len(self.trace_wait) + 20)
+                if self.trace_wait.get(entry, 0) <= now
+            ]
             if not missing:
                 break
             for entry in missing:
                 record_id, boot, end = entry
-                answer = await self._ask({"t": "rt", "id": record_id, "b": boot, "e": end},
-                                         ("trace", record_id, boot, end))
+                answer = await self._ask(
+                    {"t": "rt", "id": record_id, "b": boot, "e": end},
+                    ("trace", record_id, boot, end),
+                )
                 result = answer.get("r")
                 if result == "ok":
                     try:
                         data = base64.b64decode(answer.get("d") or "", validate=True)
-                    except (binascii.Error, ValueError):
+                    except binascii.Error, ValueError:
                         data = b""
                     if data:
                         self.trace_wait.pop(entry, None)
@@ -923,18 +1247,26 @@ class Archive:
         if synced != epoch:
             self.refresh("shots", epoch)
             deadline = time.monotonic() + FRESH_S
-            while synced != epoch and not self.companion.sync_blocked() and time.monotonic() < deadline:
+            while (
+                synced != epoch
+                and not self.companion.sync_blocked()
+                and time.monotonic() < deadline
+            ):
                 await asyncio.sleep(0.1)
                 synced = (await self.store.sync_state(device, "shots"))[1]
             if synced != epoch:
                 if not self.companion.sync_blocked():
-                    raise Unavailable(f"the copy is at shot epoch {synced}, the controller at {epoch}")
+                    raise Unavailable(
+                        f"the copy is at shot epoch {synced}, the controller at {epoch}"
+                    )
                 if view in self.complete:
                     return self.complete[view]
         key = view + (self.store.revision, synced)
         if key not in self.headers:
             rows = await self.store.merged(device)
-            built = await asyncio.to_thread(lambda: (stats.header(rows, window, active), stats.good(rows, *filters)))
+            built = await asyncio.to_thread(
+                lambda: (stats.header(rows, window, active), stats.good(rows, *filters))
+            )
             if len(self.headers) >= HEADERS:
                 self.headers.pop(next(iter(self.headers)))
             self.headers[key] = (*built, synced)
@@ -948,14 +1280,22 @@ class Archive:
         """One log line per cause at most every five minutes: screens fall back without a word."""
         if self.unavailable_at is None or time.monotonic() - self.unavailable_at >= 300:
             self.unavailable_at = time.monotonic()
-            log(f"the Stats header over the whole history is unavailable ({error}); screens show the "
-                "controller's")
+            log(
+                f"the Stats header over the whole history is unavailable ({error}); screens show the "
+                "controller's"
+            )
 
     # --- Facts -----------------------------------------------------------------------
     async def facts(self):
-        facts = {"on": self.on, "available": self.available,
-                 "syncing": self.syncing, "syncedAt": self.synced_at, "error": self.error,
-                 "replica": {store: self.state(store) for store in STORES}, **self.counters}
+        facts = {
+            "on": self.on,
+            "available": self.available,
+            "syncing": self.syncing,
+            "syncedAt": self.synced_at,
+            "error": self.error,
+            "replica": {store: self.state(store) for store in STORES},
+            **self.counters,
+        }
         if self.usable():
             key = (self.companion.device_id, self.store.revision, self.store.synced)
             if self.facts_cache is None or self.facts_cache[0] != key:

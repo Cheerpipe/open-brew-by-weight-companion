@@ -31,10 +31,29 @@ CTX_SESSION, CTX_PASSWORD, CTX_BODY = 0, 1, 2
 COUNTER_MAX = 0xFFFFFFFF
 CLIENT_ID = re.compile(r"[0-9a-f]{16,24}")
 # What the controller reads from a browser's request; everything else stays here.
-FORWARDED = ("Content-Type", "X-WebUI-Session", "X-WebUI-Activity", "X-Device-Password",
-             "X-OTA-Transfer", "X-OTA-Offset", "X-OTA-Length", "X-OTA-Allow-Downgrade", "Content-Range")
-HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer",
-                        "upgrade", "content-length"})
+FORWARDED = (
+    "Content-Type",
+    "X-WebUI-Session",
+    "X-WebUI-Activity",
+    "X-Device-Password",
+    "X-OTA-Transfer",
+    "X-OTA-Offset",
+    "X-OTA-Length",
+    "X-OTA-Allow-Downgrade",
+    "Content-Range",
+)
+HOP_BY_HOP = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "content-length",
+    }
+)
 # Sealed values stay out of the hop-by-hop set and of the browser's answer.
 SEALED_RESPONSE_HEADER = "X-OBBW-Enc"
 READ_LIMIT = 64 * 1024  # JSON answers are read whole: claims, commands and errors are small.
@@ -55,7 +74,9 @@ def address(text):
 class Relay:
     def __init__(self, companion):
         self.companion = companion
-        self.client_id = os.urandom(12).hex()  # The controller's one Web UI client for every screen.
+        self.client_id = os.urandom(
+            12
+        ).hex()  # The controller's one Web UI client for every screen.
         self.mode = "passthrough"  # passthrough, ready or disabled
         self.link = None  # Whether the controller wants the link; None until it answered.
         self.key, self.body_key, self.counter, self.generation = None, None, 0, 0
@@ -66,8 +87,11 @@ class Relay:
     def session(self):
         """Connections that close after each request and pass bodies through untouched."""
         if self.http is None or self.http.closed:
-            self.http = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True),
-                                              auto_decompress=False, timeout=TIMEOUT)
+            self.http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
+                auto_decompress=False,
+                timeout=TIMEOUT,
+            )
         return self.http
 
     async def close(self):
@@ -99,7 +123,9 @@ class Relay:
                     await self._handshake()
                 except ValueError:
                     self.reset(True)
-                    self._note("the controller sent a malformed relay answer; the Web UI passes straight through")
+                    self._note(
+                        "the controller sent a malformed relay answer; the Web UI passes straight through"
+                    )
         return self.mode
 
     async def _handshake(self):
@@ -114,11 +140,15 @@ class Relay:
         if status is None:
             return  # Unreachable: keep what we have and try again when it announces itself.
         if status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED":
-            await self._prove(url, pairing["secret"], bytes(16))  # Only to learn whether it forgot us.
+            await self._prove(
+                url, pairing["secret"], bytes(16)
+            )  # Only to learn whether it forgot us.
         elif status != 200 or reply.get("protocol") != PROTOCOL:
             self.reset(True)
-            self._note(f"the relay handshake answered HTTP {status} with protocol {reply.get('protocol')!r}; "
-                       "the Web UI passes straight through, one screen at a time")
+            self._note(
+                f"the relay handshake answered HTTP {status} with protocol {reply.get('protocol')!r}; "
+                "the Web UI passes straight through, one screen at a time"
+            )
         else:
             await self._prove(url, pairing["secret"], crypto.unb64(reply.get("challenge"), 16))
 
@@ -126,13 +156,18 @@ class Relay:
         companion, nonce = self.companion, os.urandom(16)
         proof = crypto.mac(secret, b"R", challenge, nonce)
         status, reply = await companion.controller_request(
-            "POST", url, {"id": companion.id, "nonce": crypto.b64(nonce), "mac": crypto.b64(proof)})
+            "POST", url, {"id": companion.id, "nonce": crypto.b64(nonce), "mac": crypto.b64(proof)}
+        )
         if status is None:
             return
         if status == 200:
-            if not hmac.compare_digest(crypto.unb64(reply.get("mac"), 32), crypto.mac(secret, b"Q", challenge, nonce)):
+            if not hmac.compare_digest(
+                crypto.unb64(reply.get("mac"), 32), crypto.mac(secret, b"Q", challenge, nonce)
+            ):
                 self.reset()
-                self._note("the controller did not prove the pairing secret; the Web UI passes straight through")
+                self._note(
+                    "the controller did not prove the pairing secret; the Web UI passes straight through"
+                )
                 return
             key = crypto.relay_key(secret, challenge, nonce)
             self.key, self.body_key, self.counter = key, crypto.relay_body_key(key), 0
@@ -140,11 +175,16 @@ class Relay:
             self._set_link(reply.get("link") is True)
             await companion.recognized()
             companion.poke()  # The controller just proved itself again: a dead link socket is found now.
-            self._note("relay ready: every screen shares the controller's Web UI" if self.mode == "ready" else
-                       "the controller turned the Web UI through the companion off")
+            self._note(
+                "relay ready: every screen shares the controller's Web UI"
+                if self.mode == "ready"
+                else "the controller turned the Web UI through the companion off"
+            )
         elif status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED":
             erase = reply.get("erase")
-            if erase and hmac.compare_digest(crypto.unb64(erase, 32), crypto.mac(secret, b"E", nonce)):
+            if erase and hmac.compare_digest(
+                crypto.unb64(erase, 32), crypto.mac(secret, b"E", nonce)
+            ):
                 self.reset()
                 await companion.erase("the controller forgot this companion")
             else:
@@ -152,7 +192,9 @@ class Relay:
                 companion.not_recognized()
         else:
             self.reset()
-            self._note(f"the controller refused the relay: HTTP {status} {reply.get('error') or ''}".strip())
+            self._note(
+                f"the controller refused the relay: HTTP {status} {reply.get('error') or ''}".strip()
+            )
 
     # --- Requests --------------------------------------------------------------
     def admit(self, method, uri, addr, screen, session=""):
@@ -165,8 +207,11 @@ class Relay:
             return None, 0, ""
         self.counter += 1
         q = self.counter
-        sealed = "" if session == "" else crypto.b64(
-            crypto.relay_seal(self.body_key, CTX_SESSION, q, session.encode()))
+        sealed = (
+            ""
+            if session == ""
+            else crypto.b64(crypto.relay_seal(self.body_key, CTX_SESSION, q, session.encode()))
+        )
         tag = crypto.relay_tag(self.key, method, uri, q, addr, screen, sealed)
         return f"2 {q} {addr} {screen} {tag}", q, sealed
 
@@ -178,7 +223,9 @@ class Relay:
         value = self.header(method, uri, addr, screen, session)
         if value is None and self.mode != "disabled":
             await self.handshake()
-            value = self.header(method, uri, addr, screen, session) if self.mode == "ready" else None
+            value = (
+                self.header(method, uri, addr, screen, session) if self.mode == "ready" else None
+            )
         return value
 
     async def sealed(self, method, uri, addr, screen, session=""):
@@ -219,8 +266,10 @@ class Relay:
                 headers["X-WebUI-Session"] = sealed_session
             if headers.get("X-Device-Password"):
                 headers["X-Device-Password"] = crypto.b64(
-                    crypto.relay_seal(body_key, CTX_PASSWORD, q,
-                                      headers["X-Device-Password"].encode()))
+                    crypto.relay_seal(
+                        body_key, CTX_PASSWORD, q, headers["X-Device-Password"].encode()
+                    )
+                )
             headers["X-OBBW-Relay"] = value
             # Firmware update ranges are the one relayed body that travels as it
             # is: the image is not secret, and the controller pins its integrity
@@ -228,7 +277,12 @@ class Relay:
             plain = method == "PATCH" and uri.split("?", 1)[0] == "/api/v1/ota"
             sealed_body = body if plain else body and crypto.relay_seal(body_key, CTX_BODY, q, body)
             reply = await self._send(method, uri, headers, sealed_body)
-            if reply.data is not None and reply.status == 401 and attempt == 0 and _error(reply.data) == "RELAY_STALE":
+            if (
+                reply.data is not None
+                and reply.status == 401
+                and attempt == 0
+                and _error(reply.data) == "RELAY_STALE"
+            ):
                 reply.release()
                 self.key, self.body_key = None, None
                 continue
@@ -240,16 +294,20 @@ class Relay:
         counter = reply.headers.get(SEALED_RESPONSE_HEADER)
         if counter is None:
             return
-        sealed = reply.data if reply.data is not None else (
-            await reply.read() if (reply.content_length or 0) <= READ_LIMIT else None)
+        sealed = (
+            reply.data
+            if reply.data is not None
+            else (await reply.read() if (reply.content_length or 0) <= READ_LIMIT else None)
+        )
         reply.release()
         try:
             reply.data = crypto.relay_open(body_key, int(counter), sealed)
-        except (InvalidTag, ValueError, TypeError):
+        except InvalidTag, ValueError, TypeError:
             log("the controller's sealed answer did not open; starting a new relay session")
             self.key, self.body_key = None, None  # The next request makes a new session.
-            raise aiohttp.ClientResponseError(reply.request_info, (), status=502,
-                                              message="the sealed answer did not open")
+            raise aiohttp.ClientResponseError(
+                reply.request_info, (), status=502, message="the sealed answer did not open"
+            )
 
     async def passthrough(self, method, uri, incoming, body):
         """Today's transparent proxy: the browser's own id, nothing signed."""
@@ -257,11 +315,21 @@ class Relay:
 
     async def _send(self, method, uri, headers, body):
         reply = await self.session().request(
-            method, URL(self.companion.base_url() + uri, encoded=True), headers=headers, data=body or None,
-            allow_redirects=False, skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding"))
+            method,
+            URL(self.companion.base_url() + uri, encoded=True),
+            headers=headers,
+            data=body or None,
+            allow_redirects=False,
+            skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding"),
+        )
         reply.data = None
-        if reply.content_type == "application/json" and (reply.content_length or 0) <= READ_LIMIT and not any(
-                name in reply.headers for name in ("Content-Encoding", "Content-Disposition")):
+        if (
+            reply.content_type == "application/json"
+            and (reply.content_length or 0) <= READ_LIMIT
+            and not any(
+                name in reply.headers for name in ("Content-Encoding", "Content-Disposition")
+            )
+        ):
             reply.data = await reply.read()
         return reply
 
@@ -275,5 +343,8 @@ def _error(data):
 
 
 def response_headers(reply):
-    return [(name, value) for name, value in reply.headers.items()
-            if name.lower() not in HOP_BY_HOP and name != SEALED_RESPONSE_HEADER]
+    return [
+        (name, value)
+        for name, value in reply.headers.items()
+        if name.lower() not in HOP_BY_HOP and name != SEALED_RESPONSE_HEADER
+    ]

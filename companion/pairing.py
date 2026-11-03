@@ -7,8 +7,12 @@ from . import PROTOCOL, VERSION, crypto, log
 
 PATH = "/api/v1/companion/pair"
 POLL_S = 1
-REFUSALS = {"COMPANION_IGNORED": "ignored", "ALREADY_PAIRED": "already_paired", "PAIRING_BUSY": "busy",
-            "PAIRING_RATE_LIMITED": "rate_limited"}
+REFUSALS = {
+    "COMPANION_IGNORED": "ignored",
+    "ALREADY_PAIRED": "already_paired",
+    "PAIRING_BUSY": "busy",
+    "PAIRING_RATE_LIMITED": "rate_limited",
+}
 
 
 class Pairing:
@@ -23,7 +27,9 @@ class Pairing:
     def status(self):
         status = {"state": self.state}
         if self.state == "pending":
-            status.update(code=self.code, expiresInS=max(0, int(self.expires_at - time.monotonic())))
+            status.update(
+                code=self.code, expiresInS=max(0, int(self.expires_at - time.monotonic()))
+            )
         return status
 
     def start(self, manual=False):
@@ -38,7 +44,9 @@ class Pairing:
 
     def _controller_key(self, reply):
         try:
-            key = crypto.unb64(reply.get("controllerKey"), 65) if reply.get("controllerKey") else None
+            key = (
+                crypto.unb64(reply.get("controllerKey"), 65) if reply.get("controllerKey") else None
+            )
             if key:
                 crypto.load_point(key)
         except ValueError:
@@ -50,21 +58,30 @@ class Pairing:
         """Commit, then reveal: the key goes out only after the controller's key arrived; the code after that."""
         companion, url = self.companion, self.companion.base_url() + PATH
         self.state, self.code, key = "requesting", None, None
-        request = {"id": companion.id, "name": companion.name, "version": VERSION, "protocol": PROTOCOL}
+        request = {
+            "id": companion.id,
+            "name": companion.name,
+            "version": VERSION,
+            "protocol": PROTOCOL,
+        }
         status, reply = await companion.controller_request(
-            "POST", url, {**request, "commitment": crypto.b64(crypto.commitment(companion.public))})
+            "POST", url, {**request, "commitment": crypto.b64(crypto.commitment(companion.public))}
+        )
         if status != 202:
             self._refused(status, reply)
             self.auto = self.state in ("unreachable", "rate_limited")
             return
         self.state = "pending"
         self.expires_at = time.monotonic() + int(reply.get("expiresInS") or 600)
-        log(f"pairing requested from {companion.controller[0]}; waiting for approval in Admin → Companion")
+        log(
+            f"pairing requested from {companion.controller[0]}; waiting for approval in Admin → Companion"
+        )
         while time.monotonic() < self.expires_at:
             key = key or self._controller_key(reply)
             if key and self.code is None:
                 status, reply = await companion.controller_request(
-                    "POST", url, {**request, "publicKey": crypto.b64(companion.public)})
+                    "POST", url, {**request, "publicKey": crypto.b64(companion.public)}
+                )
                 if status == 202:
                     self.code = crypto.sas(companion.public, key)
                 elif status is not None:
@@ -76,15 +93,24 @@ class Pairing:
                 continue
             if state == "approved" and self.code and self._controller_key(reply) in (None, key):
                 try:
-                    await companion.paired(crypto.pairing_secret(companion.key, companion.public, key))
+                    await companion.paired(
+                        crypto.pairing_secret(companion.key, companion.public, key)
+                    )
                 except OSError as error:
                     self.state = "error"
-                    log(f"pairing approved, but saving it failed ({error}); the pairing may be lost")
+                    log(
+                        f"pairing approved, but saving it failed ({error}); the pairing may be lost"
+                    )
                 else:
                     self.state = "paired"
             else:
-                self.state = "error" if state == "approved" else state if state in ("denied", "expired") \
+                self.state = (
+                    "error"
+                    if state == "approved"
+                    else state
+                    if state in ("denied", "expired")
                     else "expired"
+                )
                 log(f"pairing {self.state}")
             return
         self.state = "expired"
@@ -92,5 +118,8 @@ class Pairing:
 
     def _refused(self, status, reply):
         self.state = "unreachable" if status is None else REFUSALS.get(reply.get("error"), "error")
-        log("the controller did not answer the pairing request" if status is None else
-            f"pairing request refused: HTTP {status} {reply.get('error') or ''}".strip())
+        log(
+            "the controller did not answer the pairing request"
+            if status is None
+            else f"pairing request refused: HTTP {status} {reply.get('error') or ''}".strip()
+        )

@@ -28,9 +28,24 @@ MISSING = None
 VERDICTS = {"on_recipe": 0, "fast": 1, "slow": 2}
 BBW_STOPS = frozenset({"normal_target", "extended_max_weight", "slow_min_weight"})
 # Every row field the header reads (Record below), so callers can leave the rest, the curve above all.
-FIELDS = ("durationS", "goalG", "fastBeforeS", "slowAfterS", "arrivalS", "actualG", "cutLineG", "avgFlowGS",
-          "verdict", "shotType", "stopDetail", "presetId", "presetName", "scaleName", "hasWallTime",
-          "endedAtLocalSec")
+FIELDS = (
+    "durationS",
+    "goalG",
+    "fastBeforeS",
+    "slowAfterS",
+    "arrivalS",
+    "actualG",
+    "cutLineG",
+    "avgFlowGS",
+    "verdict",
+    "shotType",
+    "stopDetail",
+    "presetId",
+    "presetName",
+    "scaleName",
+    "hasWallTime",
+    "endedAtLocalSec",
+)
 
 
 def f32(value):
@@ -58,15 +73,36 @@ def scale_key(name):
 class Record:
     """A Stats row back as the stored record's integers (missing values as None)."""
 
-    __slots__ = ("duration", "goal", "fast", "slow", "arrival", "actual", "cut", "flow", "result", "auto",
-                 "bbw_stop", "preset", "preset_name", "scale", "wall", "local")
+    __slots__ = (
+        "duration",
+        "goal",
+        "fast",
+        "slow",
+        "arrival",
+        "actual",
+        "cut",
+        "flow",
+        "result",
+        "auto",
+        "bbw_stop",
+        "preset",
+        "preset_name",
+        "scale",
+        "wall",
+        "local",
+    )
 
     def __init__(self, row):
         self.duration = tenths(row.get("durationS")) or 0
         self.goal = int(round((row.get("goalG") or 0) * 10))
-        self.fast, self.slow = tenths(row.get("fastBeforeS")) or 0, tenths(row.get("slowAfterS")) or 0
+        self.fast, self.slow = (
+            tenths(row.get("fastBeforeS")) or 0,
+            tenths(row.get("slowAfterS")) or 0,
+        )
         self.arrival = tenths(row.get("arrivalS"))
-        self.actual, self.cut, self.flow = (hundredths(row.get(key)) for key in ("actualG", "cutLineG", "avgFlowGS"))
+        self.actual, self.cut, self.flow = (
+            hundredths(row.get(key)) for key in ("actualG", "cutLineG", "avgFlowGS")
+        )
         timed = self.arrival is not None and self.arrival != 0
         self.result = VERDICTS.get(row.get("verdict"), 3) if timed else 3
         self.auto, self.bbw_stop = row.get("shotType") == "auto", row.get("stopDetail") in BBW_STOPS
@@ -76,8 +112,15 @@ class Record:
 
     def bad_reason(self):
         """shotLogBadReason: over 12 s with a settled yield over 2 g."""
-        return "short" if self.duration <= 120 else "no_yield" if self.actual is None else \
-            "low_yield" if self.actual <= 200 else None
+        return (
+            "short"
+            if self.duration <= 120
+            else "no_yield"
+            if self.actual is None
+            else "low_yield"
+            if self.actual <= 200
+            else None
+        )
 
     def eligible(self):
         return self.bad_reason() is None
@@ -91,7 +134,9 @@ def matches(record, results, presets, scales):
     """shotListFilterMatches for good shots: AND across groups, OR within."""
     if results and (record.result > 2 or record.result not in results):
         return False
-    return (not presets or record.preset in presets) and (not scales or scale_key(record.scale) in scales)
+    return (not presets or record.preset in presets) and (
+        not scales or scale_key(record.scale) in scales
+    )
 
 
 def aggregate(records, window):
@@ -123,12 +168,15 @@ def aggregate(records, window):
 
     def printed(value, places):
         return float(f"{value:.{places}f}")
-    return {"shotCount": count,
-            "avgDurationS": printed(duration / (10.0 * count), 1) if count else None,
-            "avgYieldG": printed(actual / (100.0 * count), 1) if count else None,
-            "avgErrorPct": printed(errors / bbw / 10.0, 1) if bbw else None,
-            "avgFlowGps": printed(flow / flows / 10000.0, 2) if flows else None,
-            "shotsPerDay": printed(timed / (span + 1.0), 1) if timed else None}
+
+    return {
+        "shotCount": count,
+        "avgDurationS": printed(duration / (10.0 * count), 1) if count else None,
+        "avgYieldG": printed(actual / (100.0 * count), 1) if count else None,
+        "avgErrorPct": printed(errors / bbw / 10.0, 1) if bbw else None,
+        "avgFlowGps": printed(flow / flows / 10000.0, 2) if flows else None,
+        "shotsPerDay": printed(timed / (span + 1.0), 1) if timed else None,
+    }
 
 
 def density(shots):
@@ -166,9 +214,15 @@ def density(shots):
                 total = f32(total + f32(math.exp(f32(f32(-0.5 * z) * z))))
         heights.append(total)
     peak = max(heights)
-    return {"lo": lo, "hi": hi, "a": float(f"{a:.1f}"), "b": float(f"{b:.1f}"), "shared": shared,
-            "n": [counts[1], counts[0], counts[2]],
-            "h": [int(round_away(f32(f32(100 * height) / peak))) for height in heights]}
+    return {
+        "lo": lo,
+        "hi": hi,
+        "a": float(f"{a:.1f}"),
+        "b": float(f"{b:.1f}"),
+        "shared": shared,
+        "n": [counts[1], counts[0], counts[2]],
+        "h": [int(round_away(f32(f32(100 * height) / peak))) for height in heights],
+    }
 
 
 def header(rows, window, active):
@@ -187,18 +241,34 @@ def header(rows, window, active):
         timed.append(record)
         own += record.preset == active
     one_preset = all(record.preset == timed[0].preset for record in timed)
-    built["dens"] = [density(timed) if timed else None,
-                     density([r for r in timed if r.preset == active]) if 0 < own < len(timed) else bool(own) or None]
-    built["cons"] = {"t": [record.arrival for record in reversed(timed)],
-                     "p": (timed[0].preset if timed else 0) if one_preset
-                     else [record.preset for record in reversed(timed)]}
+    built["dens"] = [
+        density(timed) if timed else None,
+        density([r for r in timed if r.preset == active])
+        if 0 < own < len(timed)
+        else bool(own) or None,
+    ]
+    built["cons"] = {
+        "t": [record.arrival for record in reversed(timed)],
+        "p": (timed[0].preset if timed else 0)
+        if one_preset
+        else [record.preset for record in reversed(timed)],
+    }
     presets, scales = [], []
     for record in records:
-        if len(presets) < FILTER_MAX and record.eligible() and record.preset not in [p for p, _ in presets]:
+        if (
+            len(presets) < FILTER_MAX
+            and record.eligible()
+            and record.preset not in [p for p, _ in presets]
+        ):
             presets.append([record.preset, record.preset_name])
     for record in records:
         key = scale_key(record.scale)
-        if len(scales) < FILTER_MAX and record.scale and record.eligible() and key not in [k for k, _ in scales]:
+        if (
+            len(scales) < FILTER_MAX
+            and record.scale
+            and record.eligible()
+            and key not in [k for k, _ in scales]
+        ):
             scales.append([key, record.scale])
     built["facets"] = {"presets": presets, "scales": scales}
     return built
@@ -206,4 +276,8 @@ def header(rows, window, active):
 
 def good(rows, results, presets, scales):
     """How many good shots the filters keep: the N the window choices follow (S18)."""
-    return sum(1 for row in rows if (record := Record(row)).eligible() and matches(record, results, presets, scales))
+    return sum(
+        1
+        for row in rows
+        if (record := Record(row)).eligible() and matches(record, results, presets, scales)
+    )

@@ -26,25 +26,45 @@ BASE = {"COMPANION_IP": "192.168.1.240", "COMPANION_NAME": "Kitchen server"}
 cfg = gateway.load_config(BASE)
 assert cfg["hostname"] == "openbrewbyweight-secure.local" and cfg["ip"] == "192.168.1.240"
 assert (cfg["http_port"], cfg["https_port"], cfg["mdns_publish"]) == (80, 443, True)
-assert gateway.load_config({**BASE, "COMPANION_HOSTNAME": "Brew.Local."})["hostname"] == "brew.local"
+assert (
+    gateway.load_config({**BASE, "COMPANION_HOSTNAME": "Brew.Local."})["hostname"] == "brew.local"
+)
 assert gateway.load_config({**BASE, "COMPANION_MDNS_PUBLISH": "off"})["mdns_publish"] is False
 # The log retention settings, as compose passes them: empty means the default.
-retention = gateway.load_config({**BASE, "COMPANION_LOG_RETENTION_DAYS": "90", "COMPANION_LOG_RETENTION_MB": ""})
+retention = gateway.load_config(
+    {**BASE, "COMPANION_LOG_RETENTION_DAYS": "90", "COMPANION_LOG_RETENTION_MB": ""}
+)
 assert (retention["log_retention_days"], retention["log_retention_mb"]) == (90, 50)
 compose = (ROOT / "compose.yaml").read_text()
-assert all(f"{key}: ${{{key}:-}}" in compose for key in ("COMPANION_LOG_RETENTION_DAYS", "COMPANION_LOG_RETENTION_MB")), \
-    "compose passes the retention settings to the container"
+assert all(
+    f"{key}: ${{{key}:-}}" in compose
+    for key in ("COMPANION_LOG_RETENTION_DAYS", "COMPANION_LOG_RETENTION_MB")
+), "compose passes the retention settings to the container"
 
 # The HTTPS gateway's setting names keep working; the companion's names win.
-legacy = gateway.load_config({"GATEWAY_IP": "192.168.1.241", "GATEWAY_HOSTNAME": "espresso", "HTTP_PORT": "8080",
-                              "HTTPS_PORT": "8443", "MDNS_PUBLISH": "false"})
-assert (legacy["ip"], legacy["hostname"], legacy["http_port"], legacy["https_port"], legacy["mdns_publish"]) == (
-    "192.168.1.241", "espresso.local", 8080, 8443, False)
+legacy = gateway.load_config(
+    {
+        "GATEWAY_IP": "192.168.1.241",
+        "GATEWAY_HOSTNAME": "espresso",
+        "HTTP_PORT": "8080",
+        "HTTPS_PORT": "8443",
+        "MDNS_PUBLISH": "false",
+    }
+)
+assert (
+    legacy["ip"],
+    legacy["hostname"],
+    legacy["http_port"],
+    legacy["https_port"],
+    legacy["mdns_publish"],
+) == ("192.168.1.241", "espresso.local", 8080, 8443, False)
 assert gateway.load_config({**BASE, "GATEWAY_IP": "192.168.1.9"})["ip"] == "192.168.1.240"
 
 # Instance name: printable, at most 32 bytes, never a container id.
 assert cfg["name"] == "Kitchen server"
-assert gateway.instance_name("Caf\u00e9 \x07bar " + "\u00e9" * 20) == "Caf\u00e9 bar " + "\u00e9" * 11
+assert (
+    gateway.instance_name("Caf\u00e9 \x07bar " + "\u00e9" * 20) == "Caf\u00e9 bar " + "\u00e9" * 11
+)
 gateway.socket.gethostname = lambda: "3f2a9c81d7e0"
 assert gateway.instance_name("") == "Companion"
 gateway.socket.gethostname = lambda: "nas.lan"
@@ -60,24 +80,42 @@ except SystemExit:
     pass
 
 TXT = {b"obbw": b"1"}
-found = gateway.match_controller(cfg, "Cafe Bar", "cafe-bar.local.", TXT, ["fe80::1", "192.168.1.50"], 80)
+found = gateway.match_controller(
+    cfg, "Cafe Bar", "cafe-bar.local.", TXT, ["fe80::1", "192.168.1.50"], 80
+)
 assert found == (("Cafe Bar", ("192.168.1.50", 80)), None)
 assert gateway.match_controller(cfg, "Printer", "printer.local.", {}, ["192.168.1.9"], 80) == (
-    None, "not an Open Brew by Weight controller")
+    None,
+    "not an Open Brew by Weight controller",
+)
 assert gateway.match_controller(cfg, "Cafe Bar", "cafe-bar.local.", TXT, ["fe80::1"], 80) == (
-    None, "no IPv4 address")
+    None,
+    "no IPv4 address",
+)
 for wanted in ("cafe bar", "cafe-bar"):
     chosen = {**cfg, "controller_name": wanted}
-    assert gateway.match_controller(chosen, "Cafe Bar", "cafe-bar.local.", TXT, ["192.168.1.50"], 80)[0]
+    assert gateway.match_controller(
+        chosen, "Cafe Bar", "cafe-bar.local.", TXT, ["192.168.1.50"], 80
+    )[0]
     assert gateway.match_controller(chosen, "Other", "other.local.", TXT, ["192.168.1.51"], 80) == (
-        None, "not the controller named in OBBW_CONTROLLER_NAME")
+        None,
+        "not the controller named in OBBW_CONTROLLER_NAME",
+    )
 assert gateway.match_controller(named, "Cafe Bar", "cafe-bar.local.", {}, ["192.168.1.50"], 80)[0]
 assert gateway.match_controller(named, "Other", "other.local.", TXT, ["192.168.1.51"], 80) == (
-    None, "not cafe-bar.local")
+    None,
+    "not cafe-bar.local",
+)
+
 
 def verify(ca, leaf, host):
-    return subprocess.run(["openssl", "verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)],
-                          capture_output=True).returncode == 0
+    return (
+        subprocess.run(
+            ["openssl", "verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
 
 
 with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporary:
@@ -97,22 +135,34 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     page = (run / "www/index.en.html").read_text()
     assert "Found Cafe Bar at 192.168.1.50:8080" in page and '<html lang="en">' in page
     assert "data-text='http://openbrewbyweight-secure.local'" in page
-    assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in page
+    assert (
+        "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.mobileconfig'" in page
+    )
     assert "data-text='http://openbrewbyweight-secure.local/openbrewbyweight-ca.crt'" in page
     assert "index.en.html" in conf and conf.count("location = /__companion/gateway") == 2
     plain = conf.split("ssl default_server", 1)[0]
-    assert "location ^~ /__companion/log {" in plain and "HTTPS_REQUIRED" in plain, "the stored log never goes in clear"
+    assert "location ^~ /__companion/log {" in plain and "HTTPS_REQUIRED" in plain, (
+        "the stored log never goes in clear"
+    )
     assert conf.count("location ^~ /__companion/log {") == 1
-    assert "location = /__companion/erase {" in plain and conf.count("location = /__companion/erase {") == 1, \
-        "erasing the pairing never goes in clear"
-    assert "location ^~ /__companion/archive {" in plain and conf.count("location ^~ /__companion/archive {") == 1, \
-        "the archive never goes in clear either"
-    assert conf.count("return 301 /__companion/gateway;") == 2, "the gateway's earlier status address redirects"
+    assert (
+        "location = /__companion/erase {" in plain
+        and conf.count("location = /__companion/erase {") == 1
+    ), "erasing the pairing never goes in clear"
+    assert (
+        "location ^~ /__companion/archive {" in plain
+        and conf.count("location ^~ /__companion/archive {") == 1
+    ), "the archive never goes in clear either"
+    assert conf.count("return 301 /__companion/gateway;") == 2, (
+        "the gateway's earlier status address redirects"
+    )
     assert "Open Brew by Weight Companion · Kitchen server" in page
     assert 'fetch("https://openbrewbyweight-secure.local/__companion/ping"' in page
     assert f"proxy_cache_path {run}/cache " in conf
     api = conf.split("    location / {", 1)[1].split("\n    }", 1)[0]
-    assert "proxy_pass" in api and "proxy_cache" not in api, "API and WebSocket traffic is never cached"
+    assert "proxy_pass" in api and "proxy_cache" not in api, (
+        "API and WebSocket traffic is never cached"
+    )
     assert conf.count("proxy_cache webui;") == 2
     for rendered in (conf, page):
         assert not re.search(r"@[A-Z_]+@", rendered), "unfilled placeholder"
@@ -124,19 +174,32 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporar
     assert "https://openbrewbyweight-secure.local:8443/" in (run / "www/index.en.html").read_text()
 
     target = ("Cafe Bar", ("192.168.1.50", 80))
-    gateway.write_status(cfg, data, run, target, "mdns", {"Printer": {"controller": False, "note": "x"}})
+    gateway.write_status(
+        cfg, data, run, target, "mdns", {"Printer": {"controller": False, "note": "x"}}
+    )
     status = json.loads((run / "status.json").read_text())
-    assert status["controller"] == {"name": "Cafe Bar", "ip": "192.168.1.50", "port": 80, "source": "mdns"}
+    assert status["controller"] == {
+        "name": "Cafe Bar",
+        "ip": "192.168.1.50",
+        "port": 80,
+        "source": "mdns",
+    }
     assert status["seen"]["Printer"]["note"] == "x" and status["certificate_expires"]
-    assert status["setup_url"] == "http://openbrewbyweight-secure.local" and status["name"] == "Kitchen server"
+    assert (
+        status["setup_url"] == "http://openbrewbyweight-secure.local"
+        and status["name"] == "Kitchen server"
+    )
 
     assert gateway.remembered_controller(cfg, data) is None
     gateway.remember_controller(cfg, data, target)
     assert gateway.remembered_controller(cfg, data) == (target, "remembered")
     gateway.remember_controller(cfg, data, target, "scan")
-    assert gateway.remembered_controller(cfg, data) == (target, "scan"), "a searched controller is checked again"
-    assert gateway.remembered_controller({**cfg, "controller_name": "other"}, data) is None, \
+    assert gateway.remembered_controller(cfg, data) == (target, "scan"), (
+        "a searched controller is checked again"
+    )
+    assert gateway.remembered_controller({**cfg, "controller_name": "other"}, data) is None, (
         "a different controller choice must not reuse the remembered one"
+    )
 
     renamed = {**cfg, "hostname": "brew.local"}
     assert gateway.ensure_certificates(renamed, data) is True
@@ -157,7 +220,9 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-log-") as temporary:
     kept = sorted(path.name for path in folder.iterdir())
     assert kept == ["companion.log", "companion.log.1", "companion.log.2"], kept
     first = (folder / "companion.log").read_text().splitlines()[0]
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} INFO obbw\.companion: line \d+", first), first
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} INFO obbw\.companion: line \d+", first
+    ), first
     denied = data / "denied"
     denied.mkdir()
     os.chmod(denied, 0o500)

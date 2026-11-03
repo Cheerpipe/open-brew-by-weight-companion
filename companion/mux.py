@@ -38,8 +38,17 @@ STATS_WINDOWS, FILTER_MAX = (10, 50, 100), 8
 # moves them on (the firmware's src/tests/fixtures/companion_replay_v1.json lists them).
 CLOCKS = ("timeUtcSec",)
 FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
-DEFAULTS = {"history": {"offset": 0, "limit": 20, "dir": "desc", "types": ()},
-            "stats": {"offset": 0, "limit": 10, "sort": "date", "dir": "desc", "filter": "{}", "window": 10}}
+DEFAULTS = {
+    "history": {"offset": 0, "limit": 20, "dir": "desc", "types": ()},
+    "stats": {
+        "offset": 0,
+        "limit": 10,
+        "sort": "date",
+        "dir": "desc",
+        "filter": "{}",
+        "window": 10,
+    },
+}
 ROWS = {"history": "records", "stats": "rows"}
 STORE = {"history": "history", "stats": "shots"}
 CAPACITY = {"history": HISTORY_CAPACITY, "stats": SHOT_LOG_CAPACITY}
@@ -64,7 +73,13 @@ def _reject(_):
 
 def _row_id(row):
     """A whole row's id: a History record names it, a Stats row starts with it."""
-    return row.get("id") if isinstance(row, dict) else row[0] if isinstance(row, list) and row else None
+    return (
+        row.get("id")
+        if isinstance(row, dict)
+        else row[0]
+        if isinstance(row, list) and row
+        else None
+    )
 
 
 # --- Op validation (the firmware's whitelists and ranges) -------------------------
@@ -77,8 +92,12 @@ def _number(message, name, low, high):
     if name not in message:
         return None
     value = message[name]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or \
-            not low <= value <= high:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or value != int(value)
+        or not low <= value <= high
+    ):
         raise Invalid()
     return int(value)
 
@@ -191,7 +210,8 @@ class Merged:
             part[key], size = value, size + item
         frames.append(part)
         return [dumps({**head, "changes": frames[0]})] + [
-            dumps({"type": kind, "changes": changes}) for changes in frames[1:]]
+            dumps({"type": kind, "changes": changes}) for changes in frames[1:]
+        ]
 
 
 # --- Screens ----------------------------------------------------------------------------
@@ -214,7 +234,13 @@ class Screen:
         self.home = self.card = False  # Holds a snapshot of each.
         self.settings = self.settings_synced = False
         self.diagnostic = self.diagnostic_synced = False
-        self.log, self.log_after, self.log_owed, self.log_invalid, self.log_missed = False, 0, False, False, 0
+        self.log, self.log_after, self.log_owed, self.log_invalid, self.log_missed = (
+            False,
+            0,
+            False,
+            False,
+            0,
+        )
         self.records = {"history": Record("history"), "stats": Record("stats")}
         self.stats_seq, self.stats_map = 0, {}
         self.until, self.hidden = 0.0, False
@@ -248,7 +274,7 @@ class Screen:
                 self.queued -= len(text)
                 try:
                     await self.ws.send_str(text)
-                except (ConnectionError, RuntimeError):
+                except ConnectionError, RuntimeError:
                     self.closed = True
                     return
 
@@ -296,7 +322,14 @@ class View:
     def key(self, params):
         if self.kind == "history":
             return (params["offset"], params["limit"], params["dir"], params["types"])
-        return (params["offset"], params["limit"], params["sort"], params["dir"], params["filter"], params["window"])
+        return (
+            params["offset"],
+            params["limit"],
+            params["sort"],
+            params["dir"],
+            params["filter"],
+            params["window"],
+        )
 
     def op(self, key, request, fetch=False):
         op = {"op": self.kind, "on": True}
@@ -326,8 +359,11 @@ class View:
         return op
 
     def members(self, group):
-        return [screen for screen in self.mux.bound()
-                if screen.records[self.kind].group == group and not screen.records[self.kind].replica]
+        return [
+            screen
+            for screen in self.mux.bound()
+            if screen.records[self.kind].group == group and not screen.records[self.kind].replica
+        ]
 
     def _start(self, frame):
         return self.kind == "history" or frame.get("rowBase") == 0
@@ -353,44 +389,84 @@ class View:
         request = _number(message, "request", 1, U32)
         tag = _number(message, "tag", 1, U32)
         offset = _number(message, "offset", 0, U32)
-        limit = _number(message, "limit", 1, HISTORY_PAGE_MAX if self.kind == "history" else SHOT_LOG_CAPACITY)
+        limit = _number(
+            message, "limit", 1, HISTORY_PAGE_MAX if self.kind == "history" else SHOT_LOG_CAPACITY
+        )
         direction = _choice(message, "dir", ("asc", "desc"))
         fetch = _flag(message, "fetch")
         record = screen.records[self.kind]
         if self.kind == "history":
-            _fields(message, {"op", "on", "offset", "limit", "dir", "fetch", "request", "types", "tag"})
+            _fields(
+                message, {"op", "on", "offset", "limit", "dir", "fetch", "request", "types", "tag"}
+            )
             values = {"offset": offset, "limit": limit, "dir": direction, "types": _types(message)}
             replaced = {"types": ()}
         else:
-            _fields(message, {"op", "on", "offset", "limit", "sort", "dir", "fetch", "request", "filter", "window",
-                              "tag"})
+            _fields(
+                message,
+                {
+                    "op",
+                    "on",
+                    "offset",
+                    "limit",
+                    "sort",
+                    "dir",
+                    "fetch",
+                    "request",
+                    "filter",
+                    "window",
+                    "tag",
+                },
+            )
             window = _number(message, "window", 0, U32)
             if window is not None and window not in STATS_WINDOWS:
                 raise Invalid()
-            values = {"offset": offset, "limit": limit, "sort": _choice(message, "sort", ("date", "rating")),
-                      "dir": direction, "filter": _filter(message), "window": window}
+            values = {
+                "offset": offset,
+                "limit": limit,
+                "sort": _choice(message, "sort", ("date", "rating")),
+                "dir": direction,
+                "filter": _filter(message),
+                "window": window,
+            }
             replaced = {"filter": "{}", "window": 10}
         given = {name: value for name, value in values.items() if value is not None}
         if not on:
             if set(message) - {"op", "on"}:
                 raise Invalid()
             self.unsubscribe(screen)
-        elif fetch:  # Without a view of its own it is Home's rows-only Stats fetch, as on the controller.
+        elif (
+            fetch
+        ):  # Without a view of its own it is Home's rows-only Stats fetch, as on the controller.
             if offset is None or tag is not None or (self.kind == "stats" and "window" in given):
                 raise Invalid()
             self.fetch(screen, request or 0, {**record.params, **given})
-        elif self.kind == "stats" and record.group is not None and set(given) == {"window"} and \
-                request is None and tag is None:
-            self.subscribe(screen, record.request, {**record.params, "window": given["window"]}, window_only=True)
+        elif (
+            self.kind == "stats"
+            and record.group is not None
+            and set(given) == {"window"}
+            and request is None
+            and tag is None
+        ):
+            self.subscribe(
+                screen,
+                record.request,
+                {**record.params, "window": given["window"]},
+                window_only=True,
+            )
         else:
-            self.subscribe(screen, request or 0, {**record.params, **replaced, **given}, tag=tag or 0)
+            self.subscribe(
+                screen, request or 0, {**record.params, **replaced, **given}, tag=tag or 0
+            )
 
     # The replica: pages from the archive's copy, no upstream window
     def fetch(self, screen, request, params):
         if self.mux.companion.archive.serving():
             self.mux.companion.spawn(self._serve(screen, request, params, False, fetch=True))
         else:
-            self.mux.attribute(screen)  # What it leaves out is its own window's, not the controller's.
+            self.mux.attribute(
+                screen
+            )  # What it leaves out is its own window's, not the controller's.
             self._queue(self.key(params), target=(screen, request))
 
     def refresh(self):
@@ -401,7 +477,9 @@ class View:
             record = screen.records[self.kind]
             if record.replica and record.group is not None:
                 record.serial += 1
-                self.mux.companion.spawn(self._serve(screen, record.request, record.params, not record.synced))
+                self.mux.companion.spawn(
+                    self._serve(screen, record.request, record.params, not record.synced)
+                )
 
     async def _serve(self, screen, request, params, snapshot, fetch=False, tag=0):
         """One page from the replica; when its store cannot catch up in time (link down, no answer
@@ -414,13 +492,23 @@ class View:
             return  # A page carries the controller's boot: it goes with Home's snapshot (Mux._on_home).
         if ready and self.mux.home.boot is not None:
             try:
-                page = await archive.page(STORE[self.kind], self._query(params), params["offset"],
-                                          params["limit"], self.mux.home.boot)
+                page = await archive.page(
+                    STORE[self.kind],
+                    self._query(params),
+                    params["offset"],
+                    params["limit"],
+                    self.mux.home.boot,
+                )
                 if self.kind == "stats" and (not fetch or record.group is not None):
-                    header = (await archive.header(params["window"], self.mux.active_preset(), page["epoch"],
-                                                   ((), (), ())))[0]
+                    header = (
+                        await archive.header(
+                            params["window"], self.mux.active_preset(), page["epoch"], ((), (), ())
+                        )
+                    )[0]
             except (sqlite3.Error, Unavailable, ValueError) as error:
-                log(f"the archive could not build a {self.kind} page ({error}); the controller sends it")
+                log(
+                    f"the archive could not build a {self.kind} page ({error}); the controller sends it"
+                )
                 page = None
         if screen.closed or (not fetch and (record.serial != serial or not record.replica)):
             return
@@ -439,7 +527,9 @@ class View:
         else:
             frame, tag = pages.history_frame(page, request, snapshot, tag)
             frames = [frame]
-        if page["archive"] is not None:  # Rows only the archive keeps: its histories and gaps name them.
+        if (
+            page["archive"] is not None
+        ):  # Rows only the archive keeps: its histories and gaps name them.
             frames[0] = frames[0][:-1] + ',"archive":' + dumps(page["archive"]) + "}"
         for text in frames:
             screen.send(text)
@@ -450,9 +540,14 @@ class View:
         if self.kind == "history":
             return {"dir": params["dir"], "types": list(params["types"])}
         criteria = json.loads(params["filter"])
-        return {"sort": params["sort"], "dir": params["dir"], "bad": criteria.get("bad", False),
-                "result": criteria.get("result", []), "preset": criteria.get("preset", []),
-                "scale": criteria.get("scale", [])}
+        return {
+            "sort": params["sort"],
+            "dir": params["dir"],
+            "bad": criteria.get("bad", False),
+            "result": criteria.get("result", []),
+            "preset": criteria.get("preset", []),
+            "scale": criteria.get("scale", []),
+        }
 
     def subscribe(self, screen, request, params, window_only=False, tag=0):
         record = screen.records[self.kind]
@@ -462,8 +557,9 @@ class View:
             record.serial += 1
             self.mux.attribute(screen)
             self.settle()  # Its upstream window, if it held one, is no longer its.
-            self.mux.companion.spawn(self._serve(screen, request, params, not window_only,
-                                                 tag=0 if window_only else tag))
+            self.mux.companion.spawn(
+                self._serve(screen, request, params, not window_only, tag=0 if window_only else tag)
+            )
             return
         self._upstream_subscribe(screen, request, params, window_only)
 
@@ -472,7 +568,9 @@ class View:
         record.replica = False
         old, group = record.group, self.key(params)
         # Nobody else holds the standing window: this screen may move it.
-        alone = self.standing is not None and not any(s is not screen for s in self.members(self.standing))
+        alone = self.standing is not None and not any(
+            s is not screen for s in self.members(self.standing)
+        )
         record.params, record.group, record.request = params, group, request
         self.mux.attribute(screen)
         if self.standing is None:
@@ -516,8 +614,11 @@ class View:
 
     def settle(self):
         """After a screen left: promote another group, or end the upstream window."""
-        screens = [screen for screen in self.mux.bound()
-                   if screen.records[self.kind].group is not None and not screen.records[self.kind].replica]
+        screens = [
+            screen
+            for screen in self.mux.bound()
+            if screen.records[self.kind].group is not None and not screen.records[self.kind].replica
+        ]
         if not screens:
             if self.standing is not None:
                 self.mux.up({"op": self.kind, "on": False})
@@ -559,7 +660,9 @@ class View:
                 self.deliver(screen, frame, record.request)
             record.synced = True
         elif self.buffer_state == "over":
-            self._subscribe_upstream(self.standing)  # Over the bound: one fresh snapshot, without a tag.
+            self._subscribe_upstream(
+                self.standing
+            )  # Over the bound: one fresh snapshot, without a tag.
 
     def _join(self, screen, group):
         frames, complete = self.pages.get(group, ((), False))
@@ -573,7 +676,11 @@ class View:
 
     # Fetch queue: one in flight, identical ones coalesced
     def _queue(self, key, group=None, target=None, behind_inflight=False):
-        candidates = self.queue if behind_inflight else [*([self.inflight] if self.inflight else ()), *self.queue]
+        candidates = (
+            self.queue
+            if behind_inflight
+            else [*([self.inflight] if self.inflight else ()), *self.queue]
+        )
         for fetch in candidates:
             if fetch.key == key:
                 fetch.group = fetch.group or group
@@ -584,7 +691,9 @@ class View:
         self.pump()
 
     def _wanted(self, fetch):
-        return fetch.targets or (fetch.group is not None and fetch.group != self.standing and self.members(fetch.group))
+        return fetch.targets or (
+            fetch.group is not None and fetch.group != self.standing and self.members(fetch.group)
+        )
 
     def pump(self):
         if self.inflight is not None or self.awaiting or self.mux.upstream.state != "open":
@@ -593,7 +702,9 @@ class View:
             fetch = self.queue.pop(0)
             if self._wanted(fetch):
                 fetch.id = self._id()
-                fetch.timer = asyncio.get_running_loop().call_later(FETCH_TIMEOUT_S, self._expired, fetch)
+                fetch.timer = asyncio.get_running_loop().call_later(
+                    FETCH_TIMEOUT_S, self._expired, fetch
+                )
                 self.inflight = fetch
                 self.mux.up(self.op(fetch.key, fetch.id, fetch=True))
                 return
@@ -607,7 +718,9 @@ class View:
     # Upstream frames
     def on_frame(self, frame):
         request = frame.get("request")
-        if not isinstance(request, int) or (self.kind == "stats" and not isinstance(frame.get("seq"), int)):
+        if not isinstance(request, int) or (
+            self.kind == "stats" and not isinstance(frame.get("seq"), int)
+        ):
             return
         if self.standing is not None and request == self.request:
             self._standing(frame)
@@ -633,7 +746,9 @@ class View:
             epoch = frame.get("epoch")
             if self.epoch is not None and epoch != self.epoch:
                 self._epoch_moved()
-                if self.kind == "stats":  # A new shot while a screen shows Stats: the archive catches up now.
+                if (
+                    self.kind == "stats"
+                ):  # A new shot while a screen shows Stats: the archive catches up now.
                     self.mux.companion.archive.refresh("shots", epoch)
             self.epoch = epoch
         for screen in self.members(self.standing):
@@ -651,8 +766,13 @@ class View:
         known, page, done = {}, None, False
         for frame in self.buffer:
             if self._start(frame):
-                page = {"group": self.standing, "tag": frame.get("tag"), "boot": frame.get("boot"),
-                        "epoch": frame.get("epoch"), "rows": {}}
+                page = {
+                    "group": self.standing,
+                    "tag": frame.get("tag"),
+                    "boot": frame.get("boot"),
+                    "epoch": frame.get("epoch"),
+                    "rows": {},
+                }
             for row in frame.get(ROWS[self.kind]) or ():
                 row = known.get(row) if type(row) is int else row
                 rid = _row_id(row)
@@ -672,8 +792,13 @@ class View:
             self.parked = None
         if not any(type(row) is int for row in rows):
             return frame
-        if frame.get("boot") == parked["boot"] and all(type(row) is not int or row in parked["rows"] for row in rows):
-            return {**frame, name: [parked["rows"][row] if type(row) is int else row for row in rows]}
+        if frame.get("boot") == parked["boot"] and all(
+            type(row) is not int or row in parked["rows"] for row in rows
+        ):
+            return {
+                **frame,
+                name: [parked["rows"][row] if type(row) is int else row for row in rows],
+            }
         self.parked = None
         self._subscribe_upstream(self.standing)
         return None
@@ -681,13 +806,20 @@ class View:
     def unpark(self, epoch=None):
         """Drop the parked page, or with `epoch` only when its store moved, unless a revalidation runs."""
         parked = self.parked
-        if parked and parked.get("request") != self.request and (epoch is None or epoch != parked["epoch"]):
+        if (
+            parked
+            and parked.get("request") != self.request
+            and (epoch is None or epoch != parked["epoch"])
+        ):
             self.parked = None
 
     def _epoch_moved(self):
         """The store changed: every other group's page is out of date; one fetch per group."""
         self.pages.clear()
-        groups = {screen.records[self.kind].group for screen in self.mux.bound()} - {None, self.standing}
+        groups = {screen.records[self.kind].group for screen in self.mux.bound()} - {
+            None,
+            self.standing,
+        }
         for group in sorted(groups, key=repr):
             self._queue(group, group=group, behind_inflight=True)
 
@@ -720,23 +852,37 @@ class Mux:
     def __init__(self, companion, relay):
         self.companion, self.relay = companion, relay
         self.screens = set()
-        self.claimed = set()  # Browser ids whose relayed claim (or sign-in) the controller accepted.
+        self.claimed = (
+            set()
+        )  # Browser ids whose relayed claim (or sign-in) the controller accepted.
         self.upstream = Upstream(companion, relay, self)
         self.views = {"history": View(self, "history"), "stats": View(self, "stats")}
         self.home, self.settings, self.diagnostic = Merged(), Merged(), Merged()
         self.idle = self.linger = None
         self.changed = asyncio.Event()
-        self.attributed = collections.deque(maxlen=64)  # (time, screen) of ops sent upstream for a screen
+        self.attributed = collections.deque(
+            maxlen=64
+        )  # (time, screen) of ops sent upstream for a screen
         self._reset()
 
     def _reset(self, park=True):
         self.home.clear()
         self.settings.clear()
         self.diagnostic.clear()
-        self.settings_tag, self.settings_on, self.diagnostic_on, self.log_on = None, False, False, False
+        self.settings_tag, self.settings_on, self.diagnostic_on, self.log_on = (
+            None,
+            False,
+            False,
+            False,
+        )
         self.card, self.card_bytes, self.card_valid, self.card_live = [], 0, False, False
         self.card_resync_at = self.resync_at = float("-inf")
-        self.ring, self.ring_bytes, self.log_meta, self.log_more = collections.deque(), 0, None, False
+        self.ring, self.ring_bytes, self.log_meta, self.log_more = (
+            collections.deque(),
+            0,
+            None,
+            False,
+        )
         self.alive_waiters = []
         for view in self.views.values():
             view.clear(park)
@@ -746,10 +892,12 @@ class Mux:
 
     def status(self):
         screens = self.bound()
-        views = {"home": len(screens),
-                 "settings": sum(screen.settings for screen in screens),
-                 "diagnostic": sum(screen.diagnostic for screen in screens),
-                 "log": sum(screen.log for screen in screens)}
+        views = {
+            "home": len(screens),
+            "settings": sum(screen.settings for screen in screens),
+            "diagnostic": sum(screen.diagnostic for screen in screens),
+            "log": sum(screen.log for screen in screens),
+        }
         for kind in self.views:
             views[kind] = sum(screen.records[kind].group is not None for screen in screens)
         return {"screens": len(screens), "owner": bool(self.claimed), "views": views}
@@ -790,24 +938,34 @@ class Mux:
 
     def upstream_closed(self, code, deliberate, heard=False):
         screens = list(self.screens)
-        if code == 4001:  # The controller gave the Web UI to a direct browser, or forgot the claim (reboot).
+        if (
+            code == 4001
+        ):  # The controller gave the Web UI to a direct browser, or forgot the claim (reboot).
             self.claimed.clear()
-            log("the Web UI was opened directly on another device; every companion screen offers Reload")
+            log(
+                "the Web UI was opened directly on another device; every companion screen offers Reload"
+            )
             for screen in screens:
                 screen.close(4001, "direct" if heard else "")
-        elif code == 4003:  # An op failed the controller's validation: name the screens that sent one.
+        elif (
+            code == 4003
+        ):  # An op failed the controller's validation: name the screens that sent one.
             log("the controller rejected an op on the shared live updates")
             recent = {screen for at, screen in self.attributed if _now() - at <= ATTRIBUTION_S}
             for screen in screens:
                 screen.close(4003 if screen in recent else 4002)
         elif not deliberate:
             if code is not None:  # A failed open is already named where it failed.
-                log(f"the shared live updates ended (code {code}, "
-                    f"{'heard' if heard else 'never heard'}); the screens reconnect")
+                log(
+                    f"the shared live updates ended (code {code}, "
+                    f"{'heard' if heard else 'never heard'}); the screens reconnect"
+                )
             for screen in screens:
                 screen.close(4002 if code == 4002 else 1001)
         self.attributed.clear()
-        self._reset(park=deliberate)  # An idle close keeps the parked pages; a lost session may be a reboot.
+        self._reset(
+            park=deliberate
+        )  # An idle close keeps the parked pages; a lost session may be a reboot.
 
     def replica_changed(self, store=None):
         """The replica's copy changed or stopped serving: the pages it serves are built again."""
@@ -855,7 +1013,9 @@ class Mux:
         if not screen.bound:
             return
         screen.bound = screen.log = screen.diagnostic = False
-        remaining = bool(self.bound())  # The last screen leaving: the session closes soon, nothing to send.
+        remaining = bool(
+            self.bound()
+        )  # The last screen leaving: the session closes soon, nothing to send.
         for view in self.views.values():
             view.unsubscribe(screen, settle=remaining)
         if remaining:
@@ -893,7 +1053,9 @@ class Mux:
         except ValueError:
             screen.close(1008)
         except Invalid:
-            log(f"a screen's {op[:12]} op failed validation; closing it so it resets its list views")
+            log(
+                f"a screen's {op[:12]} op failed validation; closing it so it resets its list views"
+            )
             screen.close(4003)
 
     def _bind(self, screen, message):
@@ -901,7 +1063,9 @@ class Mux:
         if not isinstance(client, str) or client not in self.claimed:
             screen.close(4001)
             return
-        if self.upstream.state == "closing":  # Caught the idle close: reconnect quietly in a moment.
+        if (
+            self.upstream.state == "closing"
+        ):  # Caught the idle close: reconnect quietly in a moment.
             screen.close(4002)
             return
         screen.id, screen.bound = client, True
@@ -968,7 +1132,9 @@ class Mux:
         """(seconds, hidden) for the upstream: the most of the visible screens, hidden only when all are."""
         now, screens = _now(), self.bound()
         visible = [screen for screen in screens if not screen.hidden]
-        return max((screen.seconds(now) for screen in visible), default=0), bool(screens) and not visible
+        return max((screen.seconds(now) for screen in visible), default=0), bool(
+            screens
+        ) and not visible
 
     def _resync(self, screen):
         """Answered from what the companion holds; the same screen again within 30 s asks the controller."""
@@ -1002,11 +1168,31 @@ class Mux:
             screen.home = False
             return
         changes = self.home.changes
-        changes = {**changes, **{key: changes[key] + int(_now() - self.home.clock_at[key])
-                                 for key in CLOCKS if type(changes.get(key)) is int}}
-        if presets and screen.presets_tag is not None and changes.get("presetsTag") == screen.presets_tag:
+        changes = {
+            **changes,
+            **{
+                key: changes[key] + int(_now() - self.home.clock_at[key])
+                for key in CLOCKS
+                if type(changes.get(key)) is int
+            },
+        }
+        if (
+            presets
+            and screen.presets_tag is not None
+            and changes.get("presetsTag") == screen.presets_tag
+        ):
             changes = {key: value for key, value in changes.items() if key != "presets"}
-        screen.send(dumps({"v": 1, "type": "home", "boot": self.home.boot, "snapshot": True, "changes": changes}))
+        screen.send(
+            dumps(
+                {
+                    "v": 1,
+                    "type": "home",
+                    "boot": self.home.boot,
+                    "snapshot": True,
+                    "changes": changes,
+                }
+            )
+        )
         screen.home = True
 
     def _send_card(self, screen):
@@ -1019,16 +1205,24 @@ class Mux:
 
     def _card_recover(self):
         """Over its bound the card cannot serve a new screen: one upstream resync, at most once a minute."""
-        if not self.card_live and _now() - self.card_resync_at >= RESYNC_UPSTREAM_S and self.upstream.heard:
+        if (
+            not self.card_live
+            and _now() - self.card_resync_at >= RESYNC_UPSTREAM_S
+            and self.upstream.heard
+        ):
             self._resync_upstream()
 
     def _on_home(self, frame, text):
         active, boot = self.active_preset(), self.home.boot
         if not self.home.apply(frame):
             return
-        if self.home.boot != boot:  # Replica pages carry the controller's boot: those waiting for it go now.
+        if (
+            self.home.boot != boot
+        ):  # Replica pages carry the controller's boot: those waiting for it go now.
             self.replica_changed()
-        elif self.active_preset() != active:  # The controller sends its Stats page again; so does the replica.
+        elif (
+            self.active_preset() != active
+        ):  # The controller sends its Stats page again; so does the replica.
             self.views["stats"].refresh()
         snapshot = frame.get("snapshot") is True
         for screen in self.bound():
@@ -1062,8 +1256,10 @@ class Mux:
         deadline = loop.time() + timeout
         while self.upstream.state == "open":
             current = self.home.changes.get("lastCommand.requestId")
-            if isinstance(current, int) and (_newer(current, request_id) or (
-                    current == request_id and self.home.changes.get("lastCommand.state") in FINAL)):
+            if isinstance(current, int) and (
+                _newer(current, request_id)
+                or (current == request_id and self.home.changes.get("lastCommand.state") in FINAL)
+            ):
                 return True
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -1125,8 +1321,14 @@ class Mux:
             screen.diagnostic_synced = False
 
     def _diagnostic_settle(self):
-        if self.diagnostic_on and not any(screen.diagnostic for screen in self.bound()) and not self.linger:
-            self.linger = asyncio.get_running_loop().call_later(DIAGNOSTIC_LINGER_S, self._diagnostic_off)
+        if (
+            self.diagnostic_on
+            and not any(screen.diagnostic for screen in self.bound())
+            and not self.linger
+        ):
+            self.linger = asyncio.get_running_loop().call_later(
+                DIAGNOSTIC_LINGER_S, self._diagnostic_off
+            )
 
     def _diagnostic_off(self):
         self.linger = None
@@ -1167,7 +1369,9 @@ class Mux:
         if not isinstance(events, list) or not isinstance(boot, int):
             return
         screens = [screen for screen in self.bound() if screen.log]
-        if frame.get("cursorInvalid") is True or (self.log_meta is not None and self.log_meta["bootId"] != boot):
+        if frame.get("cursorInvalid") is True or (
+            self.log_meta is not None and self.log_meta["bootId"] != boot
+        ):
             self.ring.clear()
             self.ring_bytes = 0
             for screen in screens:
@@ -1179,15 +1383,19 @@ class Mux:
                     screen.log_missed += missed
         for event in events:
             sequence = event.get("sequence") if isinstance(event, dict) else None
-            if not isinstance(sequence, int) or (self.ring and not _newer(sequence, self.ring[-1][0])):
+            if not isinstance(sequence, int) or (
+                self.ring and not _newer(sequence, self.ring[-1][0])
+            ):
                 continue
             size = len(dumps(event))
             self.ring.append((sequence, event, size))
             self.ring_bytes += size
         while len(self.ring) > LOG_EVENTS or self.ring_bytes > LOG_BYTES:
             self.ring_bytes -= self.ring.popleft()[2]
-        self.log_meta = {name: frame.get(name) if isinstance(frame.get(name), int) else 0
-                         for name in ("bootId", "historyOverwritten", "serialDropped")}
+        self.log_meta = {
+            name: frame.get(name) if isinstance(frame.get(name), int) else 0
+            for name in ("bootId", "historyOverwritten", "serialDropped")
+        }
         self.log_more = frame.get("hasMore") is True
         for screen in screens:
             self._log_serve(screen)
@@ -1219,10 +1427,19 @@ class Mux:
         chunks.append(chunk)
         for number, events in enumerate(chunks):
             first = number == 0
-            screen.send(dumps({"v": 1, "type": "log", **self.log_meta,
-                               "missedEvents": screen.log_missed if first else 0,
-                               "cursorInvalid": invalid and first, "events": events,
-                               "hasMore": number < len(chunks) - 1 or self.log_more}))
+            screen.send(
+                dumps(
+                    {
+                        "v": 1,
+                        "type": "log",
+                        **self.log_meta,
+                        "missedEvents": screen.log_missed if first else 0,
+                        "cursorInvalid": invalid and first,
+                        "events": events,
+                        "hasMore": number < len(chunks) - 1 or self.log_more,
+                    }
+                )
+            )
         if ring and start < len(ring):
             screen.log_after = ring[-1][0]
         elif invalid:

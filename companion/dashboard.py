@@ -32,22 +32,33 @@ def parse(text):
 
 
 def _code(entry):
-    return entry if isinstance(entry, str) else entry.get("code") if isinstance(entry, dict) else None
+    return (
+        entry if isinstance(entry, str) else entry.get("code") if isinstance(entry, dict) else None
+    )
 
 
 def reduce(dashboard, push):
     """The consumed fields this event carries, or None when it carries none."""
-    codes = WIDGETS if push else {code: keys for code, keys in WIDGETS.items() if code != "CMBackFlush"}
+    codes = (
+        WIDGETS if push else {code: keys for code, keys in WIDGETS.items() if code != "CMBackFlush"}
+    )
     reduced = {"connected": dashboard["connected"]} if "connected" in dashboard else {}
     widgets = []
     for widget in dashboard.get("widgets") if isinstance(dashboard.get("widgets"), list) else ():
         keys = codes.get(_code(widget)) if isinstance(widget, dict) else None
         output = widget.get("output") if keys else None
-        kept = {key: output[key] for key in keys if key in output} if isinstance(output, dict) else None
+        kept = (
+            {key: output[key] for key in keys if key in output}
+            if isinstance(output, dict)
+            else None
+        )
         if kept:
             widgets.append({"code": widget["code"], "output": kept})
-    removed = [_code(entry) for entry in dashboard.get("removedWidgets") or () if _code(entry) in codes] \
-        if isinstance(dashboard.get("removedWidgets"), list) else []
+    removed = (
+        [_code(entry) for entry in dashboard.get("removedWidgets") or () if _code(entry) in codes]
+        if isinstance(dashboard.get("removedWidgets"), list)
+        else []
+    )
     if widgets:
         reduced["widgets"] = widgets
     if removed:
@@ -63,7 +74,11 @@ def confirms(dashboard, op, value):
             continue
         if op == "temp" and widget.get("code") == "CMCoffeeBoiler":
             target = output.get("targetTemperature")
-            if isinstance(target, (int, float)) and not isinstance(target, bool) and round(target * 10) == value:
+            if (
+                isinstance(target, (int, float))
+                and not isinstance(target, bool)
+                and round(target * 10) == value
+            ):
                 return True
         if op in ("standby", "on") and widget.get("code") == "CMMachineStatus":
             if output.get("mode") == ("StandBy" if op == "standby" else "BrewingMode"):

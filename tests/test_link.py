@@ -75,7 +75,9 @@ class Upstream:
             return
         self.account, self.signed, self.rejected = identity, False, False
         if account:
-            asyncio.get_running_loop().call_later(0.05, self.sign_in, account["password"] == "correct horse")
+            asyncio.get_running_loop().call_later(
+                0.05, self.sign_in, account["password"] == "correct horse"
+            )
 
     def sign_in(self, ok):
         self.signed, self.rejected = ok, not ok
@@ -92,10 +94,18 @@ class Upstream:
         self.events.subscribed()
 
     def signed_in_for(self, account):
-        return self.signed and self.account == (account["email"], account["password"], account["serial"])
+        return self.signed and self.account == (
+            account["email"],
+            account["password"],
+            account["serial"],
+        )
 
     def rejected_for(self, account):
-        return self.rejected and self.account == (account["email"], account["password"], account["serial"])
+        return self.rejected and self.account == (
+            account["email"],
+            account["password"],
+            account["serial"],
+        )
 
     def stop(self):
         pass
@@ -124,9 +134,14 @@ class Controller:
         self.sessions = asyncio.Queue()
         self.transports = []
         self.relay = False  # The relay answers only once the link block asks for it.
-        self.login, self.auth_up = True, True  # GET /api/v1/auth: password on; the controller answers.
+        self.login, self.auth_up = (
+            True,
+            True,
+        )  # GET /api/v1/auth: password on; the controller answers.
         self.admin_screen = None  # The screen holding the Admin unlock, as the relay signs screens.
-        self.silent = False  # True: the relay drops the connection unanswered, as when the controller is off.
+        self.silent = (
+            False  # True: the relay drops the connection unanswered, as when the controller is off.
+        )
 
     async def pair_post(self, request):
         assert request.content_type == "application/json"
@@ -136,18 +151,23 @@ class Controller:
             assert "publicKey" not in body
             self.commitment, self.key_sent, self.revealed = body["commitment"], False, False
             return web.json_response({"state": "pending", "expiresInS": 600}, status=202)
-        assert self.key_sent, "the companion reveals its key only after it received the controller's"
+        assert self.key_sent, (
+            "the companion reveals its key only after it received the controller's"
+        )
         assert crypto.b64(crypto.commitment(crypto.unb64(body["publicKey"], 65))) == self.commitment
         if self.reveal_status != 202:
             return web.json_response({"error": "INVALID_REQUEST"}, status=self.reveal_status)
         self.revealed = True
-        return web.json_response({"state": "pending", "controllerKey": V["controllerKey"], "expiresInS": 590},
-                                 status=202)
+        return web.json_response(
+            {"state": "pending", "controllerKey": V["controllerKey"], "expiresInS": 590}, status=202
+        )
 
     async def pair_get(self, request):
         assert request.query["id"] == self.pair_requests[-1]["id"]
         self.key_sent = True
-        state = "pending" if self.pair_state == "approved" and not self.revealed else self.pair_state
+        state = (
+            "pending" if self.pair_state == "approved" and not self.revealed else self.pair_state
+        )
         return web.json_response({"state": state, "controllerKey": V["controllerKey"]})
 
     RELAY_CHALLENGE = bytes(range(16))  # Fixed; the handshake's formulas are covered by test_relay.
@@ -163,10 +183,16 @@ class Controller:
     async def relay_post(self, request):
         body = await request.json()
         nc = crypto.unb64(body["nonce"], 16)
-        assert crypto.unb64(body["mac"]) == crypto.mac(SECRET, b"R", self.RELAY_CHALLENGE, nc), \
+        assert crypto.unb64(body["mac"]) == crypto.mac(SECRET, b"R", self.RELAY_CHALLENGE, nc), (
             "the companion proves the pairing secret"
-        return web.json_response({"mac": crypto.b64(crypto.mac(SECRET, b"Q", self.RELAY_CHALLENGE, nc)),
-                                  "ui": True, "link": True})
+        )
+        return web.json_response(
+            {
+                "mac": crypto.b64(crypto.mac(SECRET, b"Q", self.RELAY_CHALLENGE, nc)),
+                "ui": True,
+                "link": True,
+            }
+        )
 
     async def auth(self, request):
         """Signed in whenever the browser sent a session (sealed through the relay, so any value); Admin
@@ -174,9 +200,13 @@ class Controller:
         if not self.auth_up:
             return web.json_response({"error": "UNAVAILABLE"}, status=503)
         relay = request.headers.get("X-OBBW-Relay", "").split()
-        return web.json_response({"loginRequired": self.login,
-                                  "signedIn": bool(request.headers.get("X-WebUI-Session")),
-                                  "adminUnlocked": len(relay) == 5 and relay[3] == self.admin_screen})
+        return web.json_response(
+            {
+                "loginRequired": self.login,
+                "signedIn": bool(request.headers.get("X-WebUI-Session")),
+                "adminUnlocked": len(relay) == 5 and relay[3] == self.admin_screen,
+            }
+        )
 
     async def link(self, request):
         if self.mode == "not_paired":
@@ -184,7 +214,9 @@ class Controller:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         hello = json.loads(await ws.receive_str())
-        assert hello["t"] == "hello" and hello["protocol"] == 2 and hello["name"] == "Kitchen server"
+        assert (
+            hello["t"] == "hello" and hello["protocol"] == 2 and hello["name"] == "Kitchen server"
+        )
         nc = crypto.unb64(hello["nonce"], 16)
         mode = self.mode
         if mode == "version":  # A controller of another release: its link refuses this one.
@@ -195,15 +227,25 @@ class Controller:
             self.mode = "retry" if self.retries > 0 else "ok"
             await ws.send_json({"t": "error", "code": "RETRY_LATER"})
         elif mode in ("erase", "bad_erase"):
-            await ws.send_json({"t": "erase", "mac": crypto.b64(crypto.mac(SECRET if mode == "erase" else bytes(32),
-                                                                           b"E", nc))})
+            await ws.send_json(
+                {
+                    "t": "erase",
+                    "mac": crypto.b64(
+                        crypto.mac(SECRET if mode == "erase" else bytes(32), b"E", nc)
+                    ),
+                }
+            )
         else:
             ns = os.urandom(16)
             await ws.send_json({"t": "challenge", "nonce": crypto.b64(ns)})
             proof = json.loads(await ws.receive_str())
-            assert crypto.unb64(proof["mac"]) == crypto.mac(SECRET, b"C", nc, ns), "the companion proves the secret"
+            assert crypto.unb64(proof["mac"]) == crypto.mac(SECRET, b"C", nc, ns), (
+                "the companion proves the secret"
+            )
             await ws.send_json({"t": "ready", "mac": crypto.b64(crypto.mac(SECRET, b"F", nc, ns))})
-            session = Session(ws, FrameCodec(crypto.session_key(SECRET, nc, ns), send=b"f", receive=b"c"))
+            session = Session(
+                ws, FrameCodec(crypto.session_key(SECRET, nc, ns), send=b"f", receive=b"c")
+            )
             await self.sessions.put(session)
             self.transports.append(request.transport)
             if mode == "close":
@@ -242,7 +284,9 @@ class Session:
         deadline = asyncio.get_running_loop().time() + seconds
         try:
             while True:
-                frame = await asyncio.wait_for(self.frames.get(), deadline - asyncio.get_running_loop().time())
+                frame = await asyncio.wait_for(
+                    self.frames.get(), deadline - asyncio.get_running_loop().time()
+                )
                 assert frame is not None and frame["t"] in skip, f"unexpected {frame}"
         except asyncio.TimeoutError:
             pass
@@ -267,8 +311,9 @@ async def settles(read, want, timeout=3):
 
 def encrypt(generation, account):
     iv = os.urandom(12)
-    ct = AESGCM(crypto.credentials_key(SECRET)).encrypt(iv, json.dumps(account).encode(),
-                                                         f"obbw-creds|{generation}".encode())
+    ct = AESGCM(crypto.credentials_key(SECRET)).encrypt(
+        iv, json.dumps(account).encode(), f"obbw-creds|{generation}".encode()
+    )
     return {"t": "creds", "gen": generation, "iv": crypto.b64(iv), "ct": crypto.b64(ct)}
 
 
@@ -291,7 +336,10 @@ async def main():
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as http:
             # The identity holds the vector's companion key, so the code and secret match the firmware's.
             seed = service.Store(data)
-            seed.write("identity", {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "key": V["companionPrivate"]})
+            seed.write(
+                "identity",
+                {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "key": V["companionPrivate"]},
+            )
             companion = Companion("Kitchen server", data, http, Upstream)
             await companion.open_log()  # _serve opens it; the test builds the service by hand.
             upstream = companion.lm
@@ -303,23 +351,39 @@ async def main():
                 assert reply.status == 200 and "@STYLE@" not in page and "--ac:" in page
                 assert reply.headers["Cache-Control"] == "no-store"
             async with http.post(page_url + "/pair", data="{}") as reply:
-                assert reply.status == 415, "pairing needs a JSON request a foreign page cannot send unasked"
+                assert reply.status == 415, (
+                    "pairing needs a JSON request a foreign page cannot send unasked"
+                )
             async with http.post(page_url + "/pair", json={}) as reply:
                 assert reply.status == 409 and (await reply.json())["error"] == "NO_CONTROLLER"
 
             # --- Pairing (entry point a): commit, then reveal, polled while pending --
             companion.spawn(companion.run_link())
             companion.set_controller(target)
-            await eventually(lambda: companion.pairing.state == "pending" and companion.pairing.code)
-            identity = {"id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b", "name": "Kitchen server", "version": VERSION,
-                        "protocol": 1}
-            assert fake.pair_requests == [{**identity, "commitment": V["commitment"]},
-                                          {**identity, "publicKey": V["companionKey"]}]
+            await eventually(
+                lambda: companion.pairing.state == "pending" and companion.pairing.code
+            )
+            identity = {
+                "id": "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b",
+                "name": "Kitchen server",
+                "version": VERSION,
+                "protocol": 1,
+            }
+            assert fake.pair_requests == [
+                {**identity, "commitment": V["commitment"]},
+                {**identity, "publicKey": V["companionKey"]},
+            ]
             async with http.get(page_url + "/status") as reply:
                 status = await reply.json()
             assert status["pairing"]["code"] == V["sas"] and status["pairing"]["expiresInS"] > 590
-            assert status["paired"] is False and status["link"] == "down" and status["name"] == "Kitchen server"
-            companion.set_controller(target)  # Another announcement while pending sends nothing new.
+            assert (
+                status["paired"] is False
+                and status["link"] == "down"
+                and status["name"] == "Kitchen server"
+            )
+            companion.set_controller(
+                target
+            )  # Another announcement while pending sends nothing new.
             await asyncio.sleep(0.3)
             assert len(fake.pair_requests) == 2
             fake.pair_state = "approved"
@@ -329,15 +393,23 @@ async def main():
             assert secrets.stat().st_mode & 0o777 == 0o700
             assert all(path.stat().st_mode & 0o777 == 0o600 for path in secrets.iterdir())
             await eventually(lambda: companion.link == "open")
-            assert (await companion.status())["paired"] and (await companion.status())["pairedWith"] == "Cafe Bar"
-            assert companion.ws.get_extra_info("socket").getsockopt(
-                socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT) == 30000, "an unacknowledged ping closes the link"
+            assert (await companion.status())["paired"] and (await companion.status())[
+                "pairedWith"
+            ] == "Cafe Bar"
+            assert (
+                companion.ws.get_extra_info("socket").getsockopt(
+                    socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT
+                )
+                == 30000
+            ), "an unacknowledged ping closes the link"
             async with http.post(page_url + "/erase", json={}) as reply:
                 assert reply.status == 409, "a working pairing is forgotten in Admin, not here"
 
             # --- A ping as the link opens, cfg, then the account ------------------
             assert await session.next("ping", skip=()) == {"q": 1, "t": "ping", "up": False}
-            assert (await companion.status())["controller"]["name"] == "Cafe Bar", "falls back to discovery"
+            assert (await companion.status())["controller"]["name"] == "Cafe Bar", (
+                "falls back to discovery"
+            )
             await session.send({"t": "dev", "name": "Cafe Bar 2"})
             await eventually(lambda: companion.device_name == "Cafe Bar 2")
             status = await companion.status()
@@ -355,13 +427,30 @@ async def main():
             assert upstream.configured[-1] == (None, "ws", True), "no account yet"
             await session.send(encrypt(3, ACCOUNT))
             assert await session.next("creds") == {"q": 3, "t": "creds", "gen": 3, "ok": True}
-            assert await session.next("lm") == {"q": 4, "t": "lm", "sub": False, "ep": 0, "tok": 3000}, \
-                "a sign-in reports the new token's life at once"
-            assert await session.next("lm") == {"q": 5, "t": "lm", "sub": True, "ep": 1, "tok": 3000}
-            assert await session.next("ping", skip=()) == {"q": 6, "t": "ping", "up": True}, "a ping when up changes"
+            assert await session.next("lm") == {
+                "q": 4,
+                "t": "lm",
+                "sub": False,
+                "ep": 0,
+                "tok": 3000,
+            }, "a sign-in reports the new token's life at once"
+            assert await session.next("lm") == {
+                "q": 5,
+                "t": "lm",
+                "sub": True,
+                "ep": 1,
+                "tok": 3000,
+            }
+            assert await session.next("ping", skip=()) == {"q": 6, "t": "ping", "up": True}, (
+                "a ping when up changes"
+            )
             assert json.loads((secrets / "credentials.json").read_text()) == {"gen": 3, **ACCOUNT}
-            await session.send(encrypt(3, ACCOUNT))  # The controller resends it after each new session.
-            assert (await session.next("creds"))["ok"] is True and upstream.configured[-1][0] == ACCOUNT["email"]
+            await session.send(
+                encrypt(3, ACCOUNT)
+            )  # The controller resends it after each new session.
+            assert (await session.next("creds"))["ok"] is True and upstream.configured[-1][
+                0
+            ] == ACCOUNT["email"]
             await session.next("lm")
 
             # --- Fresh evidence of the controller pokes an open link ----------------
@@ -390,7 +479,9 @@ async def main():
 
             # --- A sync hold (a shot): no ping at all until it ends, then one at once ---
             await session.send({"t": "hold", "on": False, "sync": True})
-            await session.quiet(1.0, skip=())  # Two and a half ping intervals without a single frame.
+            await session.quiet(
+                1.0, skip=()
+            )  # Two and a half ping intervals without a single frame.
             # A controller that restarted mid-shot never ends the hold: its announcement (or relay
             # handshake) still pings, the one frame that finds the dead socket.
             companion.poke()
@@ -399,14 +490,18 @@ async def main():
             await session.send({"t": "hold", "on": False, "sync": False})
             began = asyncio.get_running_loop().time()
             await session.next("ping", skip=(), timeout=0.3)
-            assert asyncio.get_running_loop().time() - began < 0.2, "the first ping checks the link at once"
+            assert asyncio.get_running_loop().time() - began < 0.2, (
+                "the first ping checks the link at once"
+            )
 
             # --- Pushes: filtered per event, dropped when they carry nothing -------
             upstream.events.pushed(D["pushes"]["commandsOnly"], 0)
             upstream.events.pushed(D["pushes"]["backflush"], 0)
             push = await session.next("st")
             assert push["k"] == "push" and push["d"]["widgets"][0]["code"] == "CMBackFlush"
-            assert "ac" not in push, "pushes take their order from when the controller receives them"
+            assert "ac" not in push, (
+                "pushes take their order from when the controller receives them"
+            )
 
             # --- Hold: the latest push and read wait, and go once in order --------
             await session.send({"t": "hold", "on": True})
@@ -416,7 +511,9 @@ async def main():
             upstream.events.pushed(D["pushes"]["standby"], 0)
             await session.quiet(0.3)
             upstream.events.polled(D["read"], 0, False)
-            upstream.events.pushed(D["pushes"]["backflush"], 0)  # A later push supersedes the held one.
+            upstream.events.pushed(
+                D["pushes"]["backflush"], 0
+            )  # A later push supersedes the held one.
             await session.quiet(0.3)
             await session.send({"t": "hold", "on": False})
             held = await session.next("st")
@@ -452,7 +549,9 @@ async def main():
             reads = upstream.reads
             await session.send({"t": "cmd", "id": 7, "op": "temp", "v": 935})
             assert (await session.next("res"))["id"] == 7 and session.codec.received > 7
-            read = await session.next("st", timeout=2)  # No confirming push: one read after CONFIRM_S.
+            read = await session.next(
+                "st", timeout=2
+            )  # No confirming push: one read after CONFIRM_S.
             assert (read["k"], read["ac"], upstream.reads) == ("read", 7, reads + 1)
             upstream.confirm = D["pushes"]["standby"]
             await session.send({"t": "cmd", "id": 8, "op": "standby"})
@@ -481,7 +580,9 @@ async def main():
             lines.lines.clear()
             time.sleep(1.2)  # The whole loop, this test task included, stands still.
             await asyncio.sleep(0.05)
-            assert any("stood still" in line for line in lines.lines), "a stall before a ping is named"
+            assert any("stood still" in line for line in lines.lines), (
+                "a stall before a ping is named"
+            )
 
             # --- Why the link ended is named: close code, socket death -----------
             fake.mode = "close"
@@ -495,7 +596,7 @@ async def main():
             session = await asyncio.wait_for(fake.sessions.get(), 3)
             await eventually(lambda: companion.link == "open")
             await session.next("ping", skip=())  # The new session's opening ping.
-            upstream.events.upstream()           # One re-report on the fresh session; nothing pending after it.
+            upstream.events.upstream()  # One re-report on the fresh session; nothing pending after it.
             await session.next("lm")
 
             # --- Route back to direct: forwarding stops ----------------------------
@@ -529,7 +630,9 @@ async def main():
             await session.send({"t": "hold", "on": False})
 
             # --- A frame out of sequence closes the link; it reopens after backoff -
-            body = json.dumps({"q": session.codec.sent + 2, "t": "hold", "on": True}, separators=(",", ":"))
+            body = json.dumps(
+                {"q": session.codec.sent + 2, "t": "hold", "on": True}, separators=(",", ":")
+            )
             await session.ws.send_str(f"{session.codec._tag(b'f', body)}.{body}")
             await eventually(lambda: companion.link == "retry")
             assert companion.link_reason == "PROTOCOL"
@@ -543,6 +646,7 @@ async def main():
 
             def broken(*_):
                 raise OSError("disk full")
+
             companion.store.save_credentials = broken
             await session.send(encrypt(5, ACCOUNT))
             await eventually(lambda: companion.link_reason == "ERROR")
@@ -573,7 +677,9 @@ async def main():
             fake.mode = "version"
             await session.ws.close()
             await eventually(lambda: companion.link_reason == "VERSION")
-            assert companion.relay.mode == "ready", "a mismatched pair still serves the Web UI (and its OTA)"
+            assert companion.relay.mode == "ready", (
+                "a mismatched pair still serves the Web UI (and its OTA)"
+            )
             companion.set_controller(target)  # The updated controller announces itself.
             session = await asyncio.wait_for(fake.sessions.get(), 3)
             await eventually(lambda: companion.link == "open")
@@ -607,15 +713,28 @@ async def main():
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
             await session.quiet(0.2, skip=("ping", "lm"))
             await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
-            await session.send({"t": "hold", "on": False, "sync": False})  # A ping's answer: sync may flow.
+            await session.send(
+                {"t": "hold", "on": False, "sync": False}
+            )  # A ping's answer: sync may flow.
             sub = await session.next("logsub", skip=("ping", "lm"))
             assert sub["on"] is True and sub["boot"] == 0 and sub["after"] == 0
-            assert await companion.logs.meta("device") == "AA:BB:CC:DD:EE:FF", "the id is kept for a restart"
-            await session.send({"t": "log", "b": 7, "e": [
-                [1, 100, 1789000000, "i", "state", "Open Brew by Weight 1.1.0 (bootId=7)"],
-                [2, 200, 1789000000, "w", "scale", "the scale link was lost"]]})
+            assert await companion.logs.meta("device") == "AA:BB:CC:DD:EE:FF", (
+                "the id is kept for a restart"
+            )
+            await session.send(
+                {
+                    "t": "log",
+                    "b": 7,
+                    "e": [
+                        [1, 100, 1789000000, "i", "state", "Open Brew by Weight 1.1.0 (bootId=7)"],
+                        [2, 200, 1789000000, "w", "scale", "the scale link was lost"],
+                    ],
+                }
+            )
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 2))
-            await session.send({"t": "log", "b": 7, "e": [[3, 300, 1789000001, "i", "state", "shot done"]]})
+            await session.send(
+                {"t": "log", "b": 7, "e": [[3, 300, 1789000001, "i", "state", "shot done"]]}
+            )
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 3))
             # Only a browser the controller would let open the Web UI reads it.
             signed = {"X-WebUI-Session": "letmein"}
@@ -626,26 +745,44 @@ async def main():
                 page = await reply.json()
             assert page["device"] == "AA:BB:CC:DD:EE:FF"
             assert [entry.get("s") for entry in page["entries"]] == [3, 2]
-            assert page["next"] == {"boot": 1, "before": 2} and page["hasMore"] is True  # Opaque: the first boot.
-            async with http.get(page_url + "/log?boot=1&before=2&limit=10", headers=signed) as reply:
+            assert (
+                page["next"] == {"boot": 1, "before": 2} and page["hasMore"] is True
+            )  # Opaque: the first boot.
+            async with http.get(
+                page_url + "/log?boot=1&before=2&limit=10", headers=signed
+            ) as reply:
                 page = await reply.json()
             assert [entry.get("s") for entry in page["entries"]] == [1] and page["next"] is None
             # A gap names itself between the events it separates.
-            await session.send({"t": "log", "b": 7, "miss": 4, "e": [
-                [8, 900, 1789000010, "e", "network", "the Web UI socket was lost"]]})
+            await session.send(
+                {
+                    "t": "log",
+                    "b": 7,
+                    "miss": 4,
+                    "e": [[8, 900, 1789000010, "e", "network", "the Web UI socket was lost"]],
+                }
+            )
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 8))
             async with http.get(page_url + "/log?limit=3", headers=signed) as reply:
                 page = await reply.json()
             assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [8, "gap", 3, 2]
             assert page["entries"][1]["count"] == 4
             status = await companion.status()
-            assert status["log"]["enabled"] and status["log"]["rows"] == 4 and status["log"]["missed"] == 4
+            assert (
+                status["log"]["enabled"]
+                and status["log"]["rows"] == 4
+                and status["log"]["missed"] == 4
+            )
             assert status["log"]["mb"] == 50 and status["log"]["dropped"] == 0
             # A log frame never closes the link: out-of-bounds text is cut, an
             # unknown level reads as info, an unkeyed frame is counted.
-            await session.send({"t": "log", "b": 7, "e": [[9, 1000, 1789000011, "?", "x" * 40, "m" * 2000]]})
+            await session.send(
+                {"t": "log", "b": 7, "e": [[9, 1000, 1789000011, "?", "x" * 40, "m" * 2000]]}
+            )
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 9))
-            await session.send({"t": "log", "b": 7, "e": [["nine", 0, 0, "i", "state", "no sequence"]]})
+            await session.send(
+                {"t": "log", "b": 7, "e": [["nine", 0, 0, "i", "state", "no sequence"]]}
+            )
             await eventually(lambda: companion.log_dropped == 1)
             assert companion.link == "open"
             async with http.get(page_url + "/log?limit=1", headers=signed) as reply:
@@ -656,8 +793,11 @@ async def main():
 
             async def broken(*_):
                 raise sqlite3.OperationalError("disk I/O error")
+
             companion.logs.apply = broken
-            await session.send({"t": "log", "b": 7, "e": [[10, 1100, 1789000012, "i", "state", "lost?"]]})
+            await session.send(
+                {"t": "log", "b": 7, "e": [[10, 1100, 1789000012, "i", "state", "lost?"]]}
+            )
             resync = await session.next("logsub", skip=("ping", "lm"))
             assert resync["boot"] == 7 and resync["after"] == 9
             companion.logs.apply = failing
@@ -668,24 +808,53 @@ async def main():
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": True})
             await session.quiet(0.2, skip=("ping", "lm"))
             await session.send({"t": "dev", "name": "Bar", "id": "AA:BB:CC:DD:EE:FF"})
-            await session.send({"t": "hold", "on": False, "sync": False})  # A ping's answer: sync may flow.
+            await session.send(
+                {"t": "hold", "on": False, "sync": False}
+            )  # A ping's answer: sync may flow.
             sub = await session.next("logsub", skip=("ping", "lm"))
             assert sub["boot"] == 7 and sub["after"] == 9
             # A cursor the controller could not resume (a boot id it reused) is
             # a new boot: the rows stay and the spot is marked.
-            await session.send({"t": "log", "b": 7, "reset": True, "e": [
-                [10, 5000, 1789000020, "i", "state", "the log started over"]]})
+            await session.send(
+                {
+                    "t": "log",
+                    "b": 7,
+                    "reset": True,
+                    "e": [[10, 5000, 1789000020, "i", "state", "the log started over"]],
+                }
+            )
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 10))
             async with http.get(page_url + "/log?limit=3", headers=signed) as reply:
                 page = await reply.json()
-            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [10, "reset", "boot", 9, 8, "gap"]
+            assert [entry.get("s", entry.get("g")) for entry in page["entries"]] == [
+                10,
+                "reset",
+                "boot",
+                9,
+                8,
+                "gap",
+            ]
             async with http.get(page_url + "/log/export", headers=signed) as reply:
-                assert reply.headers["Content-Disposition"] == 'attachment; filename="obbw-log-AA-BB-CC-DD-EE-FF.json"'
+                assert (
+                    reply.headers["Content-Disposition"]
+                    == 'attachment; filename="obbw-log-AA-BB-CC-DD-EE-FF.json"'
+                )
                 exported = await reply.json()
-            assert exported["format"] == "openbrewbyweight-companion-log" and exported["version"] == 2
+            assert (
+                exported["format"] == "openbrewbyweight-companion-log" and exported["version"] == 2
+            )
             assert exported["device"] == "AA:BB:CC:DD:EE:FF"
             assert [entry.get("s", entry.get("g")) for entry in exported["entries"]] == [
-                1, 2, 3, "gap", 8, 9, "boot", "reset", 10]
+                1,
+                2,
+                3,
+                "gap",
+                8,
+                9,
+                "boot",
+                "reset",
+                10,
+            ]
             # A companion restarted with the controller off still shows the
             # history, to the browser the controller accepted before.
             service.LOG_ACCESS_RECHECK_S = 0
@@ -699,7 +868,9 @@ async def main():
             restarted.set_controller(target)
             async with http.get(again_url + "/log?limit=1", headers=signed) as reply:
                 assert reply.status == 200 and (await reply.json())["entries"][0]["s"] == 10
-            async with http.get(again_url + "/log?limit=1", headers={"X-WebUI-Session": "stranger"}) as reply:
+            async with http.get(
+                again_url + "/log?limit=1", headers={"X-WebUI-Session": "stranger"}
+            ) as reply:
                 assert reply.status == 401, "a session the controller never accepted waits for it"
             status = await restarted.status()
             assert status["log"]["rows"] == 6 and status["log"]["enabled"] is False
@@ -715,9 +886,14 @@ async def main():
             # Delete history empties the store and keeps reading rights and the id.
             async with http.post(page_url + "/log/delete", data="{}", headers=signed) as reply:
                 assert reply.status == 415
-            fake.auth_up = False  # Off: a remembered sign-in still reads, but deletes nothing (review C7).
+            fake.auth_up = (
+                False  # Off: a remembered sign-in still reads, but deletes nothing (review C7).
+            )
             async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
-                assert reply.status == 503 and (await reply.json())["error"] == "CONTROLLER_UNREACHABLE"
+                assert (
+                    reply.status == 503
+                    and (await reply.json())["error"] == "CONTROLLER_UNREACHABLE"
+                )
             fake.auth_up = True
             # Deleting needs Admin unlocked on the screen asking (D14, AC16): the relay signs that
             # screen's own id, never the companion's shared client.
@@ -728,17 +904,24 @@ async def main():
                     assert reply.status == 401 and (await reply.json())["error"] == "ADMIN_LOCKED"
             fake.admin_screen = companion.relay.client_id
             async with http.post(page_url + "/log/delete", json={}, headers=signed) as reply:
-                assert reply.status == 401, "the companion's shared client never holds the unlock for a screen"
+                assert reply.status == 401, (
+                    "the companion's shared client never holds the unlock for a screen"
+                )
             fake.admin_screen = screen
-            async with http.post(page_url + "/log/delete", json={}, headers={**signed, "X-WebUI-Client": screen}) \
-                    as reply:
+            async with http.post(
+                page_url + "/log/delete", json={}, headers={**signed, "X-WebUI-Client": screen}
+            ) as reply:
                 assert reply.status == 200
             assert (await companion.status())["log"]["rows"] == 0
             assert await companion.logs.meta("device") == "AA:BB:CC:DD:EE:FF"
-            await session.send({"t": "log", "b": 7, "e": [[11, 6000, 1789000030, "i", "state", "after delete"]]})
+            await session.send(
+                {"t": "log", "b": 7, "e": [[11, 6000, 1789000030, "i", "state", "after delete"]]}
+            )
             await settles(lambda: companion.logs.cursor("AA:BB:CC:DD:EE:FF"), (7, 11))
             # The switch off stops the subscription; the store keeps what it has.
-            await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": False})
+            await session.send(
+                {"t": "cfg", "lm": True, "conn": "ws", "observe": True, "log": False}
+            )
             await eventually(lambda: companion.log_on is False)
             assert (await companion.status())["log"]["rows"] == 1
 
@@ -750,7 +933,11 @@ async def main():
             assert upstream.account is None and upstream.configured[-1][0] is None
             assert companion.store.pairing() and companion.store.credentials()
             assert sorted(path.name for path in secrets.iterdir()) == [
-                "credentials.json", "identity.json", "lamarzocco.json", "pairing.json"]
+                "credentials.json",
+                "identity.json",
+                "lamarzocco.json",
+                "pairing.json",
+            ]
             async with http.post(page_url + "/erase", data="{}") as reply:
                 assert reply.status == 415
 
@@ -760,12 +947,18 @@ async def main():
             assert companion.store.pairing()
             fake.mode = "erase"
             await eventually(lambda: companion.store.pairing() is None)
-            assert (await companion.status())["paired"] is False and companion.pairing.state == "unpaired"
-            assert companion.device_id is None and await companion.logs.meta("device") is None, "Forget erases the log"
+            assert (await companion.status())[
+                "paired"
+            ] is False and companion.pairing.state == "unpaired"
+            assert companion.device_id is None and await companion.logs.meta("device") is None, (
+                "Forget erases the log"
+            )
             assert (await companion.logs.stats("AA:BB:CC:DD:EE:FF"))["rows"] == 0
             assert sorted(path.name for path in secrets.iterdir()) == ["identity.json"]
             await asyncio.sleep(0.3)
-            assert len(fake.pair_requests) == 2, "no new request on its own after the controller forgot it"
+            assert len(fake.pair_requests) == 2, (
+                "no new request on its own after the controller forgot it"
+            )
 
             # --- Pair button (entry point b): a refused reveal shows no code -------------
             fake.pair_state, fake.reveal_status = "pending", 400
@@ -781,6 +974,7 @@ async def main():
 
             def refused(*_):
                 raise OSError("disk full")
+
             companion.store.save_pairing = refused
             async with http.post(page_url + "/pair", json={}) as reply:
                 assert reply.status == 202
@@ -803,8 +997,10 @@ async def main():
             await pages.close()
             await companion.relay.close()
     await server.close()
-    print("Companion link: pairing, handshake, pings, sync hold silence, cfg, creds, route, hold, commands, "
-          "errors, link version and erase OK")
+    print(
+        "Companion link: pairing, handshake, pings, sync hold silence, cfg, creds, route, hold, commands, "
+        "errors, link version and erase OK"
+    )
 
 
 asyncio.run(main())

@@ -33,8 +33,15 @@ lamarzocco.RETRY_S = (0.1,) * 6
 
 # The STOMP codec on the controller's own frames.
 assert stomp_parse("\n\nCONNECTED\r\nversion:1.2\r\nheart-beat:0,0\r\n\r\n") == (
-    "CONNECTED", {"version": "1.2", "heart-beat": "0,0"}, "")
-assert stomp_parse("MESSAGE\ndestination:/a\\cb\ndestination:/x\n\n{}") == ("MESSAGE", {"destination": "/a:b"}, "{}")
+    "CONNECTED",
+    {"version": "1.2", "heart-beat": "0,0"},
+    "",
+)
+assert stomp_parse("MESSAGE\ndestination:/a\\cb\ndestination:/x\n\n{}") == (
+    "MESSAGE",
+    {"destination": "/a:b"},
+    "{}",
+)
 assert stomp_parse("\n") is None
 for bad in ("MESSAGE", "MESSAGE\nbroken\n\n"):
     try:
@@ -66,13 +73,19 @@ class Cloud:
         headers = request.headers
         installation = headers["X-App-Installation-Id"]
         public = self.installations[installation]
-        der = public.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-        secret = crypto.sha256(f"{installation}.{crypto.b64(der)}.{crypto.b64(crypto.sha256(installation.encode()))}"
-                               .encode())
+        der = public.public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        secret = crypto.sha256(
+            f"{installation}.{crypto.b64(der)}.{crypto.b64(crypto.sha256(installation.encode()))}".encode()
+        )
         base = f"{installation}.{headers['X-Nonce']}.{headers['X-Timestamp']}"
         assert UUID4.match(headers["X-Nonce"]) and headers["X-Timestamp"].isdigit()
-        public.verify(crypto.unb64(headers["X-Request-Signature"]), f"{base}.{request_proof(base, secret)}".encode(),
-                      ec.ECDSA(hashes.SHA256()))
+        public.verify(
+            crypto.unb64(headers["X-Request-Signature"]),
+            f"{base}.{request_proof(base, secret)}".encode(),
+            ec.ECDSA(hashes.SHA256()),
+        )
         assert headers["User-Agent"] == "OpenBrewByWeight/1"
 
     def issue(self):
@@ -90,10 +103,12 @@ class Cloud:
         der = crypto.unb64(body["pk"])
         assert len(der) == 91 and UUID4.match(installation)
         public = serialization.load_der_public_key(der)
-        secret = crypto.sha256(f"{installation}.{body['pk']}.{crypto.b64(crypto.sha256(installation.encode()))}"
-                               .encode())
+        secret = crypto.sha256(
+            f"{installation}.{body['pk']}.{crypto.b64(crypto.sha256(installation.encode()))}".encode()
+        )
         assert request.headers["X-Request-Proof"] == request_proof(
-            f"{installation}.{crypto.b64(crypto.sha256(der))}", secret)
+            f"{installation}.{crypto.b64(crypto.sha256(der))}", secret
+        )
         self.installations[installation] = public
         self.calls.append("init")
         return web.json_response({})
@@ -118,11 +133,15 @@ class Cloud:
         self.calls.append("dashboard")
         if self.refuse_dashboard:
             return web.Response(status=self.refuse_dashboard)
-        return web.json_response(D["read"]) if self.authorized(request) else web.Response(status=401)
+        return (
+            web.json_response(D["read"]) if self.authorized(request) else web.Response(status=401)
+        )
 
     async def command(self, request):
         assert self.authorized(request)
-        self.commands.append((request.match_info["name"], await request.text(), request.content_type))
+        self.commands.append(
+            (request.match_info["name"], await request.text(), request.content_type)
+        )
         return web.json_response({}, status=self.command_status)
 
     async def ws(self, request):
@@ -137,8 +156,16 @@ class Cloud:
             return message.data
 
         connect = stomp_parse((await text()).removesuffix("\0"))
-        assert connect == ("CONNECT", {"host": "lion.lamarzocco.io", "accept-version": "1.2,1.1",
-                                       "heart-beat": "0,0", "Authorization": f"Bearer {self.access}"}, "")
+        assert connect == (
+            "CONNECT",
+            {
+                "host": "lion.lamarzocco.io",
+                "accept-version": "1.2,1.1",
+                "heart-beat": "0,0",
+                "Authorization": f"Bearer {self.access}",
+            },
+            "",
+        )
         await socket.send_str(stomp_frame("CONNECTED", {"version": "1.2", "heart-beat": "0,0"}))
         subscribe = await text()
         assert subscribe.endswith("\0")
@@ -153,9 +180,17 @@ class Cloud:
         return socket
 
     async def push(self, body):
-        await self.socket.send_str(stomp_frame("MESSAGE", {
-            "destination": "/ws/sn/MR012345/dashboard", "subscription": self.subscription,
-            "content-type": "application/json"}, json.dumps(body)))
+        await self.socket.send_str(
+            stomp_frame(
+                "MESSAGE",
+                {
+                    "destination": "/ws/sn/MR012345/dashboard",
+                    "subscription": self.subscription,
+                    "content-type": "application/json",
+                },
+                json.dumps(body),
+            )
+        )
 
 
 class Lines(logging.Handler):
@@ -178,18 +213,30 @@ class Events:
         self.log.append(event)
         self.changed.set()
 
-    def account(self, ok): self._record("account", ok)
-    def upstream(self): self._record("upstream")
-    def subscribed(self): self._record("subscribed")
-    def pushed(self, data, ac): self._record("pushed", data, ac)
-    def polled(self, data, ac, first): self._record("polled", ac, first)
-    def renewed(self): self._record("renewed")
+    def account(self, ok):
+        self._record("account", ok)
+
+    def upstream(self):
+        self._record("upstream")
+
+    def subscribed(self):
+        self._record("subscribed")
+
+    def pushed(self, data, ac):
+        self._record("pushed", data, ac)
+
+    def polled(self, data, ac, first):
+        self._record("polled", ac, first)
+
+    def renewed(self):
+        self._record("renewed")
 
     async def wait(self, predicate, timeout=5):
         async def check():
             while not predicate():
                 self.changed.clear()
                 await self.changed.wait()
+
         await asyncio.wait_for(check(), timeout)
 
 
@@ -212,8 +259,15 @@ async def main():
         store = Store(Path(temporary))
         store.save_credentials(1, ACCOUNT)
         async with aiohttp.ClientSession() as http:
+
             def client(events):
-                return LaMarzocco(store, http, events, api_root=base + root, ws_url=base.replace("http", "ws") + "/ws/connect")
+                return LaMarzocco(
+                    store,
+                    http,
+                    events,
+                    api_root=base + root,
+                    ws_url=base.replace("http", "ws") + "/ws/connect",
+                )
 
             # Registration, sign-in, WebSocket subscription and pushes.
             events = Events()
@@ -223,7 +277,9 @@ async def main():
             await asyncio.wait_for(cloud.subscribed.wait(), 3)
             assert cloud.calls[:2] == ["init", "signin"] and ("account", True) in events.log
             assert lm.sub and lm.ep == 1 and lm.up and 2990 < lm.tok <= 3000
-            assert lm.signed_in_for(ACCOUNT) and not lm.signed_in_for({**ACCOUNT, "serial": "MR000000"})
+            assert lm.signed_in_for(ACCOUNT) and not lm.signed_in_for(
+                {**ACCOUNT, "serial": "MR000000"}
+            )
             installation = next(iter(cloud.installations))
             assert (store.dir / "lamarzocco.json").stat().st_mode & 0o777 == 0o600
             await cloud.push(D["pushes"]["standby"])
@@ -236,12 +292,21 @@ async def main():
             assert await lm.command(7, "temp", 935) == 200
             assert await lm.command(8, "standby") == 200 and await lm.command(9, "on") == 200
             assert cloud.commands == [
-                ("CoffeeMachineSettingCoffeeBoilerTargetTemperature", '{"boilerIndex":1,"targetTemperature":93.5}',
-                 "application/json"),
+                (
+                    "CoffeeMachineSettingCoffeeBoilerTargetTemperature",
+                    '{"boilerIndex":1,"targetTemperature":93.5}',
+                    "application/json",
+                ),
                 ("CoffeeMachineChangeMode", '{"mode":"StandBy"}', "application/json"),
-                ("CoffeeMachineChangeMode", '{"mode":"BrewingMode"}', "application/json")]
+                ("CoffeeMachineChangeMode", '{"mode":"BrewingMode"}', "application/json"),
+            ]
             await cloud.push(D["pushes"]["temperature"])
-            await events.wait(lambda: events.log[-1][0] == "pushed" and events.log[-1][1] == D["pushes"]["temperature"])
+            await events.wait(
+                lambda: (
+                    events.log[-1][0] == "pushed"
+                    and events.log[-1][1] == D["pushes"]["temperature"]
+                )
+            )
             assert events.log[-1][2] == 9 and (await lm.read())[2] == 9
             cloud.command_status = 409
             assert await lm.command(10, "temp", 1001) == 409 and lm.last_command == 10
@@ -252,11 +317,15 @@ async def main():
             cloud.pong = False
             cloud.subscribed.clear()
             await events.wait(lambda: not lm.sub, timeout=3)
-            assert any("no pong within" in line for line in lines.lines), "a silent WebSocket is named"
+            assert any("no pong within" in line for line in lines.lines), (
+                "a silent WebSocket is named"
+            )
             cloud.pong = True
             await asyncio.wait_for(cloud.subscribed.wait(), 3)
             await events.wait(lambda: lm.sub)
-            assert lm.ep == 2 and cloud.calls.count("signin") == 1, "a reconnection reuses the token"
+            assert lm.ep == 2 and cloud.calls.count("signin") == 1, (
+                "a reconnection reuses the token"
+            )
 
             # Token renewal before it runs out: only the renew loop refreshes, then the companion's read.
             lamarzocco.RENEW_AFTER_S = 0.5
@@ -268,19 +337,30 @@ async def main():
             await asyncio.sleep(0.1)
             assert not lm.sub
             refreshes, renewals = cloud.calls.count("refresh"), events.log.count(("renewed",))
-            lm.issued_at -= 3 * 3600  # Long past due: a read uses the token it has and refreshes nothing.
+            lm.issued_at -= (
+                3 * 3600
+            )  # Long past due: a read uses the token it has and refreshes nothing.
             assert (await lm.read())[1] is not None and cloud.calls.count("refresh") == refreshes
             lm.access = None  # As after a 401: the read gets a new token and reports it.
             refreshes, accounts = cloud.calls.count("refresh"), events.log.count(("account", True))
-            assert (await lm.read())[1] is not None and cloud.calls.count("refresh") == refreshes + 1
-            assert events.log.count(("account", True)) == accounts + 1 and events.log.count(("renewed",)) == renewals
+            assert (await lm.read())[1] is not None and cloud.calls.count(
+                "refresh"
+            ) == refreshes + 1
+            assert (
+                events.log.count(("account", True)) == accounts + 1
+                and events.log.count(("renewed",)) == renewals
+            )
 
             # A refused dashboard or command (401/403) marks the data plane; a 200 clears it.
             cloud.refuse_dashboard = 403
             upstreams = events.log.count(("upstream",))
             assert (await lm.read())[:2] == (403, None) and lm.refused
-            assert events.log.count(("upstream",)) == upstreams + 1, "the refusal is reported at once"
-            assert any("answers 401/403" in line for line in lines.lines), "a refused data plane is logged"
+            assert events.log.count(("upstream",)) == upstreams + 1, (
+                "the refusal is reported at once"
+            )
+            assert any("answers 401/403" in line for line in lines.lines), (
+                "a refused data plane is logged"
+            )
             cloud.refuse_dashboard = 0
             assert (await lm.read())[1] is not None and not lm.refused
             assert any("accepts reads and commands again" in line for line in lines.lines)
@@ -300,15 +380,23 @@ async def main():
             polls = [e for e in events.log if e[0] == "polled"]
             assert polls[0][2] is True and polls[1][2] is False and lm.sub and lm.up and lm.ep == 1
             assert cloud.calls.count("init") == 1 and list(cloud.installations) == [installation]
-            lm.configure(ACCOUNT, "api", False)  # Show power state off: La Marzocco stays on the controller.
+            lm.configure(
+                ACCOUNT, "api", False
+            )  # Show power state off: La Marzocco stays on the controller.
             await asyncio.sleep(0.1)
             calls = len(cloud.calls)
             lm.access = None
             lm.configure(None, "api", False)
             lm.configure(ACCOUNT, "api", False)
             await asyncio.sleep(0.7)
-            assert len(cloud.calls) == calls and not lm.sub and not lm.tasks, "no sign-in, renewal or polling"
-            assert (await lm.read())[1] is None and await lm.command(12, "on") == 0 and len(cloud.calls) == calls
+            assert len(cloud.calls) == calls and not lm.sub and not lm.tasks, (
+                "no sign-in, renewal or polling"
+            )
+            assert (
+                (await lm.read())[1] is None
+                and await lm.command(12, "on") == 0
+                and len(cloud.calls) == calls
+            )
             lm.configure(None, "api", True)
 
             # Erasing the account keeps the installation; erasing the pairing removes it.
@@ -326,7 +414,9 @@ async def main():
             await events.wait(lambda: ("account", False) in events.log)
             await asyncio.sleep(0.5)
             assert cloud.calls.count("signin") == signins + 1 and lm.rejected_for(wrong)
-            assert cloud.calls.count("init") == 2 and len(cloud.installations) == 2, "erase means a new installation"
+            assert cloud.calls.count("init") == 2 and len(cloud.installations) == 2, (
+                "erase means a new installation"
+            )
             assert (await lm.read())[1] is None and await lm.command(11, "on") == 0
             lm.stop()
     await server.close()

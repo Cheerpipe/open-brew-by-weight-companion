@@ -30,10 +30,12 @@ import time
 from .store import offload
 
 SCHEMA = 4
-PRUNE_ROUNDS = 3  # Proportional trims to the size budget, each measured once (dbstat walks the tables).
+PRUNE_ROUNDS = (
+    3  # Proportional trims to the size budget, each measured once (dbstat walks the tables).
+)
 GRANT_DAYS = 90  # A Web UI session the controller accepted stays usable this long unseen.
 FORMAT, EXPORT_VERSION = "openbrewbyweight-companion-log", 2
-FIRST_PAGE = 2 ** 32  # The page cursor before the newest event: past every ordinal and sequence.
+FIRST_PAGE = 2**32  # The page cursor before the newest event: past every ordinal and sequence.
 
 TABLES = """
     create table meta (key text primary key, value text not null) without rowid;
@@ -131,16 +133,30 @@ V3_TO_V4 = f"""
 
 def table_bytes(connection, tables):
     """The pages these tables and their indexes use, whatever else shares the file."""
-    names = list(tables) + [row[0] for row in connection.execute(
-        f"select name from sqlite_master where type = 'index' and tbl_name in ({','.join('?' * len(tables))})",
-        list(tables))]
-    return connection.execute(f"select coalesce(sum(pgsize), 0) from dbstat where aggregate = 1 and name in "
-                              f"({','.join('?' * len(names))})", names).fetchone()[0]
+    names = list(tables) + [
+        row[0]
+        for row in connection.execute(
+            f"select name from sqlite_master where type = 'index' and tbl_name in ({','.join('?' * len(tables))})",
+            list(tables),
+        )
+    ]
+    return connection.execute(
+        f"select coalesce(sum(pgsize), 0) from dbstat where aggregate = 1 and name in "
+        f"({','.join('?' * len(names))})",
+        names,
+    ).fetchone()[0]
 
 
 def _entry(row):
-    return {"b": row["boot_id"], "s": row["sequence"], "ms": row["at_ms"], "w": row["wall_sec"],
-            "l": row["level"], "c": row["category"], "m": row["message"]}
+    return {
+        "b": row["boot_id"],
+        "s": row["sequence"],
+        "ms": row["at_ms"],
+        "w": row["wall_sec"],
+        "l": row["level"],
+        "c": row["category"],
+        "m": row["message"],
+    }
 
 
 class LogStore:
@@ -161,11 +177,15 @@ class LogStore:
         version = connection.execute("pragma user_version").fetchone()[0]
         if version > SCHEMA:
             connection.close()
-            raise sqlite3.DatabaseError(f"its schema {version} is newer than this companion's {SCHEMA}")
+            raise sqlite3.DatabaseError(
+                f"its schema {version} is newer than this companion's {SCHEMA}"
+            )
         if version < SCHEMA:
             log = TABLES + (V1_TO_V2 if version == 1 else "") + RENAME if version < 2 else ""
             archive = V3_TO_V4 if version == 3 else ARCHIVE
-            connection.executescript(f"begin;{log}{archive}{LOG_INDEXES}pragma user_version = {SCHEMA}; commit;")
+            connection.executescript(
+                f"begin;{log}{archive}{LOG_INDEXES}pragma user_version = {SCHEMA}; commit;"
+            )
         self.connection = connection
 
     async def close(self):
@@ -187,12 +207,17 @@ class LogStore:
         return row["value"] if row else None
 
     async def set_meta(self, key, value):
-        await offload(self.connection.execute, "insert or replace into meta values (?, ?)", (key, value))
+        await offload(
+            self.connection.execute, "insert or replace into meta values (?, ?)", (key, value)
+        )
 
     # --- Sync ----------------------------------------------------------------
     def _latest(self, device):
-        return self.connection.execute("select ordinal, boot_id from log_boots where device_id = ? "
-                                       "order by ordinal desc limit 1", (device,)).fetchone()
+        return self.connection.execute(
+            "select ordinal, boot_id from log_boots where device_id = ? "
+            "order by ordinal desc limit 1",
+            (device,),
+        ).fetchone()
 
     async def apply(self, device, frame):
         """One controller `log` frame: its events, and the hole a `miss` or `reset` names before them."""
@@ -211,12 +236,17 @@ class LogStore:
             # (`reset`: only a reused id does that), is a new boot.
             if latest is None or latest["boot_id"] != boot or reset:
                 ordinal += 1
-                self.connection.execute("insert into log_boots values (?, ?, ?)", (device, ordinal, boot))
-            self.connection.executemany("insert or replace into log_marks values (?, ?, ?, ?, ?, ?)",
-                                        ((device, ordinal, first, kind, count, now) for kind, count in marks))
+                self.connection.execute(
+                    "insert into log_boots values (?, ?, ?)", (device, ordinal, boot)
+                )
+            self.connection.executemany(
+                "insert or replace into log_marks values (?, ?, ?, ?, ?, ?)",
+                ((device, ordinal, first, kind, count, now) for kind, count in marks),
+            )
             self.connection.executemany(
                 "insert or replace into log_events values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ((device, ordinal, entry[0], boot, *entry[1:]) for entry in frame["e"]))
+                ((device, ordinal, entry[0], boot, *entry[1:]) for entry in frame["e"]),
+            )
 
     async def cursor(self, device):
         """The newest boot's id and its last stored sequence: the resume point for `logsub`."""
@@ -226,34 +256,53 @@ class LogStore:
         latest = self._latest(device)
         if latest is None:
             return None
-        row = self.connection.execute("select max(sequence) as sequence from log_events "
-                                      "where device_id = ? and ordinal = ?", (device, latest["ordinal"])).fetchone()
+        row = self.connection.execute(
+            "select max(sequence) as sequence from log_events where device_id = ? and ordinal = ?",
+            (device, latest["ordinal"]),
+        ).fetchone()
         return (latest["boot_id"], row["sequence"]) if row["sequence"] is not None else None
 
     # --- Reading -------------------------------------------------------------
     def _boots(self, device):
-        return {row["ordinal"]: row["boot_id"] for row in
-                self.connection.execute("select ordinal, boot_id from log_boots where device_id = ?", (device,))}
+        return {
+            row["ordinal"]: row["boot_id"]
+            for row in self.connection.execute(
+                "select ordinal, boot_id from log_boots where device_id = ?", (device,)
+            )
+        }
 
     def _marks(self, device, low, high):
         """The markers anchored in [low, high), newest first, as ((ordinal, sequence), entry)."""
-        return [((mark["ordinal"], mark["sequence"]),
-                 {"g": "gap", "count": mark["count"]} if mark["kind"] == "gap" else {"g": "reset"})
-                for mark in self.connection.execute(
-                    "select * from log_marks where device_id = ? and (ordinal, sequence) >= (?, ?) "
-                    "and (ordinal, sequence) < (?, ?) order by ordinal desc, sequence desc, kind",
-                    (device, *low, *high))]
+        return [
+            (
+                (mark["ordinal"], mark["sequence"]),
+                {"g": "gap", "count": mark["count"]} if mark["kind"] == "gap" else {"g": "reset"},
+            )
+            for mark in self.connection.execute(
+                "select * from log_marks where device_id = ? and (ordinal, sequence) >= (?, ?) "
+                "and (ordinal, sequence) < (?, ?) order by ordinal desc, sequence desc, kind",
+                (device, *low, *high),
+            )
+        ]
 
     def _at(self, device, wall, newest):
         """The newest event at or before `wall` (`newest`), or the oldest at or after it: its
         (ordinal, sequence), or None. Events without a synced clock keep their place by order."""
         row = self.connection.execute(
             "select ordinal, sequence from log_events where device_id = ? and wall_sec != 0 and wall_sec "
-            + ("<= ? order by wall_sec desc, ordinal desc, sequence desc" if newest else
-               ">= ? order by wall_sec, ordinal, sequence") + " limit 1", (device, wall)).fetchone()
+            + (
+                "<= ? order by wall_sec desc, ordinal desc, sequence desc"
+                if newest
+                else ">= ? order by wall_sec, ordinal, sequence"
+            )
+            + " limit 1",
+            (device, wall),
+        ).fetchone()
         return (row["ordinal"], row["sequence"]) if row else None
 
-    async def page(self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None):
+    async def page(
+        self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None
+    ):
         """One page of the history, newest first, with its markers.
 
         Returns (entries, next, has_more): `next` is the opaque (ordinal,
@@ -265,37 +314,49 @@ class LogStore:
         (older than) the event that follows it, and a restart between two
         boots, naming the newer.
         """
-        return await offload(self._page, device, before_ordinal, before_sequence, limit, levels, category, at)
+        return await offload(
+            self._page, device, before_ordinal, before_sequence, limit, levels, category, at
+        )
 
-    def _page(self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None):
+    def _page(
+        self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None
+    ):
         first = before_sequence >= FIRST_PAGE
         if at is not None and first:
             start = self._at(device, at, True)
             if start is None:
                 return [], None, False
             before_ordinal, before_sequence = start[0], start[1] + 1
-        where, args = "device_id = ? and (ordinal, sequence) < (?, ?)", [device, before_ordinal, before_sequence]
+        where, args = (
+            "device_id = ? and (ordinal, sequence) < (?, ?)",
+            [device, before_ordinal, before_sequence],
+        )
         if levels is not None:
             where += f" and level in ({','.join('?' * len(levels))})"
             args += list(levels)
         if category is not None:
             where += " and category = ?"
             args.append(category)
-        rows = self.connection.execute(f"select * from log_events where {where} "
-                                       "order by ordinal desc, sequence desc limit ?", args + [limit + 1]).fetchall()
+        rows = self.connection.execute(
+            f"select * from log_events where {where} order by ordinal desc, sequence desc limit ?",
+            args + [limit + 1],
+        ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
         if not rows:
             return [], None, False
         last = (rows[-1]["ordinal"], rows[-1]["sequence"])
-        marks, boots = self._marks(device, last if has_more else (-1, -1), (before_ordinal, before_sequence)), \
-            self._boots(device)
+        marks, boots = (
+            self._marks(device, last if has_more else (-1, -1), (before_ordinal, before_sequence)),
+            self._boots(device),
+        )
         # Restarts newer than the first row are named too: a filter can leave a newer boot without rows.
         entries, newer = [], max(boots, default=None) if first and at is None else before_ordinal
 
         def flush(key):  # The markers newer than `key`.
             while marks and marks[0][0] > key:
                 entries.append(marks.pop(0)[1])
+
         for row in rows:
             key = (row["ordinal"], row["sequence"])
             for ordinal in range(newer, key[0], -1) if newer is not None else ():
@@ -313,31 +374,41 @@ class LogStore:
     async def bounds(self, device, since, until):
         """The export range for wall times `since`/`until` (either None: open) as (after, through)
         cursors, or None when no event falls in it."""
+
         def read():
             low = (0, 0) if since is None else self._at(device, since, False)
             high = (FIRST_PAGE, FIRST_PAGE) if until is None else self._at(device, until, True)
             if low is None or high is None or low > high:
                 return None
             return (low[0], low[1] - 1) if since is not None else low, high
+
         return await offload(read)
 
-    async def chunk(self, device, after_ordinal, after_sequence, limit=1000, through=(FIRST_PAGE, FIRST_PAGE)):
+    async def chunk(
+        self, device, after_ordinal, after_sequence, limit=1000, through=(FIRST_PAGE, FIRST_PAGE)
+    ):
         """The next oldest-first chunk of a streaming export, markers in place, up to `through`.
 
         Returns (entries, cursor): the cursor continues the next chunk, None at the end.
         """
         return await offload(self._chunk, device, after_ordinal, after_sequence, limit, through)
 
-    def _chunk(self, device, after_ordinal, after_sequence, limit, through=(FIRST_PAGE, FIRST_PAGE)):
+    def _chunk(
+        self, device, after_ordinal, after_sequence, limit, through=(FIRST_PAGE, FIRST_PAGE)
+    ):
         rows = self.connection.execute(
             "select * from log_events where device_id = ? and (ordinal, sequence) > (?, ?) "
             "and (ordinal, sequence) <= (?, ?) order by ordinal asc, sequence asc limit ?",
-            (device, after_ordinal, after_sequence, *through, limit)).fetchall()
+            (device, after_ordinal, after_sequence, *through, limit),
+        ).fetchall()
         if not rows:
             return [], None
         marks = {}
-        for key, entry in self._marks(device, (rows[0]["ordinal"], rows[0]["sequence"]),
-                                      (rows[-1]["ordinal"], rows[-1]["sequence"] + 1)):
+        for key, entry in self._marks(
+            device,
+            (rows[0]["ordinal"], rows[0]["sequence"]),
+            (rows[-1]["ordinal"], rows[-1]["sequence"] + 1),
+        ):
             marks.setdefault(key, []).append(entry)
         entries, older = [], after_ordinal if after_sequence else None
         for row in rows:
@@ -351,15 +422,24 @@ class LogStore:
     # --- Access --------------------------------------------------------------
     async def grants(self):
         """The Web UI sessions (their sha256) the controller accepted, with when it last said so."""
-        return await offload(lambda: {row["session"]: row["checked"] for row in
-                                      self.connection.execute("select * from log_access")})
+        return await offload(
+            lambda: {
+                row["session"]: row["checked"]
+                for row in self.connection.execute("select * from log_access")
+            }
+        )
 
     async def grant(self, session, allowed):
         if allowed:
-            await offload(self.connection.execute, "insert or replace into log_access values (?, ?)",
-                          (session, time.time()))
+            await offload(
+                self.connection.execute,
+                "insert or replace into log_access values (?, ?)",
+                (session, time.time()),
+            )
         else:
-            await offload(self.connection.execute, "delete from log_access where session = ?", (session,))
+            await offload(
+                self.connection.execute, "delete from log_access where session = ?", (session,)
+            )
 
     # --- Retention and erase -------------------------------------------------
     async def prune(self, days, megabytes, device):
@@ -374,7 +454,8 @@ class LogStore:
         with self.connection:
             deleted += self.connection.execute(
                 "delete from log_events where wall_sec != 0 and wall_sec < ?",
-                (time.time() - days * 86400,)).rowcount
+                (time.time() - days * 86400,),
+            ).rowcount
             budget, used = megabytes * 1024 * 1024, self._used_bytes()
             for _ in range(PRUNE_ROUNDS):
                 if used <= budget:
@@ -385,7 +466,8 @@ class LogStore:
                     "delete from log_events where (device_id, ordinal, sequence) in "
                     "(select device_id, ordinal, sequence from log_events "
                     "order by device_id = ?, ordinal, sequence limit ?)",
-                    (device, -(-rows * (used - budget) * 101 // (used * 100)))).rowcount
+                    (device, -(-rows * (used - budget) * 101 // (used * 100))),
+                ).rowcount
                 deleted += gone
                 used = self._used_bytes()
                 if gone == 0:
@@ -395,13 +477,16 @@ class LogStore:
             self.connection.execute(
                 "delete from log_marks where not exists (select 1 from log_events e "
                 "where e.device_id = log_marks.device_id and e.ordinal = log_marks.ordinal "
-                "and e.sequence = log_marks.sequence)")
+                "and e.sequence = log_marks.sequence)"
+            )
             self.connection.execute(
                 "delete from log_boots where not exists (select 1 from log_events e "
                 "where e.device_id = log_boots.device_id and e.ordinal = log_boots.ordinal) "
-                "and ordinal < (select max(b.ordinal) from log_boots b where b.device_id = log_boots.device_id)")
-            self.connection.execute("delete from log_access where checked < ?",
-                                    (time.time() - GRANT_DAYS * 86400,))
+                "and ordinal < (select max(b.ordinal) from log_boots b where b.device_id = log_boots.device_id)"
+            )
+            self.connection.execute(
+                "delete from log_access where checked < ?", (time.time() - GRANT_DAYS * 86400,)
+            )
         self.connection.execute("pragma wal_checkpoint(truncate)")
         return deleted
 
@@ -412,8 +497,9 @@ class LogStore:
 
     def _erase(self, history_only):
         with self.connection:
-            for table in ("log_events", "log_marks") + (() if history_only else (
-                    "log_boots", "log_access", "meta") + ARCHIVE_TABLES):
+            for table in ("log_events", "log_marks") + (
+                () if history_only else ("log_boots", "log_access", "meta") + ARCHIVE_TABLES
+            ):
                 self.connection.execute(f"delete from {table}")
         # Deleted rows linger in free pages until reused: an erase rewrites the file.
         self.connection.execute("vacuum")
@@ -444,10 +530,20 @@ class LogStore:
     def _stats(self, device):
         events = self.connection.execute(
             "select count(*) as rows, min(ordinal) as oldest, max(ordinal) as newest "
-            "from log_events where device_id = ?", (device,)).fetchone()
+            "from log_events where device_id = ?",
+            (device,),
+        ).fetchone()
         boots = self._boots(device)
         gaps = self.connection.execute(
             "select count(*) as marks, coalesce(sum(count), 0) as missed "
-            "from log_marks where kind = 'gap' and device_id = ?", (device,)).fetchone()
-        return {"rows": events["rows"], "bytes": self._used_bytes(), "oldestBoot": boots.get(events["oldest"]),
-                "newestBoot": boots.get(events["newest"]), "marks": gaps["marks"], "missed": gaps["missed"]}
+            "from log_marks where kind = 'gap' and device_id = ?",
+            (device,),
+        ).fetchone()
+        return {
+            "rows": events["rows"],
+            "bytes": self._used_bytes(),
+            "oldestBoot": boots.get(events["oldest"]),
+            "newestBoot": boots.get(events["newest"]),
+            "marks": gaps["marks"],
+            "missed": gaps["missed"],
+        }

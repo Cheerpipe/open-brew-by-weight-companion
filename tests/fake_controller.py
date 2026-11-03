@@ -86,7 +86,9 @@ def index_answer(baselines, store, held, delta, epoch, rows):
 class Controller:
     def __init__(self, secret, companion_id):
         self.secret, self.companion_id = secret, companion_id
-        self.mode = "ok"  # ok, none (no relay route answers), forgotten, bad_erase, unknown, bad_proof
+        self.mode = (
+            "ok"  # ok, none (no relay route answers), forgotten, bad_erase, unknown, bad_proof
+        )
         self.ui, self.link = True, False
         self.rb, self.kr, self.kb, self.high, self.mask = os.urandom(16), None, None, 0, 0
         self.responses = 0
@@ -119,10 +121,14 @@ class Controller:
         nc = base64.b64decode(body["nonce"])
         if self.mode in ("forgotten", "bad_erase"):
             key = self.secret if self.mode == "forgotten" else bytes(32)
-            return web.json_response({"error": "COMPANION_NOT_PAIRED", "erase": b64(mac(key, b"E", nc))}, status=404)
+            return web.json_response(
+                {"error": "COMPANION_NOT_PAIRED", "erase": b64(mac(key, b"E", nc))}, status=404
+            )
         if self.mode == "unknown" or body["id"] != self.companion_id:
             return web.json_response({"error": "COMPANION_NOT_PAIRED"}, status=404)
-        if not hmac.compare_digest(base64.b64decode(body["mac"]), mac(self.secret, b"R", self.rb, nc)):
+        if not hmac.compare_digest(
+            base64.b64decode(body["mac"]), mac(self.secret, b"R", self.rb, nc)
+        ):
             return web.json_response({"error": "COMPANION_AUTH"}, status=401)
         self.handshakes += 1
         self.kr = relay_key(self.secret, self.rb, nc)
@@ -139,27 +145,41 @@ class Controller:
         if value is None:
             return None, None
         parts = value.split(" ")
-        if len(parts) != 5 or parts[0] != "2" or not parts[1].isdigit() or not CLIENT.fullmatch(parts[3]) or \
-                not re.fullmatch(r"[0-9a-f]{32}", parts[4]) or len(parts[2]) > 45:
+        if (
+            len(parts) != 5
+            or parts[0] != "2"
+            or not parts[1].isdigit()
+            or not CLIENT.fullmatch(parts[3])
+            or not re.fullmatch(r"[0-9a-f]{32}", parts[4])
+            or len(parts[2]) > 45
+        ):
             return None, web.json_response({"error": "RELAY_INVALID"}, status=400)
         q, addr, screen, tag = int(parts[1]), parts[2], parts[3], parts[4]
         raw_session = request.headers.get("X-WebUI-Session", "")
         raw_password = request.headers.get("X-Device-Password", "")
-        if self.stale_next or self.kr is None or tag != relay_tag(self.kr, request.method, request.raw_path, q,
-                                                                  addr, screen, raw_session):
+        if (
+            self.stale_next
+            or self.kr is None
+            or tag
+            != relay_tag(self.kr, request.method, request.raw_path, q, addr, screen, raw_session)
+        ):
             self.stale_next = False
             return None, web.json_response({"error": "RELAY_STALE"}, status=401)
         session = password = ""
         try:
             if raw_session:
-                session = open_(self.kb, b"c", CTX_SESSION, q, base64.b64decode(raw_session)).decode()
+                session = open_(
+                    self.kb, b"c", CTX_SESSION, q, base64.b64decode(raw_session)
+                ).decode()
             if raw_password:
-                password = open_(self.kb, b"c", CTX_PASSWORD, q, base64.b64decode(raw_password)).decode()
-        except (InvalidTag, ValueError, UnicodeDecodeError):
+                password = open_(
+                    self.kb, b"c", CTX_PASSWORD, q, base64.b64decode(raw_password)
+                ).decode()
+        except InvalidTag, ValueError, UnicodeDecodeError:
             return None, web.json_response({"error": "RELAY_INVALID"}, status=400)
         if q > self.high:
             shift = q - self.high
-            self.mask = ((self.mask << shift) | 1) & (2 ** 64 - 1) if shift < 64 else 1
+            self.mask = ((self.mask << shift) | 1) & (2**64 - 1) if shift < 64 else 1
             self.high = q
         elif self.high - q < 64 and not self.mask >> (self.high - q) & 1:
             self.mask |= 1 << (self.high - q)
@@ -167,19 +187,30 @@ class Controller:
             return None, web.json_response({"error": "RELAY_REPLAY"}, status=401)
         if not self.ui:
             return None, web.json_response({"error": "RELAY_DISABLED"}, status=403)
-        return {"q": q, "addr": addr, "screen": screen, "session": session, "password": password}, None
+        return {
+            "q": q,
+            "addr": addr,
+            "screen": screen,
+            "session": session,
+            "password": password,
+        }, None
 
     def answer(self, identity, payload, status=200):
         """A JSON answer: sealed (X-OBBW-Enc names its counter) to a relayed request."""
         if identity is None:
             return web.json_response(payload, status=status, dumps=dumps)
         self.responses += 1
-        sealed = AESGCM(self.kb).encrypt(nonce(b"f", 3, self.responses), dumps(payload).encode(), None)
+        sealed = AESGCM(self.kb).encrypt(
+            nonce(b"f", 3, self.responses), dumps(payload).encode(), None
+        )
         if self.corrupt_reply:
             sealed = sealed[:-1] + bytes((sealed[-1] ^ 1,))
-        return web.Response(status=status, content_type="application/json",
-                            headers={"Cache-Control": "no-store", "X-OBBW-Enc": str(self.responses)},
-                            body=sealed)
+        return web.Response(
+            status=status,
+            content_type="application/json",
+            headers={"Cache-Control": "no-store", "X-OBBW-Enc": str(self.responses)},
+            body=sealed,
+        )
 
     # --- REST -------------------------------------------------------------------------
     async def api(self, request):
@@ -192,8 +223,11 @@ class Controller:
         body = raw
         # Firmware update ranges travel as they are; every other relayed body
         # arrived sealed under its request's q.
-        sealed_body = identity is not None and raw and not (
-            request.method == "PATCH" and request.path == "/api/v1/ota")
+        sealed_body = (
+            identity is not None
+            and raw
+            and not (request.method == "PATCH" and request.path == "/api/v1/ota")
+        )
         if sealed_body:
             try:
                 body = open_(self.kb, b"c", CTX_BODY, identity["q"], raw)
@@ -206,8 +240,13 @@ class Controller:
             if identity["password"]:
                 headers["X-Device-Password"] = identity["password"]
         self.requests.append((request.method, request.raw_path, headers, body, identity))
-        self.wire.append((request.headers.get("X-WebUI-Session", ""),
-                          request.headers.get("X-Device-Password", ""), raw))
+        self.wire.append(
+            (
+                request.headers.get("X-WebUI-Session", ""),
+                request.headers.get("X-Device-Password", ""),
+                raw,
+            )
+        )
         client, path = request.headers.get("X-WebUI-Client", ""), request.path
         if path == "/api/v1/ui/claim":
             if not CLIENT.fullmatch(client):
@@ -223,9 +262,13 @@ class Controller:
         if path == "/api/v1/ota" and request.method == "PATCH":
             return self.answer(identity, {"received": len(body)})
         if path == "/api/v1/debug/export":
-            response = web.StreamResponse(headers={
-                "Content-Type": "application/octet-stream", "Content-Encoding": "gzip",
-                "Content-Disposition": 'attachment; filename="export.gz"'})
+            response = web.StreamResponse(
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Encoding": "gzip",
+                    "Content-Disposition": 'attachment; filename="export.gz"',
+                }
+            )
             await response.prepare(request)
             for _ in range(4):
                 await response.write(b"\x1f\x8b" + bytes(32 * 1024))
@@ -236,8 +279,11 @@ class Controller:
         if path == "/api/v1/auth":
             return self.answer(identity, {"login": False})
         if client != self.active:
-            return self.answer(identity, {"error": "UI_TAKEN_OVER", "message": "Another window took over"},
-                               status=409)
+            return self.answer(
+                identity,
+                {"error": "UI_TAKEN_OVER", "message": "Another window took over"},
+                status=409,
+            )
         if request.method == "GET":
             return self.answer(identity, {"ok": True, "uri": request.raw_path})
         self.request_id += 1
@@ -314,8 +360,16 @@ class Session:
         elif name == "activity":
             await self.send({"v": 1, "type": "alive"})
         elif name == "settings":
-            await self.send({"v": 1, "type": "settings", "boot": 7, "snapshot": True, "tag": 55,
-                             "changes": {"config.dripDelayMs": 0, "scale.history": []}})
+            await self.send(
+                {
+                    "v": 1,
+                    "type": "settings",
+                    "boot": 7,
+                    "snapshot": True,
+                    "tag": 55,
+                    "changes": {"config.dripDelayMs": 0, "scale.history": []},
+                }
+            )
         elif name == "diagnostic" and op["on"]:
             await self.send(diagnostic_snapshot())
             await self.send({"type": "diagnostic", "changes": {"tasks": {"big": "x" * 30000}}})
@@ -323,11 +377,22 @@ class Session:
             after = op.get("after", 0)
             await self.send(log_frame([event(n) for n in range(1, 6) if n > after]))
         elif name == "history" and op["on"]:
-            await self.send(history_frame(op, snapshot=not op.get("fetch"), epoch=self.controller.epoch,
-                                          boot=self.controller.boot))
+            await self.send(
+                history_frame(
+                    op,
+                    snapshot=not op.get("fetch"),
+                    epoch=self.controller.epoch,
+                    boot=self.controller.boot,
+                )
+            )
         elif name == "stats" and op["on"] and set(op) != {"op", "on", "window"}:
-            for frame in stats_page(self, op, snapshot=not op.get("fetch"), epoch=self.controller.epoch,
-                                    boot=self.controller.boot):
+            for frame in stats_page(
+                self,
+                op,
+                snapshot=not op.get("fetch"),
+                epoch=self.controller.epoch,
+                boot=self.controller.boot,
+            ):
                 await self.send(frame)
         elif name == "resync":
             await self.send(home_snapshot())
@@ -335,31 +400,77 @@ class Session:
 
 
 def home_snapshot(**extra):
-    changes = {"bootId": 7, "configMutable": True, "adminUnlocked": False, "config.soundAlertsEnabled": True,
-               "presetsTag": 9, "presets": [{"id": 1, "name": "Espresso"}], "lastCommand.requestId": 0,
-               "lastCommand.state": "NONE", "machineState": "idle", "timeUtcSec": 1800000000, **extra}
+    changes = {
+        "bootId": 7,
+        "configMutable": True,
+        "adminUnlocked": False,
+        "config.soundAlertsEnabled": True,
+        "presetsTag": 9,
+        "presets": [{"id": 1, "name": "Espresso"}],
+        "lastCommand.requestId": 0,
+        "lastCommand.state": "NONE",
+        "machineState": "idle",
+        "timeUtcSec": 1800000000,
+        **extra,
+    }
     return {"v": 1, "type": "home", "boot": 7, "snapshot": True, "changes": changes}
 
 
 def card_snapshot(seq=1):
-    return {"v": 1, "boot": 7, "seq": seq, "snapshot": True, "cycle": 3, "cursor": 0, "stale": False,
-            "phase": "idle", "card": {"valid": True}, "curve": {}}
+    return {
+        "v": 1,
+        "boot": 7,
+        "seq": seq,
+        "snapshot": True,
+        "cycle": 3,
+        "cursor": 0,
+        "stale": False,
+        "phase": "idle",
+        "card": {"valid": True},
+        "curve": {},
+    }
 
 
 def diagnostic_snapshot():
-    return {"v": 1, "type": "diagnostic", "boot": 7, "snapshot": True,
-            "changes": {"relayClosed": False, "controlSource": "none", "safety.fault": "none",
-                        "scale.controlState": "idle", "heap": {"free": 1}}}
+    return {
+        "v": 1,
+        "type": "diagnostic",
+        "boot": 7,
+        "snapshot": True,
+        "changes": {
+            "relayClosed": False,
+            "controlSource": "none",
+            "safety.fault": "none",
+            "scale.controlState": "idle",
+            "heap": {"free": 1},
+        },
+    }
 
 
 def event(sequence):
-    return {"sequence": sequence, "atMs": sequence * 10, "wallSec": 0, "localSec": 0, "level": "info",
-            "category": "system", "message": f"event {sequence}"}
+    return {
+        "sequence": sequence,
+        "atMs": sequence * 10,
+        "wallSec": 0,
+        "localSec": 0,
+        "level": "info",
+        "category": "system",
+        "message": f"event {sequence}",
+    }
 
 
 def log_frame(events, **extra):
-    frame = {"v": 1, "type": "log", "bootId": 7, "historyOverwritten": 0, "missedEvents": 0, "serialDropped": 0,
-             "cursorInvalid": False, "events": events, "hasMore": False}
+    frame = {
+        "v": 1,
+        "type": "log",
+        "bootId": 7,
+        "historyOverwritten": 0,
+        "missedEvents": 0,
+        "serialDropped": 0,
+        "cursorInvalid": False,
+        "events": events,
+        "hasMore": False,
+    }
     frame.update(extra)
     return frame
 
@@ -372,26 +483,68 @@ def fingerprint(*parts):
 def history_frame(op, snapshot, epoch=5, request=None, boot=7):
     limit, direction = op.get("limit", 20), op.get("dir", "desc")
     ids = list(range(1, 4)) if direction == "desc" else list(range(3, 0, -1))
-    records = [{"id": n, "type": (op.get("types") or ["shot"])[0], "durationS": 1.0, "hasWallTime": False,
-                "endedAtUnixSec": 0, "endedAtLocalSec": 0} for n in ids]
+    records = [
+        {
+            "id": n,
+            "type": (op.get("types") or ["shot"])[0],
+            "durationS": 1.0,
+            "hasWallTime": False,
+            "endedAtUnixSec": 0,
+            "endedAtLocalSec": 0,
+        }
+        for n in ids
+    ]
     tag = fingerprint(epoch, op.get("offset", 0), limit, direction, op.get("types"), records)
     kept = snapshot and op.get("tag") == tag
-    return {"v": 1, "type": "history", "boot": boot, "snapshot": snapshot, "epoch": epoch,
-            "request": request if request is not None else op.get("request", 0), "tag": tag, "total": 3,
-            "offset": op.get("offset", 0), "limit": limit, "hasMore": False,
-            "records": [record["id"] for record in records] if kept else records}
+    return {
+        "v": 1,
+        "type": "history",
+        "boot": boot,
+        "snapshot": snapshot,
+        "epoch": epoch,
+        "request": request if request is not None else op.get("request", 0),
+        "tag": tag,
+        "total": 3,
+        "offset": op.get("offset", 0),
+        "limit": limit,
+        "hasMore": False,
+        "records": [record["id"] for record in records] if kept else records,
+    }
 
 
 def stats_page(session, op, snapshot, epoch=5, request=None, boot=7):
     """Two frames, a header frame and a continuation; a kept page's bare ids fit the first."""
     session.seq += 1
-    common = {"v": 1, "type": "stats", "boot": boot, "epoch": epoch, "seq": session.seq,
-              "request": request if request is not None else op.get("request", 0), "total": 2,
-              "offset": op.get("offset", 0), "limit": op.get("limit", 10), "hasMore": False}
+    common = {
+        "v": 1,
+        "type": "stats",
+        "boot": boot,
+        "epoch": epoch,
+        "seq": session.seq,
+        "request": request if request is not None else op.get("request", 0),
+        "total": 2,
+        "offset": op.get("offset", 0),
+        "limit": op.get("limit", 10),
+        "hasMore": False,
+    }
     header, rows = {"window": op.get("window", 10)}, [[1, {"wCg": [10]}], [2, {"wCg": [20]}]]
-    tag = fingerprint(epoch, *(op.get(name) for name in ("offset", "limit", "sort", "dir", "filter")), header, rows)
-    first = {**common, "snapshot": snapshot, "stats": header, "cols": "id", "tag": tag, "rowBase": 0}
+    tag = fingerprint(
+        epoch,
+        *(op.get(name) for name in ("offset", "limit", "sort", "dir", "filter")),
+        header,
+        rows,
+    )
+    first = {
+        **common,
+        "snapshot": snapshot,
+        "stats": header,
+        "cols": "id",
+        "tag": tag,
+        "rowBase": 0,
+    }
     if snapshot and op.get("tag") == tag:
         return [{**first, "rows": [1, 2], "more": False}]
-    return [{**first, "rows": rows[:1], "more": True},
-            {**common, "snapshot": False, "rows": rows[1:], "rowBase": 1, "more": False}]
+    return [
+        {**first, "rows": rows[:1], "more": True},
+        {**common, "snapshot": False, "rows": rows[1:], "rowBase": 1, "more": False},
+    ]

@@ -79,16 +79,23 @@ class Browser:
         self.frames, self.ws, self.code, self.reason = asyncio.Queue(), None, None, None
 
     async def claim(self):
-        async with self.http.post(self.base + "/api/v1/ui/claim", json={},
-                                  headers={"X-WebUI-Client": self.client, "X-Real-IP": "192.168.1.9"}) as reply:
+        async with self.http.post(
+            self.base + "/api/v1/ui/claim",
+            json={},
+            headers={"X-WebUI-Client": self.client, "X-Real-IP": "192.168.1.9"},
+        ) as reply:
             assert reply.status == 200
 
     async def open(self, ops=(), claim=True, **bind):
         if claim:
             await self.claim()
-        self.ws = await self.http.ws_connect(self.base + "/api/v1/ui/ui-stream", headers={"X-Real-IP": "192.168.1.9"})
+        self.ws = await self.http.ws_connect(
+            self.base + "/api/v1/ui/ui-stream", headers={"X-Real-IP": "192.168.1.9"}
+        )
         asyncio.create_task(self._reader())
-        await self.send({"op": "bind", "client": self.client, **({"ops": list(ops)} if ops else {}), **bind})
+        await self.send(
+            {"op": "bind", "client": self.client, **({"ops": list(ops)} if ops else {}), **bind}
+        )
         return self
 
     async def _reader(self):
@@ -141,10 +148,12 @@ async def ops_after(session, count, timeout=2):
 
 
 async def main():
-    assert hashlib.sha256(REPLAY.read_bytes()).hexdigest() == REPLAY_SHA256, \
+    assert hashlib.sha256(REPLAY.read_bytes()).hexdigest() == REPLAY_SHA256, (
         "the replay fixture differs from the firmware's: copy its file again"
-    assert json.loads(REPLAY.read_text())["sessionFields"] == {"home": dict.fromkeys(mux.CLOCKS, "clock")}, \
-        "a per-session field of the controller is not handled on a replay (mux.CLOCKS)"
+    )
+    assert json.loads(REPLAY.read_text())["sessionFields"] == {
+        "home": dict.fromkeys(mux.CLOCKS, "clock")
+    }, "a per-session field of the controller is not handled on a replay (mux.CLOCKS)"
     fake = fake_controller.Controller(SECRET, ID)
     server = TestServer(fake.app(), host="127.0.0.1")
     await server.start_server()
@@ -153,8 +162,10 @@ async def main():
         store = service.Store(data)
         store.write("identity", {"id": ID, "key": V["companionPrivate"]})
         store.save_pairing(SECRET, "Cafe Bar")
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as http, \
-                aiohttp.ClientSession() as web:
+        async with (
+            aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as http,
+            aiohttp.ClientSession() as web,
+        ):
             companion = Companion("Kitchen server", data, http, Idle)
             companion.pairing.auto = False
             companion.set_controller(("Cafe Bar", ("127.0.0.1", server.port)))
@@ -186,7 +197,10 @@ async def main():
             assert session.identity["screen"] == relay_id and bind["client"] == relay_id
             assert bind["ops"][0] == {"op": "settings", "on": True}
             up_history = bind["ops"][1]
-            assert {**up_history, "request": 0} == {**HISTORY, "request": 0} and "presetsTag" not in bind
+            assert {**up_history, "request": 0} == {
+                **HISTORY,
+                "request": 0,
+            } and "presetsTag" not in bind
             assert (await a.next("home"))["snapshot"] and (await a.next("card"))["snapshot"]
             assert (await a.next("settings"))["tag"] == 55
             history = await a.next("history")
@@ -194,26 +208,42 @@ async def main():
             await a.send({"op": "activity", "seconds": 0, "hidden": False})
             assert (await a.next("alive"))["type"] == "alive"
             count = len(session.ops)
-            the_mux.home.clock_at["timeUtcSec"] -= 5  # Five seconds after the controller's clock arrived.
+            the_mux.home.clock_at["timeUtcSec"] -= (
+                5  # Five seconds after the controller's clock arrived.
+            )
 
-            b = await screen(1).open([{"op": "settings", "on": True, "tag": 55}, {**HISTORY, "request": 7}],
-                                     presetsTag=9)
+            b = await screen(1).open(
+                [{"op": "settings", "on": True, "tag": 55}, {**HISTORY, "request": 7}], presetsTag=9
+            )
             home = await b.next("home")
-            assert home["snapshot"] and "presets" not in home["changes"] and home["changes"]["presetsTag"] == 9, \
-                "the screen's presets are current: Home omits them"
-            assert home["changes"]["timeUtcSec"] == 1800000005, "a late screen's clock is as old as it is"
+            assert (
+                home["snapshot"]
+                and "presets" not in home["changes"]
+                and home["changes"]["presetsTag"] == 9
+            ), "the screen's presets are current: Home omits them"
+            assert home["changes"]["timeUtcSec"] == 1800000005, (
+                "a late screen's clock is as old as it is"
+            )
             assert (await b.next("card"))["cycle"] == 3
             history = await b.next("history")
-            assert history["request"] == 7 and history["snapshot"] is True and len(history["records"]) == 3
+            assert (
+                history["request"] == 7
+                and history["snapshot"] is True
+                and len(history["records"]) == 3
+            )
             await b.quiet()  # Settings: the tag matches, nothing to send.
-            assert len(session.ops) == count, "a second screen on the same views sends the controller nothing"
+            assert len(session.ops) == count, (
+                "a second screen on the same views sends the controller nothing"
+            )
 
             await session.send({"type": "home", "changes": {"machineState": "brewing"}})
             assert (await a.next("home"))["changes"] == {"machineState": "brewing"}
             assert (await b.next("home"))["changes"] == {"machineState": "brewing"}
             refresh = history_frame({**HISTORY}, snapshot=False, request=up_history["request"])
             await session.send(refresh)
-            assert (await a.next("history"))["request"] == 1 and (await b.next("history"))["request"] == 7
+            assert (await a.next("history"))["request"] == 1 and (await b.next("history"))[
+                "request"
+            ] == 7
 
             # A third screen with another dir and type: one fetch, with every parameter explicit.
             c = await screen(2).open([{**HISTORY, "request": 3, "dir": "asc", "types": ["rinse"]}])
@@ -221,10 +251,22 @@ async def main():
             await c.next("card")
             ops = await ops_after(session, count + 1)
             fetch = ops[-1]
-            assert fetch == {"op": "history", "on": True, "fetch": True, "request": fetch["request"], "offset": 0,
-                             "limit": 20, "dir": "asc", "types": ["rinse"]}
+            assert fetch == {
+                "op": "history",
+                "on": True,
+                "fetch": True,
+                "request": fetch["request"],
+                "offset": 0,
+                "limit": 20,
+                "dir": "asc",
+                "types": ["rinse"],
+            }
             page = await c.next("history")
-            assert page["request"] == 3 and page["snapshot"] is True and page["records"][0]["type"] == "rinse"
+            assert (
+                page["request"] == 3
+                and page["snapshot"] is True
+                and page["records"][0]["type"] == "rinse"
+            )
             # A fourth screen in that group: from the companion's copy.
             d = await screen(3).open([{**HISTORY, "request": 4, "dir": "asc", "types": ["rinse"]}])
             await d.next("home")
@@ -232,16 +274,33 @@ async def main():
             assert (await d.next("history"))["request"] == 4 and len(session.ops) == count + 1
             # The store changed: the owner group's refresh, then one fetch for the other group.
             fake.epoch = 6
-            await session.send(history_frame({**HISTORY}, snapshot=False, epoch=6, request=up_history["request"]))
-            assert (await a.next("history"))["epoch"] == 6 and (await b.next("history"))["epoch"] == 6
-            assert (await c.next("history"))["epoch"] == 6 and (await d.next("history"))["epoch"] == 6
-            assert len(await ops_after(session, count + 2)) == count + 2 and session.ops[-1]["fetch"] is True
+            await session.send(
+                history_frame({**HISTORY}, snapshot=False, epoch=6, request=up_history["request"])
+            )
+            assert (await a.next("history"))["epoch"] == 6 and (await b.next("history"))[
+                "epoch"
+            ] == 6
+            assert (await c.next("history"))["epoch"] == 6 and (await d.next("history"))[
+                "epoch"
+            ] == 6
+            assert (
+                len(await ops_after(session, count + 2)) == count + 2
+                and session.ops[-1]["fetch"] is True
+            )
 
             # A scroll fetch takes the screen's own window for what it leaves out.
             await c.send({"op": "history", "on": True, "fetch": True, "request": 30, "offset": 20})
             ops = await ops_after(session, count + 3)
-            assert {**ops[-1], "request": 0} == {"op": "history", "on": True, "fetch": True, "request": 0,
-                                                 "offset": 20, "limit": 20, "dir": "asc", "types": ["rinse"]}
+            assert {**ops[-1], "request": 0} == {
+                "op": "history",
+                "on": True,
+                "fetch": True,
+                "request": 0,
+                "offset": 20,
+                "limit": 20,
+                "dir": "asc",
+                "types": ["rinse"],
+            }
             page = await c.next("history")
             assert page["request"] == 30 and page["snapshot"] is False
             await d.quiet()
@@ -251,8 +310,15 @@ async def main():
             await b.close()
             ops = await ops_after(session, count + 4)
             promoted = ops[-1]
-            assert {**promoted, "request": 0} == {**HISTORY, "request": 0, "dir": "asc", "types": ["rinse"]}
-            assert (await c.next("history"))["request"] == 3 and (await d.next("history"))["request"] == 4
+            assert {**promoted, "request": 0} == {
+                **HISTORY,
+                "request": 0,
+                "dir": "asc",
+                "types": ["rinse"],
+            }
+            assert (await c.next("history"))["request"] == 3 and (await d.next("history"))[
+                "request"
+            ] == 4
             assert the_mux.status()["views"]["history"] == 2
 
             # --- An invalid op closes only that screen, with 4003 -------------------------------------
@@ -267,24 +333,56 @@ async def main():
             await a.next("home")
             await a.next("card")
             first = await a.next("stats")
-            assert first["request"] == 2 and first["seq"] == 1 and first["snapshot"] and first["stats"]["window"] == 10
+            assert (
+                first["request"] == 2
+                and first["seq"] == 1
+                and first["snapshot"]
+                and first["stats"]["window"] == 10
+            )
             second = await a.next("stats")
             assert second["seq"] == 1 and second["rowBase"] == 1 and second["snapshot"] is False
             b = await screen(1).open([{**STATS, "request": 5, "window": 50}])
             await b.next("home")
             await b.next("card")
             ops = await ops_after(session, 2)
-            assert ops[-1] == {"op": "stats", "on": True, "fetch": True, "request": ops[-1]["request"], "offset": 0,
-                               "limit": 10, "sort": "date", "dir": "desc", "filter": {}, "window": 50}
+            assert ops[-1] == {
+                "op": "stats",
+                "on": True,
+                "fetch": True,
+                "request": ops[-1]["request"],
+                "offset": 0,
+                "limit": 10,
+                "sort": "date",
+                "dir": "desc",
+                "filter": {},
+                "window": 50,
+            }
             first, second = await b.next("stats"), await b.next("stats")
-            assert (first["request"], first["seq"], first["snapshot"], first["stats"]["window"]) == (5, 1, True, 50)
+            assert (
+                first["request"],
+                first["seq"],
+                first["snapshot"],
+                first["stats"]["window"],
+            ) == (5, 1, True, 50)
             assert (second["request"], second["seq"], second["snapshot"]) == (5, 1, False)
-            await b.send({"op": "stats", "on": True, "fetch": True, "request": 9, "offset": 10, "limit": 10,
-                          "sort": "date", "dir": "desc"})
+            await b.send(
+                {
+                    "op": "stats",
+                    "on": True,
+                    "fetch": True,
+                    "request": 9,
+                    "offset": 10,
+                    "limit": 10,
+                    "sort": "date",
+                    "dir": "desc",
+                }
+            )
             ops = await ops_after(session, 3)
             assert ops[-1]["window"] == 50 and ops[-1]["filter"] == {} and ops[-1]["offset"] == 10
             first = await b.next("stats")
-            assert (first["request"], first["seq"]) == (9, 2) and (await b.next("stats"))["seq"] == 2
+            assert (first["request"], first["seq"]) == (9, 2) and (await b.next("stats"))[
+                "seq"
+            ] == 2
             # The owner alone changes its window: the header refresh, not a new subscription.
             await a.send({"op": "stats", "on": True, "window": 100})
             assert (await ops_after(session, 4))[-1] == {"op": "stats", "on": True, "window": 100}
@@ -292,12 +390,35 @@ async def main():
             c = await screen(2).open()
             await c.next("home")
             await c.next("card")
-            await c.send({"op": "stats", "on": True, "fetch": True, "request": 11, "offset": 1, "limit": 2,
-                          "sort": "date", "dir": "desc", "filter": {}})
+            await c.send(
+                {
+                    "op": "stats",
+                    "on": True,
+                    "fetch": True,
+                    "request": 11,
+                    "offset": 1,
+                    "limit": 2,
+                    "sort": "date",
+                    "dir": "desc",
+                    "filter": {},
+                }
+            )
             ops = await ops_after(session, 5)
-            assert ops[-1] == {"op": "stats", "on": True, "fetch": True, "request": ops[-1]["request"], "offset": 1,
-                               "limit": 2, "sort": "date", "dir": "desc", "filter": {}, "window": 10}
-            assert (await c.next("stats"))["request"] == 11 and (await c.next("stats"))["rowBase"] == 1
+            assert ops[-1] == {
+                "op": "stats",
+                "on": True,
+                "fetch": True,
+                "request": ops[-1]["request"],
+                "offset": 1,
+                "limit": 2,
+                "sort": "date",
+                "dir": "desc",
+                "filter": {},
+                "window": 10,
+            }
+            assert (await c.next("stats"))["request"] == 11 and (await c.next("stats"))[
+                "rowBase"
+            ] == 1
             await all_closed(a, b, c)
 
             # --- Diagnostic: a late screen gets the merged model, split; the last one leaves ----------
@@ -305,7 +426,9 @@ async def main():
             session = await asyncio.wait_for(fake.sessions.get(), 2)
             await a.next("home")
             await a.next("card")
-            assert (await a.next("diagnostic"))["snapshot"] and "tasks" in (await a.next("diagnostic"))["changes"]
+            assert (await a.next("diagnostic"))["snapshot"] and "tasks" in (
+                await a.next("diagnostic")
+            )["changes"]
             await session.send({"type": "diagnostic", "changes": {"safety.fault": "relay"}})
             await a.next("diagnostic")
             b = await screen(1).open()
@@ -316,7 +439,11 @@ async def main():
             assert first["snapshot"] is True and first["changes"]["safety.fault"] == "relay"
             assert {"relayClosed", "controlSource", "scale.controlState"} <= set(first["changes"])
             rest = await b.next("diagnostic")
-            assert "snapshot" not in rest and "tasks" in rest["changes"] and len(json.dumps(first)) <= 20 * 1024
+            assert (
+                "snapshot" not in rest
+                and "tasks" in rest["changes"]
+                and len(json.dumps(first)) <= 20 * 1024
+            )
             assert len(session.ops) == 1
             await a.send({"op": "diagnostic", "on": False})
             await b.send({"op": "diagnostic", "on": False})
@@ -330,12 +457,16 @@ async def main():
             assert [e["sequence"] for e in (await a.next("log"))["events"]] == [1, 2, 3, 4, 5]
             await b.send({"op": "log", "on": True, "after": 3})
             frame = await b.next("log")
-            assert [e["sequence"] for e in frame["events"]] == [4, 5] and frame["cursorInvalid"] is False
+            assert [e["sequence"] for e in frame["events"]] == [4, 5] and frame[
+                "cursorInvalid"
+            ] is False
             c = await screen(2).open([{"op": "log", "on": True, "after": 99}])
             await c.next("home")
             await c.next("card")
             frame = await c.next("log")
-            assert frame["cursorInvalid"] is True and len(frame["events"]) == 5, "a cursor from elsewhere refills"
+            assert frame["cursorInvalid"] is True and len(frame["events"]) == 5, (
+                "a cursor from elsewhere refills"
+            )
             assert len(session.ops) == 3
             await session.send(log_frame([event(6)]))
             for item in (a, b, c):
@@ -346,13 +477,21 @@ async def main():
 
             # --- Hidden and activity: the most of the visible screens, hidden only when all are -------
             await a.send({"op": "activity", "seconds": 20, "hidden": False})
-            assert (await ops_after(session, 5))[-1] == {"op": "activity", "seconds": 20, "hidden": False}
+            assert (await ops_after(session, 5))[-1] == {
+                "op": "activity",
+                "seconds": 20,
+                "hidden": False,
+            }
             await b.send({"op": "activity", "seconds": 0, "hidden": True})
             await c.send({"op": "activity", "seconds": 0, "hidden": True})
             await asyncio.sleep(0.2)
             assert len(session.ops) == 5
             await a.send({"op": "activity", "seconds": 0, "hidden": True})
-            assert (await ops_after(session, 6))[-1] == {"op": "activity", "seconds": 0, "hidden": True}
+            assert (await ops_after(session, 6))[-1] == {
+                "op": "activity",
+                "seconds": 0,
+                "hidden": True,
+            }
 
             # --- An older page's `records` op (a record index): ignored, never sent up nor closed (4003) ---
             await a.send({"op": "records", "shots": 0})
@@ -361,8 +500,11 @@ async def main():
 
             # --- Commands: the next mutation waits for the controller's lastCommand ------------------------
             async def command(index):
-                async with web.post(base + "/api/v1/config", json={"patch": {}},
-                                    headers={"X-WebUI-Client": CLIENTS[index]}) as reply:
+                async with web.post(
+                    base + "/api/v1/config",
+                    json={"patch": {}},
+                    headers={"X-WebUI-Client": CLIENTS[index]},
+                ) as reply:
                     return reply.status, await reply.json()
 
             assert await command(0) == (202, {"accepted": True, "requestId": 101})
@@ -370,13 +512,21 @@ async def main():
             await asyncio.sleep(0.4)
             assert not second.done() and fake.requests[-1][1] == "/api/v1/config"
             seen = len(fake.requests)
-            await session.send({"type": "home", "changes": {"lastCommand.requestId": 101,
-                                                            "lastCommand.state": "QUEUED"}})
+            await session.send(
+                {
+                    "type": "home",
+                    "changes": {"lastCommand.requestId": 101, "lastCommand.state": "QUEUED"},
+                }
+            )
             await asyncio.sleep(0.2)
             assert not second.done(), "QUEUED is not settled"
             await session.send({"type": "home", "changes": {"lastCommand.state": "PERSISTED"}})
-            assert (await asyncio.wait_for(second, 2))[1]["requestId"] == 102 and len(fake.requests) == seen + 1
-            async with web.get(base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[2]}) as reply:
+            assert (await asyncio.wait_for(second, 2))[1]["requestId"] == 102 and len(
+                fake.requests
+            ) == seen + 1
+            async with web.get(
+                base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[2]}
+            ) as reply:
                 assert reply.status == 200, "reads do not wait behind a command"
             for item in (a, b, c):
                 for _ in range(2):
@@ -394,6 +544,7 @@ async def main():
                     await controller_session.ws.close(code=4003)
                     return True
                 return False
+
             fake.handler = reject
             await asyncio.sleep(0.4)
             await a.send({"op": "log", "on": True})
@@ -407,17 +558,24 @@ async def main():
             b = await screen(1).open()
             await a.next("home")
             await b.next("home")
-            async with web.post(f"http://127.0.0.1:{server.port}/api/v1/ui/claim", json={},
-                                headers={"X-WebUI-Client": DIRECT}) as reply:
+            async with web.post(
+                f"http://127.0.0.1:{server.port}/api/v1/ui/claim",
+                json={},
+                headers={"X-WebUI-Client": DIRECT},
+            ) as reply:
                 assert reply.status == 200
             assert await a.closed() == 4001 and await b.closed() == 4001
             assert b.reason == "direct" and the_mux.claimed == set()
-            async with web.get(base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[0]}) as reply:
+            async with web.get(
+                base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[0]}
+            ) as reply:
                 assert reply.status == 409 and fake.requests[-1][2]["X-WebUI-Client"] == CLIENTS[0]
             await eventually(lambda: the_mux.upstream.state == "closed")
 
             # --- A screen arriving as the last one left: the window moves, the orphaned log goes ------------
-            a = await screen(0).open([{**HISTORY, "request": 1}, {"op": "log", "on": True, "after": 0}])
+            a = await screen(0).open(
+                [{**HISTORY, "request": 1}, {"op": "log", "on": True, "after": 0}]
+            )
             session = await asyncio.wait_for(fake.sessions.get(), 2)
             await a.next("home")
             await a.next("card")
@@ -428,8 +586,9 @@ async def main():
             await b.next("home")
             await b.next("card")
             ops = await ops_after(session, 3)
-            assert {**ops[1], "request": 0} == {**HISTORY, "request": 0, "dir": "asc"} and ops[2] == {
-                "op": "log", "on": False}
+            assert {**ops[1], "request": 0} == {**HISTORY, "request": 0, "dir": "asc"} and ops[
+                2
+            ] == {"op": "log", "on": False}
             assert (await b.next("history"))["request"] == 2
 
             # Resync: answered by the companion; the same screen again within 30 s asks the controller.
@@ -445,8 +604,13 @@ async def main():
             await all_closed(b)
 
             # --- Upstream op count: three screens on the same views cost what one does --------------------
-            views = [{"op": "settings", "on": True}, {"op": "diagnostic", "on": True},
-                     {"op": "log", "on": True, "after": 0}, {**HISTORY, "request": 1}, {**STATS, "request": 2}]
+            views = [
+                {"op": "settings", "on": True},
+                {"op": "diagnostic", "on": True},
+                {"op": "log", "on": True, "after": 0},
+                {**HISTORY, "request": 1},
+                {**STATS, "request": 2},
+            ]
 
             async def run(count):
                 screens = []
@@ -472,7 +636,9 @@ async def main():
 
             one, three = await run(1), await run(3)
             assert [op["op"] for op in one] == [op["op"] for op in three], (one, three)
-            assert len(one) == len(three) == 1, "the bind carries every view; nothing else reaches the controller"
+            assert len(one) == len(three) == 1, (
+                "the bind carries every view; nothing else reaches the controller"
+            )
 
             # --- Parked pages: the last screen's page waits for the next one's revalidation by its tag ---
             async def page_of(item, kind):
@@ -502,7 +668,9 @@ async def main():
                 first, rows = await page_of(a, kind)
                 assert "tag" not in session.ops[-1] and all(type(row) is not int for row in rows)
                 await parked(a, view)
-                assert session.ops[-1] == {"op": kind, "on": False}, "the last screen still ends the upstream window"
+                assert session.ops[-1] == {"op": kind, "on": False}, (
+                    "the last screen still ends the upstream window"
+                )
                 assert view.parked["tag"] == first["tag"] and view.parked["epoch"] == 5
 
                 # The next screen: the parked tag goes up, and nothing reaches the screen before the answer.
@@ -513,11 +681,14 @@ async def main():
                         held.append(op)
                         return True
                     return False
+
                 fake.handler = hold
                 await a.send({**view_op, "request": 2})
                 await eventually(lambda: held)
                 assert held[0]["tag"] == first["tag"]
-                d = await screen(3).open([{**view_op, "request": 9}])  # Joins while the answer is pending.
+                d = await screen(3).open(
+                    [{**view_op, "request": 9}]
+                )  # Joins while the answer is pending.
                 await d.next("home")
                 await d.next("card")
                 await a.quiet()
@@ -526,10 +697,13 @@ async def main():
                 sent = len(session.sent)
                 await session.answer(held[0])
                 kept = [json.loads(text) for text in session.sent[sent:]]
-                assert len(kept) == 1 and all(type(row) is int for row in kept[0][mux.ROWS[kind]]), \
-                    "the controller answers the tag with bare ids, in one frame"
+                assert len(kept) == 1 and all(
+                    type(row) is int for row in kept[0][mux.ROWS[kind]]
+                ), "the controller answers the tag with bare ids, in one frame"
                 again, whole = await page_of(a, kind)
-                assert again["request"] == 2 and again["snapshot"] is True and whole == rows, "made whole"
+                assert again["request"] == 2 and again["snapshot"] is True and whole == rows, (
+                    "made whole"
+                )
                 assert (await page_of(d, kind))[1] == rows and view.parked is None
                 await d.close()
                 await eventually(lambda: len(the_mux.bound()) == 2)
@@ -546,7 +720,11 @@ async def main():
                 fake.epoch = 6
                 await a.send({**view_op, "request": 4})
                 changed, fresh = await page_of(a, kind)
-                assert "tag" in session.ops[-1] and changed["epoch"] == 6 and changed["tag"] != first["tag"]
+                assert (
+                    "tag" in session.ops[-1]
+                    and changed["epoch"] == 6
+                    and changed["tag"] != first["tag"]
+                )
                 assert all(type(row) is not int for row in fresh) and view.parked is None
 
                 # An `rs` notice of the same epoch keeps the parked page; a moved one drops it.
@@ -594,8 +772,10 @@ async def main():
             await pages.close()
             await companion.relay.close()
     await server.close()
-    print("Companion screens: Home, card, Settings, History, Stats, parked pages, Diagnostic, log, an ignored "
-          "records op, liveness, commands, takeover, 4003, bounds and op count OK")
+    print(
+        "Companion screens: Home, card, Settings, History, Stats, parked pages, Diagnostic, log, an ignored "
+        "records op, liveness, commands, takeover, 4003, bounds and op count OK"
+    )
 
 
 asyncio.run(main())

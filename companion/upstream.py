@@ -35,7 +35,9 @@ class Upstream:
         self.activity_at = 0.0
         self.probing = False
         self.ops = 0  # Ops sent on this companion's lifetime (the bind counts as one).
-        self.recent = collections.deque(maxlen=64)  # The last ops, for tests and the 4003 attribution.
+        self.recent = collections.deque(
+            maxlen=64
+        )  # The last ops, for tests and the 4003 attribution.
 
     def open(self):
         if self.state == "closed":
@@ -70,13 +72,20 @@ class Upstream:
                 return None
             try:
                 return await relay.session().ws_connect(
-                    companion.base_url("ws") + PATH, headers={"Origin": f"http://{host}", "X-OBBW-Relay": value},
-                    autoping=True, max_msg_size=MAX_FRAME, timeout=aiohttp.ClientWSTimeout(ws_close=5))
+                    companion.base_url("ws") + PATH,
+                    headers={"Origin": f"http://{host}", "X-OBBW-Relay": value},
+                    autoping=True,
+                    max_msg_size=MAX_FRAME,
+                    timeout=aiohttp.ClientWSTimeout(ws_close=5),
+                )
             except aiohttp.WSServerHandshakeError as error:
                 if error.status != 401 or attempt:
                     log(f"the controller refused the live updates: HTTP {error.status}")
                     return None
-                relay.key, relay.body_key = None, None  # RELAY_STALE: a new relay session, then once more.
+                relay.key, relay.body_key = (
+                    None,
+                    None,
+                )  # RELAY_STALE: a new relay session, then once more.
         return None
 
     async def _run(self):
@@ -117,7 +126,7 @@ class Upstream:
                 if isinstance(frame, dict):
                     self.heard, self.heard_at, self.probing = True, loop.time(), False
                     self.mux.on_frame(frame, message.data)
-        except (aiohttp.ClientError, ConnectionError, asyncio.TimeoutError):
+        except aiohttp.ClientError, ConnectionError, asyncio.TimeoutError:
             pass
         finally:
             writer.cancel()
@@ -132,7 +141,7 @@ class Upstream:
             text = await outbox.get()
             try:
                 await ws.send_str(text)
-            except (aiohttp.ClientError, ConnectionError, RuntimeError):
+            except aiohttp.ClientError, ConnectionError, RuntimeError:
                 await ws.close()
                 return
 
@@ -146,9 +155,13 @@ class Upstream:
         now = asyncio.get_running_loop().time()
         seconds, hidden = self.mux.aggregate()
         last_seconds, last_hidden = self.activity
-        due = (hidden != last_hidden or (seconds and not last_seconds) or
-               (seconds and now - self.activity_at >= ACTIVITY_S) or now - self.sent_at >= KEEPALIVE_S or
-               (probe and not self.probing and now - self.heard_at >= ALIVE_S))
+        due = (
+            hidden != last_hidden
+            or (seconds and not last_seconds)
+            or (seconds and now - self.activity_at >= ACTIVITY_S)
+            or now - self.sent_at >= KEEPALIVE_S
+            or (probe and not self.probing and now - self.heard_at >= ALIVE_S)
+        )
         if due:
             self.activity, self.activity_at = (seconds, hidden), now
             self.probing = self.probing or probe
