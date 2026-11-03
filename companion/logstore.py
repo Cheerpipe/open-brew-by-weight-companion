@@ -24,10 +24,16 @@ longer keeps (records kept after deletion, exclusions).
 """
 
 import asyncio
+import json
 import sqlite3
 import time
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from .store import offload
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+    from pathlib import Path
 
 SCHEMA = 4
 PRUNE_ROUNDS = (
@@ -62,7 +68,8 @@ V1_TO_V2 = """
         from (select distinct device_id, boot_id from log_events);
     insert into log_events_v2 select e.device_id, b.ordinal, e.sequence, e.boot_id, e.at_ms,
         e.wall_sec, e.level, e.category, e.message
-        from log_events e join log_boots_v2 b on b.device_id = e.device_id and b.boot_id = e.boot_id;
+        from log_events e join log_boots_v2 b
+            on b.device_id = e.device_id and b.boot_id = e.boot_id;
     insert or ignore into log_marks_v2 select m.device_id, b.ordinal,
         (select min(e.sequence) from log_events e where e.device_id = m.device_id
             and e.boot_id = m.boot_id and e.sequence > m.after_sequence), m.kind, m.count, m.noted
@@ -111,43 +118,103 @@ LOG_INDEXES = """
     create index log_events_wall on log_events (device_id, wall_sec);
     create index log_events_category on log_events (device_id, category);
 """
-KEPT_OPEN = """kept = 1 and generation = (select coalesce(max(s.generation), 1) from archive_sync s
-        where s.device_id = archive_records.device_id and s.store = archive_records.store)
-    and not exists (select 1 from archive_sync s where s.device_id = archive_records.device_id
-        and s.store = archive_records.store and s.generation = archive_records.generation
-        and s.oldest is not null and archive_records.id < s.oldest)"""
-ASIDE = """(select min(min(o.generation), 1) - 1 from archive_records o where o.device_id = {row}.device_id
-        and o.store = {store} and o.id = {row}.id)"""
-V3_TO_V4 = f"""
-    update archive_traces set generation = {ASIDE.format(row="archive_traces", store="'shots'")}
-        where exists (select 1 from archive_records where archive_records.device_id = archive_traces.device_id
-            and archive_records.store = 'shots' and archive_records.generation = archive_traces.generation
-            and archive_records.id = archive_traces.id and {KEPT_OPEN});
-    update archive_records set generation = {ASIDE.format(row="archive_records", store="archive_records.store")}
-        where {KEPT_OPEN};
+# Both updates pick the kept records of the open generation the controller may
+# still list, and move each to the generation below every one holding its id.
+V3_TO_V4 = """
+    update archive_traces set generation = (select min(min(o.generation), 1) - 1
+            from archive_records o where o.device_id = archive_traces.device_id
+            and o.store = 'shots' and o.id = archive_traces.id)
+        where exists (select 1 from archive_records
+            where archive_records.device_id = archive_traces.device_id
+            and archive_records.store = 'shots'
+            and archive_records.generation = archive_traces.generation
+            and archive_records.id = archive_traces.id
+            and kept = 1 and generation = (select coalesce(max(s.generation), 1) from archive_sync s
+                where s.device_id = archive_records.device_id and s.store = archive_records.store)
+            and not exists (select 1 from archive_sync s
+                where s.device_id = archive_records.device_id
+                and s.store = archive_records.store and s.generation = archive_records.generation
+                and s.oldest is not null and archive_records.id < s.oldest));
+    update archive_records set generation = (select min(min(o.generation), 1) - 1
+            from archive_records o where o.device_id = archive_records.device_id
+            and o.store = archive_records.store and o.id = archive_records.id)
+        where kept = 1 and generation = (select coalesce(max(s.generation), 1) from archive_sync s
+            where s.device_id = archive_records.device_id and s.store = archive_records.store)
+        and not exists (select 1 from archive_sync s where s.device_id = archive_records.device_id
+            and s.store = archive_records.store and s.generation = archive_records.generation
+            and s.oldest is not null and archive_records.id < s.oldest);
     alter table archive_records drop column kept;
     drop table archive_exclusions;
     delete from meta where key = 'archiveKeepDeleted';
 """
+# Every statement is a constant: lists travel as one JSON parameter (json_each).
+TABLE_BYTES = """select coalesce(sum(pgsize), 0) from dbstat where aggregate = 1 and name in
+    (select value from json_each(?1) union all select name from sqlite_master
+        where type = 'index' and tbl_name in (select value from json_each(?1)))"""
+# The newest event at or before a wall time, or the oldest at or after it.
+AT_OR_BEFORE = (
+    "select ordinal, sequence from log_events where device_id = ? and wall_sec != 0 and wall_sec "
+    "<= ? order by wall_sec desc, ordinal desc, sequence desc limit 1"
+)
+AT_OR_AFTER = (
+    "select ordinal, sequence from log_events where device_id = ? and wall_sec != 0 and wall_sec "
+    ">= ? order by wall_sec, ordinal, sequence limit 1"
+)
+# A page of events, by whether it keeps only some levels and one category.
+PAGES = {
+    (False, False): "select * from log_events where device_id = ? and (ordinal, sequence) < (?, ?) "
+    "order by ordinal desc, sequence desc limit ?",
+    (True, False): "select * from log_events where device_id = ? and (ordinal, sequence) < (?, ?) "
+    "and level in (select value from json_each(?)) order by ordinal desc, sequence desc limit ?",
+    (False, True): "select * from log_events where device_id = ? and (ordinal, sequence) < (?, ?) "
+    "and category = ? order by ordinal desc, sequence desc limit ?",
+    (True, True): "select * from log_events where device_id = ? and (ordinal, sequence) < (?, ?) "
+    "and level in (select value from json_each(?)) and category = ? "
+    "order by ordinal desc, sequence desc limit ?",
+}
+# Delete history empties the log's events and marks; Forget everything, the archive's tables too.
+ERASE_HISTORY = ("delete from log_events", "delete from log_marks")
+ERASE_ALL = (
+    *ERASE_HISTORY,
+    "delete from log_boots",
+    "delete from log_access",
+    "delete from meta",
+    "delete from archive_records",
+    "delete from archive_traces",
+    "delete from archive_sync",
+    "delete from archive_holes",
+)
 
 
-def table_bytes(connection, tables):
+type Entry = dict[str, int | str]  # An event, or a marker ("g": "boot", "gap" or "reset").
+type Cursor = tuple[int, int]  # (ordinal, sequence)
+
+
+class LogFrame(TypedDict):
+    """A controller `log` frame as the store takes it."""
+
+    b: int  # The boot id.
+    e: Sequence[Sequence[int | str]]  # [sequence, at_ms, wall_sec, level, category, message] each.
+    miss: NotRequired[int]
+    reset: NotRequired[bool]
+
+
+class LogStats(TypedDict):
+    rows: int
+    bytes: int
+    oldestBoot: int | None
+    newestBoot: int | None
+    marks: int
+    missed: int
+
+
+def table_bytes(connection: sqlite3.Connection, tables: Sequence[str]) -> int:
     """The pages these tables and their indexes use, whatever else shares the file."""
-    names = list(tables) + [
-        row[0]
-        for row in connection.execute(
-            f"select name from sqlite_master where type = 'index' and tbl_name in ({','.join('?' * len(tables))})",
-            list(tables),
-        )
-    ]
-    return connection.execute(
-        f"select coalesce(sum(pgsize), 0) from dbstat where aggregate = 1 and name in "
-        f"({','.join('?' * len(names))})",
-        names,
-    ).fetchone()[0]
+    used: int = connection.execute(TABLE_BYTES, (json.dumps(list(tables)),)).fetchone()[0]
+    return used
 
 
-def _entry(row):
+def _entry(row: sqlite3.Row) -> Entry:
     return {
         "b": row["boot_id"],
         "s": row["sequence"],
@@ -160,16 +227,24 @@ def _entry(row):
 
 
 class LogStore:
-    def __init__(self, data):
+    # The reads take a device of None (no controller known yet) and find nothing.
+    def __init__(self, data: Path) -> None:
         self.path = data / "companion.db"
         self.backup_path = data / "companion.db.backup"
-        self.connection = None
+        self.connection: sqlite3.Connection | None = None
+
+    @property
+    def db(self) -> sqlite3.Connection:
+        """The open connection: ProgrammingError once closed, as a closed connection raises."""
+        if self.connection is None:
+            raise sqlite3.ProgrammingError("the log store is not open")
+        return self.connection
 
     # --- Lifecycle -----------------------------------------------------------
-    async def open(self):
+    async def open(self) -> None:
         await offload(self._open)
 
-    def _open(self):
+    def _open(self) -> None:
         connection = sqlite3.connect(self.path, isolation_level=None, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("pragma journal_mode=wal")
@@ -188,121 +263,118 @@ class LogStore:
             )
         self.connection = connection
 
-    async def close(self):
+    async def close(self) -> None:
         await offload(self._close)
 
-    def _close(self):
+    def _close(self) -> None:
         if self.connection is not None:
             self.connection.close()
             self.connection = None
 
     # --- What it remembers about the controller -------------------------------
-    async def meta(self, key):
-        """`device`: the id of the controller the history belongs to; `archive`: its last `cfg`'s archive
-        switch. Kept across restarts."""
+    async def meta(self, key: str) -> str | None:
+        """`device`: the id of the controller the history belongs to; `archive`: its last `cfg`'s
+        archive switch. Kept across restarts."""
         return await offload(self._meta, key)
 
-    def _meta(self, key):
-        row = self.connection.execute("select value from meta where key = ?", (key,)).fetchone()
-        return row["value"] if row else None
+    def _meta(self, key: str) -> str | None:
+        row = self.db.execute("select value from meta where key = ?", (key,)).fetchone()
+        value: str | None = row["value"] if row else None
+        return value
 
-    async def set_meta(self, key, value):
-        await offload(
-            self.connection.execute, "insert or replace into meta values (?, ?)", (key, value)
-        )
+    async def set_meta(self, key: str, value: str) -> None:
+        await offload(self.db.execute, "insert or replace into meta values (?, ?)", (key, value))
 
     # --- Sync ----------------------------------------------------------------
-    def _latest(self, device):
-        return self.connection.execute(
+    def _latest(self, device: str | None) -> sqlite3.Row | None:
+        latest: sqlite3.Row | None = self.db.execute(
             "select ordinal, boot_id from log_boots where device_id = ? "
             "order by ordinal desc limit 1",
             (device,),
         ).fetchone()
+        return latest
 
-    async def apply(self, device, frame):
-        """One controller `log` frame: its events, and the hole a `miss` or `reset` names before them."""
+    async def apply(self, device: str, frame: LogFrame) -> None:
+        """One controller `log` frame: its events, and the hole a `miss` or `reset` names before
+        them."""
         return await offload(self._apply, device, frame)
 
-    def _apply(self, device, frame):
+    def _apply(self, device: str, frame: LogFrame) -> None:
         boot, first, now = frame["b"], frame["e"][0][0], time.time()
         reset = frame.get("reset") is True
-        marks = [("reset", 0)] if reset else []
+        marks: list[tuple[str, int]] = [("reset", 0)] if reset else []
         if frame.get("miss"):
             marks.append(("gap", frame["miss"]))
-        with self.connection:
+        with self.db:
             latest = self._latest(device)
             ordinal = latest["ordinal"] if latest else 0
             # Another boot id, or the same one the controller could not resume
             # (`reset`: only a reused id does that), is a new boot.
             if latest is None or latest["boot_id"] != boot or reset:
                 ordinal += 1
-                self.connection.execute(
-                    "insert into log_boots values (?, ?, ?)", (device, ordinal, boot)
-                )
-            self.connection.executemany(
+                self.db.execute("insert into log_boots values (?, ?, ?)", (device, ordinal, boot))
+            self.db.executemany(
                 "insert or replace into log_marks values (?, ?, ?, ?, ?, ?)",
                 ((device, ordinal, first, kind, count, now) for kind, count in marks),
             )
-            self.connection.executemany(
+            self.db.executemany(
                 "insert or replace into log_events values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ((device, ordinal, entry[0], boot, *entry[1:]) for entry in frame["e"]),
             )
 
-    async def cursor(self, device):
+    async def cursor(self, device: str | None) -> Cursor | None:
         """The newest boot's id and its last stored sequence: the resume point for `logsub`."""
         return await offload(self._cursor, device)
 
-    def _cursor(self, device):
+    def _cursor(self, device: str | None) -> Cursor | None:
         latest = self._latest(device)
         if latest is None:
             return None
-        row = self.connection.execute(
+        row = self.db.execute(
             "select max(sequence) as sequence from log_events where device_id = ? and ordinal = ?",
             (device, latest["ordinal"]),
         ).fetchone()
         return (latest["boot_id"], row["sequence"]) if row["sequence"] is not None else None
 
     # --- Reading -------------------------------------------------------------
-    def _boots(self, device):
+    def _boots(self, device: str | None) -> dict[int, int]:
         return {
             row["ordinal"]: row["boot_id"]
-            for row in self.connection.execute(
+            for row in self.db.execute(
                 "select ordinal, boot_id from log_boots where device_id = ?", (device,)
             )
         }
 
-    def _marks(self, device, low, high):
+    def _marks(self, device: str | None, low: Cursor, high: Cursor) -> list[tuple[Cursor, Entry]]:
         """The markers anchored in [low, high), newest first, as ((ordinal, sequence), entry)."""
         return [
             (
                 (mark["ordinal"], mark["sequence"]),
                 {"g": "gap", "count": mark["count"]} if mark["kind"] == "gap" else {"g": "reset"},
             )
-            for mark in self.connection.execute(
+            for mark in self.db.execute(
                 "select * from log_marks where device_id = ? and (ordinal, sequence) >= (?, ?) "
                 "and (ordinal, sequence) < (?, ?) order by ordinal desc, sequence desc, kind",
                 (device, *low, *high),
             )
         ]
 
-    def _at(self, device, wall, newest):
+    def _at(self, device: str | None, wall: int, newest: bool) -> Cursor | None:
         """The newest event at or before `wall` (`newest`), or the oldest at or after it: its
         (ordinal, sequence), or None. Events without a synced clock keep their place by order."""
-        row = self.connection.execute(
-            "select ordinal, sequence from log_events where device_id = ? and wall_sec != 0 and wall_sec "
-            + (
-                "<= ? order by wall_sec desc, ordinal desc, sequence desc"
-                if newest
-                else ">= ? order by wall_sec, ordinal, sequence"
-            )
-            + " limit 1",
-            (device, wall),
-        ).fetchone()
+        row = self.db.execute(AT_OR_BEFORE if newest else AT_OR_AFTER, (device, wall)).fetchone()
         return (row["ordinal"], row["sequence"]) if row else None
 
     async def page(
-        self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None
-    ):
+        self,
+        device: str | None,
+        before_ordinal: int,
+        before_sequence: int,
+        limit: int,
+        levels: Collection[str] | None = None,
+        category: str | None = None,
+        at: int | None = None,
+    ) -> tuple[list[Entry], Cursor | None, bool]:
         """One page of the history, newest first, with its markers.
 
         Returns (entries, next, has_more): `next` is the opaque (ordinal,
@@ -319,27 +391,28 @@ class LogStore:
         )
 
     def _page(
-        self, device, before_ordinal, before_sequence, limit, levels=None, category=None, at=None
-    ):
+        self,
+        device: str | None,
+        before_ordinal: int,
+        before_sequence: int,
+        limit: int,
+        levels: Collection[str] | None = None,
+        category: str | None = None,
+        at: int | None = None,
+    ) -> tuple[list[Entry], Cursor | None, bool]:
         first = before_sequence >= FIRST_PAGE
         if at is not None and first:
             start = self._at(device, at, True)
             if start is None:
                 return [], None, False
             before_ordinal, before_sequence = start[0], start[1] + 1
-        where, args = (
-            "device_id = ? and (ordinal, sequence) < (?, ?)",
-            [device, before_ordinal, before_sequence],
-        )
+        args: list[int | str | None] = [device, before_ordinal, before_sequence]
         if levels is not None:
-            where += f" and level in ({','.join('?' * len(levels))})"
-            args += list(levels)
+            args.append(json.dumps(list(levels)))
         if category is not None:
-            where += " and category = ?"
             args.append(category)
-        rows = self.connection.execute(
-            f"select * from log_events where {where} order by ordinal desc, sequence desc limit ?",
-            args + [limit + 1],
+        rows = self.db.execute(
+            PAGES[levels is not None, category is not None], [*args, limit + 1]
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -350,10 +423,12 @@ class LogStore:
             self._marks(device, last if has_more else (-1, -1), (before_ordinal, before_sequence)),
             self._boots(device),
         )
-        # Restarts newer than the first row are named too: a filter can leave a newer boot without rows.
-        entries, newer = [], max(boots, default=None) if first and at is None else before_ordinal
+        # Restarts newer than the first row are named too: a filter can leave a newer boot
+        # without rows.
+        entries: list[Entry] = []
+        newer = max(boots, default=None) if first and at is None else before_ordinal
 
-        def flush(key):  # The markers newer than `key`.
+        def flush(key: Cursor) -> None:  # The markers newer than `key`.
             while marks and marks[0][0] > key:
                 entries.append(marks.pop(0)[1])
 
@@ -371,11 +446,13 @@ class LogStore:
             flush((-1, -1))
         return entries, (last if has_more else None), has_more
 
-    async def bounds(self, device, since, until):
+    async def bounds(
+        self, device: str | None, since: int | None, until: int | None
+    ) -> tuple[Cursor, Cursor] | None:
         """The export range for wall times `since`/`until` (either None: open) as (after, through)
         cursors, or None when no event falls in it."""
 
-        def read():
+        def read() -> tuple[Cursor, Cursor] | None:
             low = (0, 0) if since is None else self._at(device, since, False)
             high = (FIRST_PAGE, FIRST_PAGE) if until is None else self._at(device, until, True)
             if low is None or high is None or low > high:
@@ -385,8 +462,13 @@ class LogStore:
         return await offload(read)
 
     async def chunk(
-        self, device, after_ordinal, after_sequence, limit=1000, through=(FIRST_PAGE, FIRST_PAGE)
-    ):
+        self,
+        device: str | None,
+        after_ordinal: int,
+        after_sequence: int,
+        limit: int = 1000,
+        through: Cursor = (FIRST_PAGE, FIRST_PAGE),
+    ) -> tuple[list[Entry], Cursor | None]:
         """The next oldest-first chunk of a streaming export, markers in place, up to `through`.
 
         Returns (entries, cursor): the cursor continues the next chunk, None at the end.
@@ -394,23 +476,29 @@ class LogStore:
         return await offload(self._chunk, device, after_ordinal, after_sequence, limit, through)
 
     def _chunk(
-        self, device, after_ordinal, after_sequence, limit, through=(FIRST_PAGE, FIRST_PAGE)
-    ):
-        rows = self.connection.execute(
+        self,
+        device: str | None,
+        after_ordinal: int,
+        after_sequence: int,
+        limit: int,
+        through: Cursor = (FIRST_PAGE, FIRST_PAGE),
+    ) -> tuple[list[Entry], Cursor | None]:
+        rows = self.db.execute(
             "select * from log_events where device_id = ? and (ordinal, sequence) > (?, ?) "
             "and (ordinal, sequence) <= (?, ?) order by ordinal asc, sequence asc limit ?",
             (device, after_ordinal, after_sequence, *through, limit),
         ).fetchall()
         if not rows:
             return [], None
-        marks = {}
+        marks: dict[Cursor, list[Entry]] = {}
         for key, entry in self._marks(
             device,
             (rows[0]["ordinal"], rows[0]["sequence"]),
             (rows[-1]["ordinal"], rows[-1]["sequence"] + 1),
         ):
             marks.setdefault(key, []).append(entry)
-        entries, older = [], after_ordinal if after_sequence else None
+        entries: list[Entry] = []
+        older = after_ordinal if after_sequence else None
         for row in rows:
             if older is not None and row["ordinal"] != older:
                 entries.append({"g": "boot", "boot": row["boot_id"]})
@@ -420,39 +508,38 @@ class LogStore:
         return entries, (rows[-1]["ordinal"], rows[-1]["sequence"])
 
     # --- Access --------------------------------------------------------------
-    async def grants(self):
+    async def grants(self) -> dict[str, float]:
         """The Web UI sessions (their sha256) the controller accepted, with when it last said so."""
         return await offload(
             lambda: {
                 row["session"]: row["checked"]
-                for row in self.connection.execute("select * from log_access")
+                for row in self.db.execute("select * from log_access")
             }
         )
 
-    async def grant(self, session, allowed):
+    async def grant(self, session: str, allowed: bool) -> None:
         if allowed:
             await offload(
-                self.connection.execute,
+                self.db.execute,
                 "insert or replace into log_access values (?, ?)",
                 (session, time.time()),
             )
         else:
-            await offload(
-                self.connection.execute, "delete from log_access where session = ?", (session,)
-            )
+            await offload(self.db.execute, "delete from log_access where session = ?", (session,))
 
     # --- Retention and erase -------------------------------------------------
-    async def prune(self, days, megabytes, device):
-        """By age first, then to the size budget: other ids first, then `device`'s oldest; returns rows deleted."""
+    async def prune(self, days: float, megabytes: float, device: str | None) -> int:
+        """By age first, then to the size budget: other ids first, then `device`'s oldest; returns
+        rows deleted."""
         return await offload(self._prune, days, megabytes, device)
 
-    def _used_bytes(self):
-        return table_bytes(self.connection, LOG_TABLES)
+    def _used_bytes(self) -> int:
+        return table_bytes(self.db, LOG_TABLES)
 
-    def _prune(self, days, megabytes, device):
+    def _prune(self, days: float, megabytes: float, device: str | None) -> int:
         deleted = 0
-        with self.connection:
-            deleted += self.connection.execute(
+        with self.db:
+            deleted += self.db.execute(
                 "delete from log_events where wall_sec != 0 and wall_sec < ?",
                 (time.time() - days * 86400,),
             ).rowcount
@@ -460,9 +547,10 @@ class LogStore:
             for _ in range(PRUNE_ROUNDS):
                 if used <= budget:
                     break
-                # The excess's share of the rows, oldest first (other controllers' first), and a little more.
-                rows = self.connection.execute("select count(*) from log_events").fetchone()[0]
-                gone = self.connection.execute(
+                # The excess's share of the rows, oldest first (other controllers' first), and a
+                # little more.
+                rows: int = self.db.execute("select count(*) from log_events").fetchone()[0]
+                gone = self.db.execute(
                     "delete from log_events where (device_id, ordinal, sequence) in "
                     "(select device_id, ordinal, sequence from log_events "
                     "order by device_id = ?, ordinal, sequence limit ?)",
@@ -474,39 +562,38 @@ class LogStore:
                     break
             # A mark goes with the event it is anchored to, and an emptied boot
             # with its events, except each controller's newest (the cursor's).
-            self.connection.execute(
+            self.db.execute(
                 "delete from log_marks where not exists (select 1 from log_events e "
                 "where e.device_id = log_marks.device_id and e.ordinal = log_marks.ordinal "
                 "and e.sequence = log_marks.sequence)"
             )
-            self.connection.execute(
+            self.db.execute(
                 "delete from log_boots where not exists (select 1 from log_events e "
                 "where e.device_id = log_boots.device_id and e.ordinal = log_boots.ordinal) "
-                "and ordinal < (select max(b.ordinal) from log_boots b where b.device_id = log_boots.device_id)"
+                "and ordinal < (select max(b.ordinal) from log_boots b "
+                "where b.device_id = log_boots.device_id)"
             )
-            self.connection.execute(
+            self.db.execute(
                 "delete from log_access where checked < ?", (time.time() - GRANT_DAYS * 86400,)
             )
-        self.connection.execute("pragma wal_checkpoint(truncate)")
+        self.db.execute("pragma wal_checkpoint(truncate)")
         return deleted
 
-    async def erase(self, history_only=False):
-        """Everything the controller sent and who could read it, the archive included (Forget), or the log
-        history alone (Delete history)."""
+    async def erase(self, history_only: bool = False) -> None:
+        """Everything the controller sent and who could read it, the archive included (Forget), or
+        the log history alone (Delete history)."""
         await offload(self._erase, history_only)
 
-    def _erase(self, history_only):
-        with self.connection:
-            for table in ("log_events", "log_marks") + (
-                () if history_only else ("log_boots", "log_access", "meta") + ARCHIVE_TABLES
-            ):
-                self.connection.execute(f"delete from {table}")
+    def _erase(self, history_only: bool) -> None:
+        with self.db:
+            for statement in ERASE_HISTORY if history_only else ERASE_ALL:
+                self.db.execute(statement)
         # Deleted rows linger in free pages until reused: an erase rewrites the file.
-        self.connection.execute("vacuum")
-        self.connection.execute("pragma wal_checkpoint(truncate)")
+        self.db.execute("vacuum")
+        self.db.execute("pragma wal_checkpoint(truncate)")
         self.backup_path.unlink(missing_ok=True)
 
-    async def backup(self):
+    async def backup(self) -> None:
         """A consistent copy beside the store, which a copy of the data folder can always take.
 
         Its own connections on a worker thread (WAL lets them read alongside),
@@ -514,7 +601,7 @@ class LogStore:
         """
         await asyncio.to_thread(self._backup)
 
-    def _backup(self):
+    def _backup(self) -> None:
         partial = self.backup_path.with_name(self.backup_path.name + ".partial")
         source, copy = sqlite3.connect(self.path), sqlite3.connect(partial)
         try:
@@ -524,17 +611,17 @@ class LogStore:
             source.close()
         partial.replace(self.backup_path)
 
-    async def stats(self, device):
+    async def stats(self, device: str | None) -> LogStats:
         return await offload(self._stats, device)
 
-    def _stats(self, device):
-        events = self.connection.execute(
+    def _stats(self, device: str | None) -> LogStats:
+        events = self.db.execute(
             "select count(*) as rows, min(ordinal) as oldest, max(ordinal) as newest "
             "from log_events where device_id = ?",
             (device,),
         ).fetchone()
         boots = self._boots(device)
-        gaps = self.connection.execute(
+        gaps = self.db.execute(
             "select count(*) as marks, coalesce(sum(count), 0) as missed "
             "from log_marks where kind = 'gap' and device_id = ?",
             (device,),

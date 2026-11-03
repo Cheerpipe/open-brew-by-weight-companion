@@ -22,12 +22,18 @@ and is held to the shared golden vectors (`stats-header-v1.vectors.json`):
 import math
 import struct
 import zlib
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Iterable, Sequence
 
 FILTER_MAX = 8  # SHOT_LIST_FILTER_MAX: facets list at most eight presets and eight scales.
 MISSING = None
-VERDICTS = {"on_recipe": 0, "fast": 1, "slow": 2}
+# Looked up with a row's verdict, which may be missing (None).
+VERDICTS: dict[str | None, int] = {"on_recipe": 0, "fast": 1, "slow": 2}
 BBW_STOPS = frozenset({"normal_target", "extended_max_weight", "slow_min_weight"})
-# Every row field the header reads (Record below), so callers can leave the rest, the curve above all.
+# Every row field the header reads (Record below), so callers can leave the rest, the curve above
+# all.
 FIELDS = (
     "durationS",
     "goalG",
@@ -48,24 +54,88 @@ FIELDS = (
 )
 
 
-def f32(value):
-    return struct.unpack("f", struct.pack("f", value))[0]
+class Row(TypedDict, total=False):
+    """A Stats row: the fields above, each possibly missing or null."""
+
+    durationS: float | None
+    goalG: float | None
+    fastBeforeS: float | None
+    slowAfterS: float | None
+    arrivalS: float | None
+    actualG: float | None
+    cutLineG: float | None
+    avgFlowGS: float | None
+    verdict: str | None
+    shotType: str | None
+    stopDetail: str | None
+    presetId: int | None
+    presetName: str | None
+    scaleName: str | None
+    hasWallTime: int | None  # true, or 1 as the archive reads it back (json_extract)
+    endedAtLocalSec: int | None
 
 
-def round_away(value):
+class Aggregate(TypedDict):
+    shotCount: int
+    avgDurationS: float | None
+    avgYieldG: float | None
+    avgErrorPct: float | None
+    avgFlowGps: float | None
+    shotsPerDay: float | None
+
+
+class Density(TypedDict):
+    lo: int
+    hi: int
+    a: float
+    b: float
+    shared: bool
+    n: list[int]
+    h: list[int]
+
+
+class Consistency(TypedDict):
+    t: list[int | None]
+    p: int | list[int]
+
+
+class Facets(TypedDict):
+    presets: list[list[int | str]]
+    scales: list[list[int | str]]
+
+
+class Header(Aggregate):
+    dens: list[Density | bool | None]
+    cons: Consistency
+    facets: Facets
+
+
+def f32(value: float) -> float:
+    rounded: float = struct.unpack("f", struct.pack("f", value))[0]
+    return rounded
+
+
+def round_away(value: float) -> int:
     """C's roundf/lroundf: half away from zero."""
     return math.floor(value + 0.5) if value >= 0 else -math.floor(-value + 0.5)
 
 
-def tenths(seconds):
-    return None if seconds is None else int(round(seconds * 10))
+def tenths(seconds: float | None) -> int | None:
+    return None if seconds is None else round(seconds * 10)
 
 
-def hundredths(grams):
-    return None if grams is None else int(round(grams * 100))
+def hundredths(grams: float | None) -> int | None:
+    return None if grams is None else round(grams * 100)
 
 
-def scale_key(name):
+def known(value: int | None) -> int:
+    """A value the record's checks guarantee: an eligible record's yield, a timed one's arrival."""
+    if value is None:
+        raise ValueError("a value the record's checks guarantee is missing")
+    return value
+
+
+def scale_key(name: str | None) -> int:
     """shotLogScaleKey: the firmware's CRC-32 update from 0xFFFFFFFF, without the final xor."""
     return zlib.crc32(str(name or "").encode()) ^ 0xFFFFFFFF
 
@@ -74,34 +144,36 @@ class Record:
     """A Stats row back as the stored record's integers (missing values as None)."""
 
     __slots__ = (
-        "duration",
-        "goal",
-        "fast",
-        "slow",
-        "arrival",
         "actual",
-        "cut",
-        "flow",
-        "result",
+        "arrival",
         "auto",
         "bbw_stop",
+        "cut",
+        "duration",
+        "fast",
+        "flow",
+        "goal",
+        "local",
         "preset",
         "preset_name",
+        "result",
         "scale",
+        "slow",
         "wall",
-        "local",
     )
 
-    def __init__(self, row):
+    def __init__(self, row: Row) -> None:
         self.duration = tenths(row.get("durationS")) or 0
-        self.goal = int(round((row.get("goalG") or 0) * 10))
+        self.goal = round((row.get("goalG") or 0) * 10)
         self.fast, self.slow = (
             tenths(row.get("fastBeforeS")) or 0,
             tenths(row.get("slowAfterS")) or 0,
         )
         self.arrival = tenths(row.get("arrivalS"))
         self.actual, self.cut, self.flow = (
-            hundredths(row.get(key)) for key in ("actualG", "cutLineG", "avgFlowGS")
+            hundredths(row.get("actualG")),
+            hundredths(row.get("cutLineG")),
+            hundredths(row.get("avgFlowGS")),
         )
         timed = self.arrival is not None and self.arrival != 0
         self.result = VERDICTS.get(row.get("verdict"), 3) if timed else 3
@@ -110,7 +182,7 @@ class Record:
         self.scale = row.get("scaleName") or ""
         self.wall, self.local = bool(row.get("hasWallTime")), row.get("endedAtLocalSec") or 0
 
-    def bad_reason(self):
+    def bad_reason(self) -> str | None:
         """shotLogBadReason: over 12 s with a settled yield over 2 g."""
         return (
             "short"
@@ -122,15 +194,17 @@ class Record:
             else None
         )
 
-    def eligible(self):
+    def eligible(self) -> bool:
         return self.bad_reason() is None
 
-    def bbw_tenths(self):
+    def bbw_tenths(self) -> int:
         planned = self.cut if self.cut is not None and self.cut > 0 else self.goal * 10
-        return abs(self.actual - planned) * 1000 // (planned if planned > 0 else 1)
+        return abs(known(self.actual) - planned) * 1000 // (planned if planned > 0 else 1)
 
 
-def matches(record, results, presets, scales):
+def matches(
+    record: Record, results: Collection[int], presets: Collection[int], scales: Collection[int]
+) -> bool:
     """shotListFilterMatches for good shots: AND across groups, OR within."""
     if results and (record.result > 2 or record.result not in results):
         return False
@@ -139,7 +213,7 @@ def matches(record, results, presets, scales):
     )
 
 
-def aggregate(records, window):
+def aggregate(records: Iterable[Record], window: int) -> Aggregate:
     """shotLogStatsView and buildIntegrationStats without the window, total and durations."""
     count = flows = bbw = timed = duration = actual = errors = flow = 0
     newest = oldest = -1
@@ -155,7 +229,7 @@ def aggregate(records, window):
             continue
         count += 1
         duration += record.duration
-        actual += record.actual
+        actual += known(record.actual)
         if record.flow is not None:
             flows += 1
             flow += record.flow * 100
@@ -166,7 +240,7 @@ def aggregate(records, window):
             oldest = day if oldest < 0 or oldest > day else oldest
     span = newest - oldest if newest >= 0 and oldest >= 0 else 0
 
-    def printed(value, places):
+    def printed(value: float, places: int) -> float:
         return float(f"{value:.{places}f}")
 
     return {
@@ -179,7 +253,7 @@ def aggregate(records, window):
     }
 
 
-def density(shots):
+def density(shots: Sequence[Record]) -> Density:
     """appendStatsDensity, operation for operation in float32."""
     shared, width, counts = True, 0.0, [0, 0, 0, 0]
     for shot in shots:
@@ -188,9 +262,9 @@ def density(shots):
         counts[shot.result] += 1
     a = f32(shots[0].fast / 10) if shared else 0.0
     b = f32(shots[0].slow / 10) if shared else f32(round_away(f32(width / f32(len(shots)))))
-    low, high, mapped = f32(a - 5), f32(b + 5), []
+    low, high, mapped = f32(a - 5), f32(b + 5), list[float]()
     for shot in shots:
-        t, f, s = f32(shot.arrival / 10), f32(shot.fast / 10), f32(shot.slow / 10)
+        t, f, s = f32(known(shot.arrival) / 10), f32(shot.fast / 10), f32(shot.slow / 10)
         if t < f:
             x = f32(f32(a + t) - f)
         elif t > s:
@@ -225,8 +299,9 @@ def density(shots):
     }
 
 
-def header(rows, window, active):
-    """formatStatsHeader over `rows` (Stats rows, newest first) for `window` and the active preset."""
+def header(rows: Iterable[Row], window: int, active: int) -> Header:
+    """formatStatsHeader over `rows` (Stats rows, newest first) for `window` and the active
+    preset."""
     records = [Record(row) for row in rows]
     built = aggregate(records, window)
     timed, own, found = [], 0, 0
@@ -241,19 +316,20 @@ def header(rows, window, active):
         timed.append(record)
         own += record.preset == active
     one_preset = all(record.preset == timed[0].preset for record in timed)
-    built["dens"] = [
+    dens: list[Density | bool | None] = [
         density(timed) if timed else None,
         density([r for r in timed if r.preset == active])
         if 0 < own < len(timed)
         else bool(own) or None,
     ]
-    built["cons"] = {
+    cons: Consistency = {
         "t": [record.arrival for record in reversed(timed)],
         "p": (timed[0].preset if timed else 0)
         if one_preset
         else [record.preset for record in reversed(timed)],
     }
-    presets, scales = [], []
+    presets: list[list[int | str]] = []
+    scales: list[list[int | str]] = []
     for record in records:
         if (
             len(presets) < FILTER_MAX
@@ -270,11 +346,15 @@ def header(rows, window, active):
             and key not in [k for k, _ in scales]
         ):
             scales.append([key, record.scale])
-    built["facets"] = {"presets": presets, "scales": scales}
-    return built
+    return {**built, "dens": dens, "cons": cons, "facets": {"presets": presets, "scales": scales}}
 
 
-def good(rows, results, presets, scales):
+def good(
+    rows: Iterable[Row],
+    results: Collection[int],
+    presets: Collection[int],
+    scales: Collection[int],
+) -> int:
     """How many good shots the filters keep: the N the window choices follow (S18)."""
     return sum(
         1

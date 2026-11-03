@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """The Stats header port against the firmware's golden vectors, field for field.
 
 `tests/fixtures/stats-header-v1.vectors.json` is the firmware's own file
@@ -11,30 +10,48 @@ field the header reads. Offline, inside the image (see the README).
 import asyncio
 import hashlib
 import json
-import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict, cast
 
-if not __debug__:
-    raise SystemExit("assertions are disabled (PYTHONOPTIMIZE); these checks would not run")
+from companion import stats
+from companion.archive import ArchiveStore
+from companion.logstore import LogStore
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from companion import stats  # noqa: E402
-from companion.archive import ArchiveStore  # noqa: E402
-from companion.logstore import LogStore  # noqa: E402
-
 VECTORS = ROOT / "tests/fixtures/stats-header-v1.vectors.json"
 SHA256 = "ad46e4e9d0acc434d37a72b3f60e2dc2f4b7a1b713f37c0410f316d8188de547"
 
 
-async def archived(cases):
-    """Each case's rows stored as the archive copies them, read back as its Stats header reads them."""
+class VectorRow(stats.Row, TypedDict):
+    id: int
+    badReason: str | None
+
+
+class Case(TypedDict):
+    name: str
+    window: int
+    presetId: int
+    rows: list[VectorRow]
+    header: stats.Header
+
+
+class Vectors(TypedDict):
+    version: int
+    cases: list[Case]
+
+
+async def archived(cases: Sequence[Case]) -> list[list[stats.Row]]:
+    """Each case's rows stored as the archive copies them, read back as its Stats header reads
+    them."""
     with tempfile.TemporaryDirectory(prefix="openbrewbyweight-stats-") as temporary:
         logs = LogStore(Path(temporary))
         await logs.open()
-        store, merged = ArchiveStore(logs), []
+        store = ArchiveStore(logs)
+        merged: list[list[stats.Row]] = []
         for n, case in enumerate(cases):
             await store.put(
                 f"case{n}",
@@ -47,36 +64,44 @@ async def archived(cases):
         return merged
 
 
-def main():
+def load() -> Vectors:
+    return cast("Vectors", json.loads(VECTORS.read_text()))
+
+
+def test_vectors_are_the_firmwares() -> None:
     assert hashlib.sha256(VECTORS.read_bytes()).hexdigest() == SHA256, (
         "the vectors differ from the firmware's: copy its file again"
     )
-    vectors = json.loads(VECTORS.read_text())
-    assert vectors["version"] == 1 and len(vectors["cases"]) >= 7
-    for case in vectors["cases"]:
+    vectors = load()
+    assert vectors["version"] == 1
+    assert len(vectors["cases"]) >= 7
+
+
+def test_golden_cases() -> None:
+    for case in load()["cases"]:
         for row in case["rows"]:
             assert stats.Record(row).bad_reason() == row["badReason"], (case["name"], row["id"])
         built = stats.header(case["rows"], case["window"], case["presetId"])
         assert built == case["header"], (
             case["name"],
-            [key for key in case["header"] if built.get(key) != case["header"][key]],
+            [key for key, value in case["header"].items() if built.get(key) != value],
         )
         assert json.loads(json.dumps(built)) == case["header"]
-    rows = vectors["cases"][0]["rows"]
+
+
+def test_window_count() -> None:
+    rows = load()["cases"][0]["rows"]
     good = [row for row in rows if row["badReason"] is None]
     assert stats.good(rows, [], [], []) == len(good)
     fast = [row for row in good if row["verdict"] == "fast" and row["arrivalS"]]
     assert stats.good(rows, [1], [], []) == len(fast), "the result filter needs a time to target"
     pearl = stats.scale_key("Pearl S")
     assert stats.good(rows, [], [], [pearl]) == sum(row["scaleName"] == "Pearl S" for row in good)
-    for case, rows in zip(vectors["cases"], asyncio.run(archived(vectors["cases"]))):
-        assert stats.header(rows, case["window"], case["presetId"]) == case["header"], (
+
+
+def test_archive_parity() -> None:
+    cases = load()["cases"]
+    for case, copied in zip(cases, asyncio.run(archived(cases)), strict=True):
+        assert stats.header(copied, case["window"], case["presetId"]) == case["header"], (
             f"{case['name']}: the archive's copy gives another header than the controller's"
         )
-    print(
-        f"Companion Stats header: {len(vectors['cases'])} golden cases, the archive's parity and the "
-        "window count OK"
-    )
-
-
-main()
