@@ -405,31 +405,36 @@ More: [device setup](docs/device-setup.md),
 
 ## Development
 
-The image is `nginx:1.28-alpine` plus Python, `zeroconf`, `aiohttp`,
-`cryptography` and OpenSSL, all from Alpine's packages; nothing is installed
-with `pip`. `gateway/gateway.py` is the supervisor (discovery, certificates,
+The image is Alpine 3.24, pinned by digest, with nginx and Python from
+Alpine's packages; `aiohttp`, `zeroconf`, `cryptography`, `segno` and their
+dependencies come from PyPI at the versions and hashes `uv.lock` records
+(`requirements/runtime.txt`). Where PyPI has no build for the server (32-bit
+ARM), the image compiles them from their verified sources the first time. `gateway/gateway.py` is the supervisor (discovery, certificates,
 nginx) and starts the companion service in `companion/` (pairing, the Web UI
 relay for every screen, the controller link and the La Marzocco client); see
 [how it works](docs/how-it-works.md). The link and relay protocols are defined in
 the firmware's `docs/COMPANION_LINK.md`; `tests/fixtures` holds a copy of its
 shared test vectors.
 
-Every test runs offline inside the image, against a real nginx, a fake
-controller (`tests/fake_controller.py` for the relay and the screens) and a
-fake La Marzocco cloud:
+`./scripts/dev` classifies a change by risk and runs its gate: linters,
+formatters, a strict type check, a security scan and the tests, with nothing
+silenced. Prepare the pinned tools and the images once (this needs
+[uv](https://docs.astral.sh/uv/), Node.js and Docker), then validate:
 
 ```bash
-docker build -t openbrewbyweight-companion:local . && for t in gateway cache protocol lamarzocco link relay screens scan logstore archive stats link_vectors; do docker run --rm --network none -v "$PWD:/src:ro" --entrypoint python3 openbrewbyweight-companion:local /src/tests/test_$t.py || break; done
+uv sync --frozen && npm ci && ./scripts/dev image
 ```
-
-`./setup`'s test runs the script against a fake Docker (about 20 seconds,
-since it waits out the real mDNS step) and needs bash, so it runs on the
-server or your computer, as does the gateway test (Python 3.10+ and
-OpenSSL 3):
 
 ```bash
-python3 tests/test_setup.py && python3 tests/test_gateway.py
+./scripts/dev validate
 ```
+
+Every test runs with pytest, offline, inside the test image: against a real
+nginx, a fake controller (`tests/fake_controller.py` for the relay and the
+screens), a fake La Marzocco cloud and, for `./setup`, a fake Docker.
+`./scripts/dev test unit` runs them all with coverage, and takes pytest
+arguments to run some. See the [validation policy](VALIDATION.md), the
+[script reference](docs/SCRIPTS.md) and [static analysis](docs/STATIC_ANALYSIS.md).
 
 To try the companion on Docker Desktop (Mac or Windows), where it cannot
 have its own LAN address, publish its ports and point it at the controller:

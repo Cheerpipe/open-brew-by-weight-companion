@@ -1,0 +1,1174 @@
+#!/usr/bin/env python3
+"""Canonical, non-bootstrapping developer command facade for the companion.
+
+It classifies changed paths into risk levels and runs the matching gate. It
+never installs anything: the Python tools come from `uv sync --frozen`, the web
+linters from `npm ci` and the images from `./scripts/dev image`, each run
+explicitly. Every run writes its full log and a JSON summary under
+artifacts/runs/<run-id>/.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tokenize
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+ROOT = Path(__file__).resolve().parent.parent
+COLOR_ENABLED = (
+    os.getenv("NO_COLOR") is None and os.getenv("TERM") != "dumb" and sys.stdout.isatty()
+)
+
+RANK = {f"R{i}": i for i in range(4)}
+# Focused paths per area, for `context` and kept honest by the docs check.
+AREAS: dict[str, tuple[str, list[str]]] = {
+    "gateway": (
+        "supervisor, discovery, certificates, nginx and the setup page",
+        [
+            "gateway/gateway.py",
+            "gateway/nginx.conf.in",
+            "tests/test_gateway.py",
+            "tests/test_scan.py",
+        ],
+    ),
+    "link": (
+        "pairing, the controller link and its shared vectors",
+        ["companion/pairing.py", "companion/crypto.py", "companion/link.py", "tests/test_link.py"],
+    ),
+    "relay": (
+        "the Web UI relay and every screen",
+        ["companion/relay.py", "companion/mux.py", "companion/screens.py", "tests/test_screens.py"],
+    ),
+    "storage": (
+        "the log history, the shot archive and their migrations",
+        ["companion/logstore.py", "companion/archive.py", "tests/test_logstore.py"],
+    ),
+    "lamarzocco": (
+        "the La Marzocco cloud client",
+        ["companion/lamarzocco.py", "companion/dashboard.py", "tests/test_lamarzocco.py"],
+    ),
+    "runtime": (
+        "the image, compose files and ./setup",
+        ["Dockerfile", "compose.yaml", "setup", "tests/test_setup.py"],
+    ),
+    "tooling": (
+        "the validation gates and their configuration",
+        ["scripts/dev", "pyproject.toml", "package.json", "VALIDATION.md", "docs/SCRIPTS.md"],
+    ),
+}
+SECRET = re.compile(r"(?i)(password|token)(\s*[=:]\s*|\s+)\S+")
+
+# Risk surface (VALIDATION.md). R3: trust (TLS, pairing, keys) and the controller link;
+# R2: what the companion stores, relays or runs as; R1: pages, pure logic, tests and
+# tooling; R0: prose. Paths are exact unless they end in "/"; anything else is R3.
+RISK_PATHS = {
+    "R3": (
+        "gateway/gateway.py",
+        "gateway/nginx.conf.in",
+        "companion/__init__.py",
+        "companion/crypto.py",
+        "companion/link.py",
+        "companion/pairing.py",
+        "tests/fixtures/",
+    ),
+    "R2": (
+        "companion/archive.py",
+        "companion/index_mirror.py",
+        "companion/lamarzocco.py",
+        "companion/logstore.py",
+        "companion/mux.py",
+        "companion/relay.py",
+        "companion/screens.py",
+        "companion/service.py",
+        "companion/store.py",
+        "companion/upstream.py",
+        "Dockerfile",
+        "compose.yaml",
+        "compose.host.yaml",
+        "compose.existing-network.yaml",
+        ".env.example",
+        "setup",
+        "gateway/entrypoint.sh",
+        "requirements/",
+        "pyproject.toml",
+        "uv.lock",
+    ),
+    "R1": (
+        "companion/dashboard.py",
+        "companion/pages.py",
+        "companion/stats.py",
+        "companion/page.html",
+        "companion/ui-off.html",
+        "gateway/setup.html",
+        "gateway/strings.json",
+        "tests/",
+        "scripts/",
+        "package.json",
+        "package-lock.json",
+        ".yamllint.yaml",
+    ),
+    "R0": (".gitignore", "LICENSE"),
+}
+
+
+IMAGE = "openbrewbyweight-companion"
+TEST_IMAGE = f"{IMAGE}:test"
+# Not :local, which is the tag ./setup runs: a gate never replaces it.
+RUNTIME_IMAGE = f"{IMAGE}:validate"
+DOCKERFILE_LABEL = "org.openbrewbyweight.companion.dockerfile"
+COVERAGE_FAIL_UNDER = 85  # The whole suite's branch coverage; raise it as tests grow.
+PAGES = ("companion/page.html", "companion/ui-off.html", "gateway/setup.html")
+PRETTIER_PATHS = (*PAGES, "gateway/strings.json", "package.json", "scripts/lint")
+SHELL_SCRIPTS = ("setup", "gateway/entrypoint.sh")
+# The Dockerfile installs these exports of uv.lock: the runtime, and pytest and coverage.
+REQUIREMENTS = {
+    "requirements/runtime.txt": ("--no-dev",),
+    "requirements/test.txt": ("--only-group", "test"),
+}
+YAML_FILES = (
+    "compose.yaml",
+    "compose.host.yaml",
+    "compose.existing-network.yaml",
+    ".yamllint.yaml",
+)
+COMPOSE_STACKS = (
+    ("compose.yaml",),
+    ("compose.yaml", "compose.host.yaml"),
+    ("compose.yaml", "compose.existing-network.yaml"),
+)
+# The firmware's own files that tests/fixtures copies, path in the firmware repository.
+FIRMWARE_FIXTURES = {
+    "tests/fixtures/companion-link-v1.vectors.json": "docs/schemas/companion-link-v1.vectors.json",
+    "tests/fixtures/companion-records-v1.vectors.json": (
+        "docs/schemas/companion-records-v1.vectors.json"
+    ),
+    "tests/fixtures/stats-header-v1.vectors.json": "docs/schemas/stats-header-v1.vectors.json",
+    "tests/fixtures/companion_replay_v1.json": "src/tests/fixtures/companion_replay_v1.json",
+}
+FIRMWARE_REPOSITORY = "Open-Brew-by-Weight"
+R3_MANUAL = (
+    "Pair with a real controller and check the Web UI, the link and La Marzocco on the "
+    "firmware this change targets"
+)
+
+Step = tuple[str, list[str]]
+
+
+def paint(text: str, code: str) -> str:
+    """Wrap text in an ANSI escape if colors are on, else return it bare."""
+    return f"\x1b[{code}m{text}\x1b[0m" if COLOR_ENABLED else text
+
+
+def painted(text: str) -> str:
+    """Tint a line by meaning: error red, warning yellow, success green, header cyan."""
+    head = text[:30].lower()
+    if head.startswith(("error", "failed", "missing_dependency", "dev:")) or ": missing" in head:
+        return paint(text, "31")
+    if "warning" in head:
+        return paint(text, "33")
+    if head.startswith("passed"):
+        return paint(text, "32")
+    if head.startswith(("==>", "risk=")):
+        return paint(text, "36")
+    return text
+
+
+def redact(value: str) -> str:
+    return SECRET.sub(lambda m: f"{m.group(1)}=[REDACTED]", value)
+
+
+def git(*args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=ROOT, text=True, capture_output=True, check=False)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def changed_paths() -> list[str]:
+    tracked = git("diff", "--name-only", "HEAD").splitlines()
+    untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+    return sorted(set(tracked + untracked))
+
+
+def normalize(path: str) -> str:
+    return re.sub(r"^(\./)+", "", path.replace("\\", "/")).rstrip("/")
+
+
+def path_risk(path: str) -> str:
+    p = normalize(path)
+    for risk, paths in RISK_PATHS.items():
+        if any(p == entry or (entry.endswith("/") and p.startswith(entry)) for entry in paths):
+            return risk
+    return "R0" if p.endswith(".md") else "R3"
+
+
+def uncovered_changes(paths: list[str]) -> list[str]:
+    """Changed paths outside an explicit path list: other sessions' edits the gate misses."""
+    wanted = sorted({normalize(p) for p in paths})
+    if not wanted or any(p in {"", "."} for p in wanted):
+        return []
+    return [p for p in changed_paths() if not any(p == a or p.startswith(a + "/") for a in wanted)]
+
+
+def classify(paths: list[str]) -> tuple[str, list[tuple[str, str]]]:
+    details = [(p, path_risk(p)) for p in (paths or changed_paths())]
+    risk = max((r for _, r in details), key=lambda r: RANK[r], default="R0")
+    return risk, details
+
+
+# --- Contract checks (./scripts/dev check NAME) ---------------------------------------
+
+
+def markdown_prose(source: Path) -> str:
+    """Keep line numbers while excluding fenced examples from link checks."""
+    lines: list[str] = []
+    fence = ""
+    for line in source.read_text(errors="replace").splitlines(keepends=True):
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if marker and not fence:
+            fence = marker[1]
+            lines.append("\n")
+        elif fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = ""
+            lines.append("\n")
+        else:
+            lines.append(line)
+    return "".join(lines)
+
+
+def markdown_anchors(prose: str) -> set[str]:
+    anchors = set(re.findall(r'<[^>]+\b(?:id|name)=["\x27]([^"\x27]+)', prose))
+    used: set[str] = set()
+    for raw in re.findall(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", prose, re.MULTILINE):
+        heading = re.sub(r"<[^>]*>", "", raw)
+        heading = re.sub(r"!?\[([^]]+)\]\([^)]+\)", r"\1", heading)
+        slug = re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+        candidate, suffix = slug, 0
+        while candidate in used:
+            suffix += 1
+            candidate = f"{slug}-{suffix}"
+        used.add(candidate)
+        anchors.add(candidate)
+    return anchors
+
+
+def docs_errors() -> list[str]:
+    """Local links, images and anchors in every tracked Markdown file, and the context map."""
+    errors: list[str] = []
+    link_re = re.compile(r'!?\[[^]]*\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+"[^"]*")?\s*\)')
+    ref_re = re.compile(r"^ {0,3}\[[^]]+\]:\s*(<[^>]+>|\S+)", re.MULTILINE)
+    html_re = re.compile(r'<[^>]+\b(?:src|href)=["\x27]([^"\x27]+)')
+    anchor_cache: dict[Path, set[str]] = {}
+    for name in sorted(git("ls-files", "*.md").splitlines()):
+        source = ROOT / name
+        prose = markdown_prose(source)
+        for match in [*link_re.finditer(prose), *ref_re.finditer(prose), *html_re.finditer(prose)]:
+            raw = match[1].strip("<>")
+            url = urlsplit(raw)
+            if url.scheme or url.netloc:
+                continue
+            target = (source.parent / unquote(url.path)).resolve() if url.path else source.resolve()
+            where = f"{name}:{prose.count(chr(10), 0, match.start()) + 1}"
+            if not target.exists():
+                errors.append(f"{where}: missing {raw}")
+            elif url.fragment and target.suffix.lower() == ".md":
+                if target not in anchor_cache:
+                    anchor_cache[target] = markdown_anchors(markdown_prose(target))
+                if unquote(url.fragment) not in anchor_cache[target]:
+                    errors.append(f"{where}: missing anchor {raw}")
+    errors += [
+        f"context map: missing {path}"
+        for _, paths in AREAS.values()
+        for path in paths
+        if not (ROOT / path).exists()
+    ]
+    return errors
+
+
+# Markers that switch a check off for a line, a block or a file. The owner's rule
+# is that findings are fixed, never silenced (VALIDATION.md).
+SUPPRESSION = re.compile(
+    r"(?i)(\b(noqa|nosec|type:\s*ignore|pyright:\s*ignore|pragma:\s*no\s*(cover|branch)"
+    r"|fmt:\s*(off|skip)|isort:\s*skip|pylint:\s*disable|ruff:\s*(noqa|isort)"
+    r"|eslint-(disable|enable)|stylelint-(disable|enable)|html-validate-(disable|enable)"
+    r"|prettier-ignore|shellcheck\s+disable|hadolint\s+ignore|yamllint\s+disable"
+    r"|coverage:\s*ignore)\b|/\*\s*(eslint|globals?)\s)"
+)
+
+
+def comments(path: Path, text: str) -> list[tuple[int, str]]:
+    """The comments of a source file, with their line numbers, by language."""
+    if path.suffix == ".py" or text.startswith("#!/usr/bin/env python3"):
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        return [(t.start[0], t.string) for t in tokens if t.type == tokenize.COMMENT]
+    if path.suffix in {".html", ".js", ".mjs", ".css"}:
+        pattern = r"<!--.*?-->|/\*.*?\*/|(?<![:\"'\\])//[^\n]*"
+    elif path.suffix in {".json", ".lock", ".md", ".svg"} or path.name == "LICENSE":
+        return []
+    else:
+        pattern = r"(?:^|\s)#[^\n]*"
+    return [
+        (text.count("\n", 0, m.start()) + 1, m.group(0))
+        for m in re.finditer(pattern, text, re.DOTALL)
+    ]
+
+
+def suppression_errors() -> list[str]:
+    """Inline suppressions in any versioned source, and relaxations in tool configuration."""
+    errors: list[str] = []
+    names = git("ls-files", "--cached", "--others", "--exclude-standard").splitlines()
+    for name in sorted(set(names)):
+        path = ROOT / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except UnicodeDecodeError:
+            continue
+        errors += [
+            f"{name}:{line}: suppression comment: {comment.strip()[:80]}"
+            for line, comment in comments(path, text)
+            if SUPPRESSION.search(comment)
+        ]
+    tools = tomllib.loads((ROOT / "pyproject.toml").read_text()).get("tool", {})
+    forbidden = {
+        "ruff": {"ignore", "extend-ignore", "per-file-ignores", "exclude", "extend-exclude"},
+        "mypy": {"ignore_errors", "ignore_missing_imports", "disable_error_code", "exclude"},
+        "coverage": {"omit", "exclude_lines", "exclude_also", "partial_branches"},
+        "bandit": {"skips", "exclude_dirs"},
+        "pytest": {"filterwarnings_ignore"},
+    }
+
+    def walk(section: object, where: str, keys: set[str]) -> None:
+        if isinstance(section, dict):
+            for key, value in section.items():
+                if key in keys:
+                    errors.append(f"pyproject.toml: [{where}] relaxes checks with {key}")
+                walk(value, f"{where}.{key}", keys)
+        elif isinstance(section, list):
+            for item in section:
+                walk(item, where, keys)
+
+    for tool, keys in forbidden.items():
+        walk(tools.get(tool, {}), f"tool.{tool}", keys)
+    for override in tools.get("mypy", {}).get("overrides", []):
+        errors.append(f"pyproject.toml: [[tool.mypy.overrides]] for {override.get('module')}")
+    stylelint = json.loads((ROOT / "scripts/lint/stylelint.json").read_text())
+    errors += [
+        f"scripts/lint/stylelint.json: rule {rule} is switched off"
+        for rule, value in stylelint.get("rules", {}).items()
+        if value is None or value is False
+    ]
+    eslint = (ROOT / "scripts/lint/eslint.config.mjs").read_text()
+    if re.search(r"""["'](off|warn)["']|:\s*[01]\s*[,}]""", eslint):
+        errors.append("scripts/lint/eslint.config.mjs: a rule is switched off or downgraded")
+    errors += [
+        f"{name}: tool configuration that disables rules"
+        for name in (".hadolint.yaml", ".shellcheckrc", ".bandit")
+        if (ROOT / name).exists()
+    ]
+    return errors
+
+
+def uv_export(*selection: str) -> str:
+    """uv.lock as a hashed requirements file, for pip in the Dockerfile."""
+    result = subprocess.run(
+        [
+            "uv",
+            "export",
+            "--frozen",
+            "--no-emit-project",
+            "--no-header",
+            "--format",
+            "requirements.txt",
+            *selection,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def requirements_errors() -> list[str]:
+    """requirements/ is exactly what uv.lock exports, so the image installs the lock."""
+    return [
+        f"{name} differs from uv.lock; run: uv export --frozen --no-emit-project --no-header "
+        f"--format requirements.txt {' '.join(selection)} -o {name}"
+        for name, selection in REQUIREMENTS.items()
+        if (ROOT / name).read_text() != uv_export(*selection)
+    ]
+
+
+def canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pins_errors() -> list[str]:
+    """The runtime image's Python packages are exactly requirements/runtime.txt."""
+    wanted = {
+        canonical(name): version
+        for name, version in re.findall(
+            r"^([A-Za-z0-9_.-]+)==(\S+)",
+            (ROOT / "requirements/runtime.txt").read_text(),
+            re.MULTILINE,
+        )
+    }
+    probe = (
+        "import importlib.metadata as m, json; "
+        "print(json.dumps({d.metadata['Name']: d.version for d in m.distributions()}))"
+    )
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "python3",
+            RUNTIME_IMAGE,
+            "-c",
+            probe,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        return [f"could not read the image's packages: {result.stderr.strip()}"]
+    shipped = {canonical(name): version for name, version in json.loads(result.stdout).items()}
+    return [
+        f"{name}: requirements/runtime.txt pins {wanted.get(name)}, the image has "
+        f"{shipped.get(name)}"
+        for name in sorted(wanted.keys() | shipped.keys())
+        if wanted.get(name) != shipped.get(name)
+    ]
+
+
+def compose_errors() -> list[str]:
+    """Every supported network setup renders a valid compose project from .env.example."""
+    errors: list[str] = []
+    for stack in COMPOSE_STACKS:
+        files = [arg for name in stack for arg in ("-f", name)]
+        result = subprocess.run(
+            ["docker", "compose", "--env-file", ".env.example", *files, "config", "--quiet"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            env={
+                **os.environ,
+                "COMPANION_IP": "192.168.1.240",
+                "LAN_INTERFACE": "eth0",
+                "LAN_SUBNET": "192.168.1.0/24",
+                "LAN_ROUTER": "192.168.1.1",
+                "LAN_NETWORK": "lan",
+            },
+        )
+        if result.returncode:
+            errors.append(f"{' + '.join(stack)}: {result.stderr.strip()}")
+    return errors
+
+
+def firmware_checkout() -> Path | None:
+    """The firmware repository: OPENBREWBYWEIGHT_FIRMWARE_DIR, else beside this repository."""
+    configured = os.getenv("OPENBREWBYWEIGHT_FIRMWARE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    main = Path(common).parent if common else ROOT
+    candidate = main.parent / FIRMWARE_REPOSITORY
+    return candidate if (candidate / "docs/schemas").is_dir() else None
+
+
+def firmware_errors(firmware: Path) -> list[str]:
+    """tests/fixtures holds byte-identical copies of the firmware's shared files."""
+    errors: list[str] = []
+    for copy, original in FIRMWARE_FIXTURES.items():
+        source = firmware / original
+        if not source.is_file():
+            errors.append(f"{copy}: the firmware has no {original}")
+        elif (ROOT / copy).read_bytes() != source.read_bytes():
+            errors.append(
+                f"{copy}: differs from the firmware's {original}; copy it and pin its hash"
+            )
+    return errors
+
+
+def pip_audit_errors(out: Path) -> list[str]:
+    """Audit every locked Python package, runtime and development, by its hash."""
+    requirements = out / "requirements.txt"
+    export = subprocess.run(
+        [
+            "uv",
+            "export",
+            "--frozen",
+            "--all-groups",
+            "--no-emit-project",
+            "--format",
+            "requirements.txt",
+            "--output-file",
+            str(requirements),
+            "--quiet",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if export.returncode:
+        return [export.stderr.strip()]
+    audit = subprocess.run(
+        [
+            str(ROOT / ".venv/bin/pip-audit"),
+            "--strict",
+            "--disable-pip",
+            "--require-hashes",
+            "--progress-spinner",
+            "off",
+            "-r",
+            str(requirements),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    print(audit.stdout.strip())
+    return (
+        [] if audit.returncode == 0 else audit.stderr.strip().splitlines() or ["pip-audit failed"]
+    )
+
+
+def check(name: str) -> int:
+    """`./scripts/dev check NAME`: one contract check, printing each problem."""
+    if name == "firmware":
+        firmware = firmware_checkout()
+        if firmware is None or not firmware.is_dir():
+            print(
+                f"missing: the firmware checkout; set OPENBREWBYWEIGHT_FIRMWARE_DIR or clone "
+                f"{FIRMWARE_REPOSITORY} beside this repository"
+            )
+            return 127
+        print(f"firmware checkout: {firmware}")
+        errors = firmware_errors(firmware)
+    elif name == "pip-audit":
+        with tempfile.TemporaryDirectory(prefix="openbrewbyweight-") as temporary:
+            errors = pip_audit_errors(Path(temporary))
+    else:
+        checks = {
+            "docs": docs_errors,
+            "suppressions": suppression_errors,
+            "compose": compose_errors,
+            "pins": pins_errors,
+            "requirements": requirements_errors,
+        }
+        if name not in checks:
+            raise ValueError(
+                "check must be one of: " + ", ".join([*checks, "firmware", "pip-audit"])
+            )
+        errors = checks[name]()
+    for error in errors:
+        print(f"error: {error}")
+    print(f"{name}: {len(errors)} problem(s)" if errors else f"{name}: OK")
+    return 1 if errors else 0
+
+
+# --- Runs -------------------------------------------------------------------------------
+
+
+@dataclass
+class Run:
+    """One command's run: its directory, log lines and per-step results."""
+
+    command: list[str]
+    risk: str
+    verbosity: str
+    started: float = field(default_factory=time.monotonic)
+    run_id: str = field(
+        default_factory=lambda: (
+            dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
+        )
+    )
+    checks: list[dict[str, str]] = field(default_factory=list)
+    lines: list[str] = field(default_factory=list)
+
+    @property
+    def directory(self) -> Path:
+        return ROOT / "artifacts/runs" / self.run_id
+
+
+def run_steps(
+    run: Run,
+    lanes: list[list[Step]],
+    manual: list[str] | None = None,
+    prelude: list[str] | None = None,
+) -> int:
+    """Run each lane's steps in order, the lanes in parallel. After a failure no lane
+    starts another step; running steps finish. Missing tools exit with 127."""
+    run.directory.mkdir(parents=True, exist_ok=False)
+    log_path = run.directory / "run.log"
+    order = {name: i for i, (name, _) in enumerate(s for lane in lanes for s in lane)}
+    failures: list[tuple[int, list[str]]] = []
+    lock = threading.Lock()
+    live = len(lanes) == 1
+    with log_path.open("w") as log:
+
+        def emit(block: list[str]) -> None:
+            for line in block:
+                log.write(line + "\n")
+                run.lines.append(line)
+                if run.verbosity != "compact":
+                    print(painted(line), flush=True)
+
+        emit([redact(line) for line in prelude or []])
+
+        def run_lane(lane: list[Step]) -> None:
+            for name, argv in lane:
+                with lock:
+                    if failures:
+                        return
+                block = [f"==> {name}: {' '.join(argv)}"]
+                if live:
+                    emit(block)
+                env = {**os.environ, "OPENBREWBYWEIGHT_RUN_DIR": str(run.directory)}
+                try:
+                    process = subprocess.Popen(
+                        argv,
+                        cwd=ROOT,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        env=env,
+                    )
+                except FileNotFoundError:
+                    block.append(f"{argv[0]}: MISSING")
+                    code = 127
+                else:
+                    assert process.stdout is not None
+                    for raw in process.stdout:
+                        block.append(redact(raw.rstrip("\n")))
+                        if live:
+                            emit(block[-1:])
+                    code = process.wait()
+                with lock:
+                    if not live:
+                        emit(block)
+                    elif code == 127 and block[-1].endswith("MISSING"):
+                        emit(block[-1:])
+                    run.checks.append({"name": name, "status": "passed" if code == 0 else "failed"})
+                    if code:
+                        failures.append((code, block))
+                        return
+
+        threads = [threading.Thread(target=run_lane, args=(lane,), daemon=True) for lane in lanes]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    run.checks.sort(key=lambda check: order[check["name"]])
+    child = failures[0][0] if failures else 0
+    code = child if child in {0, 2, 127} else 1
+    return finish(run, code, failures[0][1] if failures else run.lines, manual or [])
+
+
+def finish(run: Run, code: int, shown: list[str], manual: list[str]) -> int:
+    status = "passed" if code == 0 else ("missing_dependency" if code == 127 else "failed")
+    summary = {
+        "schemaVersion": 1,
+        "command": [redact(arg) for arg in run.command],
+        "risk": run.risk,
+        "status": status,
+        "sha": git("rev-parse", "HEAD").strip() or "unknown",
+        "durationSeconds": round(time.monotonic() - run.started, 3),
+        "checks": run.checks,
+        "logs": [str((run.directory / "run.log").relative_to(ROOT))],
+        "manualValidationsPending": manual,
+    }
+    encoded = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    summary_path = run.directory / "summary.json"
+    summary_path.write_text(encoded)
+    (ROOT / "artifacts/runs/latest.json").write_text(encoded)
+    if run.verbosity == "compact":
+        print(painted(f"{status.upper()}: {' '.join(run.command)}"))
+        if code:
+            failed = next((c["name"] for c in run.checks if c["status"] != "passed"), "unknown")
+            print(painted(f"failed check: {failed}"))
+        for line in shown[-(20 if code == 0 else 80) :]:
+            print(painted(line) if len(line) <= 500 else line[:500] + " …[truncated; see full log]")
+    print(painted(f"{status}: summary {summary_path.relative_to(ROOT)}"))
+    for item in manual:
+        print(painted(f"warning: manual validation pending: {item}"))
+    return code
+
+
+def record(run: Run, lines: list[str], code: int, name: str) -> int:
+    """A run whose single check ran in this process."""
+    run.directory.mkdir(parents=True, exist_ok=False)
+    (run.directory / "run.log").write_text("".join(redact(line) + "\n" for line in lines))
+    run.lines = lines
+    run.checks.append({"name": name, "status": "passed" if code == 0 else "failed"})
+    if run.verbosity != "compact":
+        for line in lines:
+            print(painted(line))
+    return finish(run, code, lines, [])
+
+
+# --- Profiles ---------------------------------------------------------------------------
+
+VENV = ROOT / ".venv/bin"
+NODE_BIN = ROOT / "node_modules/.bin"
+
+
+def dockerfile_hash() -> str:
+    """The inputs that decide the images' contents apart from the mounted checkout."""
+    digest = hashlib.sha256()
+    for name in ("Dockerfile", *REQUIREMENTS):
+        digest.update(name.encode() + b"\0" + (ROOT / name).read_bytes())
+    return digest.hexdigest()[:16]
+
+
+def missing_tools(profile: str) -> list[str]:
+    """What a profile needs that is not here, each with the explicit command that adds it."""
+    needs: dict[str, list[tuple[bool, str]]] = {
+        "lint": [
+            (
+                all(
+                    (VENV / tool).exists()
+                    for tool in (
+                        "python",
+                        "ruff",
+                        "mypy",
+                        "bandit",
+                        "shellcheck",
+                        "shfmt",
+                        "hadolint",
+                        "yamllint",
+                    )
+                ),
+                "the Python tools; run: uv sync --frozen",
+            ),
+            (
+                shutil.which("uv") is not None,
+                "uv, which exports uv.lock for the image",
+            ),
+            (
+                shutil.which("node") is not None
+                and all(
+                    (NODE_BIN / tool).exists()
+                    for tool in ("prettier", "eslint", "stylelint", "html-validate")
+                ),
+                "the web linters; run: npm ci",
+            ),
+            (shutil.which("docker") is not None, "docker (its CLI checks the compose files)"),
+        ],
+        "unit": [(shutil.which("docker") is not None, "docker")],
+        "image": [(shutil.which("docker") is not None, "docker")],
+        "audit": [
+            (
+                shutil.which("uv") is not None and (VENV / "pip-audit").exists(),
+                "uv and pip-audit; run: uv sync --frozen",
+            ),
+            (
+                shutil.which("npm") is not None and (ROOT / "node_modules").is_dir(),
+                "npm and the web linters; run: npm ci",
+            ),
+        ],
+        "firmware": [],
+    }
+    return [what for present, what in needs[profile] if not present]
+
+
+def test_image_problem() -> str | None:
+    """Why the test image cannot run this Dockerfile's tests, if it cannot."""
+    result = subprocess.run(
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            f'{{{{index .Config.Labels "{DOCKERFILE_LABEL}"}}}}',
+            TEST_IMAGE,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        return f"the test image {TEST_IMAGE} is missing; run: ./scripts/dev image"
+    if result.stdout.strip() != dockerfile_hash():
+        return (
+            f"the test image {TEST_IMAGE} predates this Dockerfile or requirements/; "
+            "run: ./scripts/dev image"
+        )
+    return None
+
+
+def checker(name: str) -> list[str]:
+    return [str(VENV / "python"), "scripts/dev", "check", name]
+
+
+def lint_steps(run: Run) -> list[Step]:
+    pages = run.directory / "pages"
+    return [
+        ("suppressions", checker("suppressions")),
+        ("ruff", [str(VENV / "ruff"), "check", "--no-cache", "."]),
+        ("ruff-format", [str(VENV / "ruff"), "format", "--check", "--no-cache", "."]),
+        ("mypy", [str(VENV / "mypy")]),
+        ("bandit", [str(VENV / "bandit"), "-q", "-r", "companion", "gateway"]),
+        ("shellcheck", [str(VENV / "shellcheck"), *SHELL_SCRIPTS]),
+        ("shfmt", [str(VENV / "shfmt"), "--diff", *SHELL_SCRIPTS]),
+        ("hadolint", [str(VENV / "hadolint"), "Dockerfile"]),
+        ("yamllint", [str(VENV / "yamllint"), "--strict", "-c", ".yamllint.yaml", *YAML_FILES]),
+        ("compose", checker("compose")),
+        ("requirements", checker("requirements")),
+        ("web-format", [str(NODE_BIN / "prettier"), "--check", *PRETTIER_PATHS]),
+        (
+            "eslint",
+            [
+                str(NODE_BIN / "eslint"),
+                "--config",
+                "scripts/lint/eslint.config.mjs",
+                "--max-warnings",
+                "0",
+                *PAGES,
+                "scripts/lint",
+            ],
+        ),
+        (
+            "stylelint",
+            [
+                str(NODE_BIN / "stylelint"),
+                "--config",
+                "scripts/lint/stylelint.json",
+                "--max-warnings",
+                "0",
+                *PAGES,
+            ],
+        ),
+        (
+            "render-pages",
+            [
+                "env",
+                f"PYTHONPATH={ROOT}:{ROOT / 'gateway'}",
+                str(VENV / "python"),
+                "scripts/render_pages.py",
+                str(pages),
+            ],
+        ),
+        (
+            "html-validate",
+            [
+                str(NODE_BIN / "html-validate"),
+                "--config",
+                "scripts/lint/htmlvalidate.json",
+                "--ext",
+                "html",
+                str(pages),
+            ],
+        ),
+    ]
+
+
+def unit_steps(pytest_args: list[str]) -> list[Step]:
+    docker = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "-v",
+        f"{ROOT}:/src:ro",
+        "-w",
+        "/src",
+        "-e",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "-e",
+        "COVERAGE_FILE=/tmp/.coverage",
+        "--entrypoint",
+        "sh",
+        TEST_IMAGE,
+        "-c",
+    ]
+    pytest = "python3 -m pytest -p no:cacheprovider"
+    if pytest_args:
+        return [("pytest", [*docker, f'{pytest} "$@"', "pytest", *pytest_args])]
+    script = (
+        f"python3 -m coverage run -m pytest -p no:cacheprovider && "
+        f"python3 -m coverage combine -q && "
+        f"python3 -m coverage report --fail-under={COVERAGE_FAIL_UNDER}"
+    )
+    return [("pytest-coverage", [*docker, script])]
+
+
+def image_steps() -> list[Step]:
+    label = ["--label", f"{DOCKERFILE_LABEL}={dockerfile_hash()}"]
+    return [
+        (
+            "image-test",
+            ["docker", "build", "--quiet", "--target", "test", *label, "-t", TEST_IMAGE, "."],
+        ),
+        ("image-runtime", ["docker", "build", "--quiet", *label, "-t", RUNTIME_IMAGE, "."]),
+        ("runtime-pins", [sys.executable, "scripts/dev", "check", "pins"]),
+    ]
+
+
+def audit_steps() -> list[Step]:
+    return [
+        ("pip-audit", [sys.executable, "scripts/dev", "check", "pip-audit"]),
+        ("npm-audit", ["npm", "audit"]),
+    ]
+
+
+def firmware_steps() -> list[Step]:
+    return [("firmware-fixtures", [sys.executable, "scripts/dev", "check", "firmware"])]
+
+
+def help_text() -> str:
+    return """usage: ./scripts/dev [--verbosity compact|normal|verbose] COMMAND [ARGS]
+
+commands:
+  doctor                   report the local tools; never installs
+  context AREA             list focused paths and their purpose
+  classify [PATH ...]      print path risks and the aggregate risk
+  validate [--risk R0..R3] [PATH ...]
+                           run the gate for the classified risk
+  test lint|unit|audit|firmware [PYTEST ARGS]
+                           one gate profile; unit takes pytest arguments
+  image                    build the test and runtime images (fetches Alpine
+                           packages when Docker has not cached them)
+  check NAME               one contract check: docs, suppressions, compose,
+                           pins, firmware, pip-audit
+  clean --dry-run|--confirm
+                           list or remove artifacts/runs
+
+Default verbosity is normal on a terminal and compact otherwise;
+OPENBREWBYWEIGHT_VERBOSITY sets the environment default.
+"""
+
+
+def extract_option(args: list[str], option: str) -> tuple[str | None, list[str]]:
+    value: str | None = None
+    output: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == option:
+            if index + 1 >= len(args):
+                raise ValueError(f"{option} requires a value")
+            value, index = args[index + 1], index + 2
+        elif arg.startswith(option + "="):
+            value, index = arg.split("=", 1)[1], index + 1
+        else:
+            output.append(arg)
+            index += 1
+    return value, output
+
+
+def doctor(run: Run) -> int:
+    tools = [
+        ("git", ["git", "--version"]),
+        ("python3", ["python3", "--version"]),
+        ("uv", ["uv", "--version"]),
+        ("node", ["node", "--version"]),
+        ("npm", ["npm", "--version"]),
+        ("docker", ["docker", "--version"]),
+        *(
+            (name, [str(VENV / name), "--version"])
+            for name in (
+                "ruff",
+                "mypy",
+                "bandit",
+                "pip-audit",
+                "yamllint",
+                "shellcheck",
+                "shfmt",
+                "hadolint",
+            )
+        ),
+        *(
+            (name, [str(NODE_BIN / name), "--version"])
+            for name in ("prettier", "eslint", "stylelint", "html-validate")
+        ),
+    ]
+    lines: list[str] = []
+    for name, argv in tools:
+        try:
+            result = subprocess.run(argv, text=True, capture_output=True, check=False)
+        except FileNotFoundError:
+            lines.append(f"{name}: MISSING")
+            continue
+        banner = (result.stdout or result.stderr).strip().splitlines()
+        lines.append(f"{name}: {banner[0] if banner else 'present'}")
+    image = test_image_problem() if shutil.which("docker") else "docker is missing"
+    lines.append(f"test image: {image or 'current'}")
+    firmware = firmware_checkout()
+    lines.append(f"firmware checkout: {firmware or 'not found (needed by R3)'}")
+    missing = any(line.endswith("MISSING") for line in lines)
+    return record(run, lines, 127 if missing else 0, "doctor")
+
+
+def main() -> int:
+    raw = sys.argv[1:]
+    try:
+        verbosity, raw = extract_option(raw, "--verbosity")
+        verbosity = (
+            verbosity
+            or os.getenv("OPENBREWBYWEIGHT_VERBOSITY")
+            or ("normal" if sys.stdout.isatty() else "compact")
+        )
+        if verbosity not in {"compact", "normal", "verbose"}:
+            raise ValueError("verbosity must be compact, normal, or verbose")
+        if not raw or raw[0] in {"help", "-h", "--help"}:
+            print(help_text())
+            return 0
+        verb, args = raw[0], raw[1:]
+        if verb == "check":
+            if len(args) != 1:
+                raise ValueError("check takes one name")
+            return check(args[0])
+        command = ["./scripts/dev", verb, *args]
+
+        if verb == "doctor":
+            if args:
+                raise ValueError("doctor takes no arguments")
+            return doctor(Run(command, "R0", verbosity))
+
+        if verb == "context":
+            if len(args) != 1 or args[0] not in AREAS:
+                raise ValueError("context area must be one of: " + ", ".join(AREAS))
+            description, paths = AREAS[args[0]]
+            return record(
+                Run(command, "R0", verbosity),
+                [f"{args[0]} — {description}", *paths],
+                0,
+                "context-paths",
+            )
+
+        if verb == "classify":
+            risk, details = classify(args)
+            lines = [
+                *(f"{r} {p}" for p, r in details),
+                *(
+                    f"warning: changed path outside requested scope: {p}"
+                    for p in uncovered_changes(args)
+                ),
+                f"risk={risk}",
+            ]
+            return record(Run(command, risk, verbosity), lines, 0, "risk-classification")
+
+        if verb == "image":
+            if args:
+                raise ValueError("image takes no arguments")
+            if missing_tools("image"):
+                return record(Run(command, "R2", verbosity), ["docker: MISSING"], 127, "image")
+            return run_steps(Run(command, "R2", verbosity), [image_steps()])
+
+        if verb == "test":
+            profile, rest = (args[0], args[1:]) if args else ("", [])
+            profiles = {"lint": "R1", "unit": "R1", "audit": "R2", "firmware": "R3"}
+            if profile not in profiles:
+                raise ValueError("test profile must be one of: " + ", ".join(profiles))
+            if rest and profile != "unit":
+                raise ValueError(f"test {profile} takes no arguments")
+            run = Run(command, profiles[profile], verbosity)
+            missing = missing_tools(profile)
+            if profile == "unit" and not missing:
+                problem = test_image_problem()
+                missing = [problem] if problem else []
+            if missing:
+                return record(run, [f"missing: {what}" for what in missing], 127, profile)
+            steps = {
+                "lint": lint_steps(run),
+                "audit": audit_steps(),
+                "firmware": firmware_steps(),
+                "unit": unit_steps(rest),
+            }
+            return run_steps(run, [steps[profile]])
+
+        if verb == "validate":
+            override, paths = extract_option(args, "--risk")
+            inferred, details = classify(paths)
+            if override is None:
+                risk = inferred
+            elif override not in RANK:
+                raise ValueError("risk must be R0, R1, R2, or R3")
+            elif RANK[override] < RANK[inferred]:
+                raise ValueError(f"risk override cannot lower {inferred} to {override}")
+            else:
+                risk = override
+            run = Run(command, risk, verbosity)
+            prelude = [
+                *(f"{r} {p}" for p, r in details),
+                *(
+                    f"warning: changed path outside requested scope: {p}"
+                    for p in uncovered_changes(paths)
+                ),
+                f"risk={risk}",
+            ]
+            contract = docs_errors() + suppression_errors()
+            if contract or risk == "R0":
+                lines = prelude + (
+                    contract or ["documentation links, context paths and suppressions: OK"]
+                )
+                return record(run, lines, 1 if contract else 0, "contract")
+            needed = (
+                ["lint", "unit"]
+                + (["image", "audit"] if RANK[risk] >= 2 else [])
+                + (["firmware"] if risk == "R3" else [])
+            )
+            missing = [what for profile in needed for what in missing_tools(profile)]
+            if risk == "R1" and not missing:
+                problem = test_image_problem()
+                missing = [problem] if problem else []
+            if missing:
+                return record(
+                    run, prelude + [f"missing: {what}" for what in missing], 127, "dependencies"
+                )
+            # Static analysis and the tests share no outputs, so they run as two lanes;
+            # at R2/R3 the tests wait for the images they run in.
+            static = lint_steps(run)
+            tests = unit_steps([])
+            if RANK[risk] >= 2:
+                static += audit_steps()
+                tests = image_steps() + tests
+            if risk == "R3":
+                static += firmware_steps()
+            manual = [R3_MANUAL] if risk == "R3" else []
+            return run_steps(run, [static, tests], manual, prelude)
+
+        if verb == "clean":
+            target = ROOT / "artifacts/runs"
+            if args == ["--dry-run"]:
+                print(target.relative_to(ROOT))
+                return 0
+            if args != ["--confirm"]:
+                raise ValueError("clean requires --dry-run or --confirm")
+            if target.exists():
+                shutil.rmtree(target)
+            print(f"removed: {target.relative_to(ROOT)}")
+            return 0
+
+        raise ValueError("unknown command: " + verb)
+    except ValueError as error:
+        print(painted(f"dev: {error}"), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
