@@ -8,10 +8,20 @@ owns the session's liveness: one `activity` op aggregated over the screens.
 import asyncio
 import collections
 import json
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import aiohttp
 
 from . import clip, log
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from .mux import Mux
+    from .relay import Relay
+    from .service import Companion
+
+type Op = Mapping[str, object]
 
 PATH = "/api/v1/ui/ui-stream"
 REQUEST_BYTES = 640  # The controller's request frame (kUiStreamRequestBytes).
@@ -20,42 +30,51 @@ ACTIVITY_S, KEEPALIVE_S, ALIVE_S = 19, 120, 25
 TICK_S = 1
 
 
-def dumps(value):
+def dumps(value: object) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
+class Bind(TypedDict):
+    """The session's first op; `ops` carries the screens' state while it fits REQUEST_BYTES."""
+
+    op: str
+    client: str
+    ops: NotRequired[list[Op]]
+
+
 class Upstream:
-    def __init__(self, companion, relay, mux):
+    def __init__(self, companion: Companion, relay: Relay, mux: Mux) -> None:
         self.companion, self.relay, self.mux = companion, relay, mux
         self.state = "closed"  # closed, opening, open or closing
-        self.ws = self.outbox = None
+        self.ws: aiohttp.ClientWebSocketResponse | None = None
+        self.outbox: asyncio.Queue[str] | None = None
         self.heard = False  # A frame arrived since the bind: the controller accepted it.
         self.heard_at = self.sent_at = 0.0
         self.activity = (0, False)  # The last aggregate sent: (seconds, hidden).
         self.activity_at = 0.0
         self.probing = False
         self.ops = 0  # Ops sent on this companion's lifetime (the bind counts as one).
-        self.recent = collections.deque(
+        self.recent: collections.deque[Op] = collections.deque(
             maxlen=64
         )  # The last ops, for tests and the 4003 attribution.
 
-    def open(self):
+    def open(self) -> None:
         if self.state == "closed":
             self.state = "opening"
-            self.companion.spawn(self._run())
+            _ = self.companion.spawn(self._run())
 
-    def close(self):
-        if self.state == "open":
+    def close(self) -> None:
+        if self.state == "open" and self.ws is not None:
             self.state = "closing"
-            self.companion.spawn(self.ws.close())
+            _ = self.companion.spawn(self.ws.close())
 
-    def alive(self):
+    def alive(self) -> bool:
         """True while the session is bound and the controller was heard recently."""
         loop = asyncio.get_running_loop()
         return self.state == "open" and self.heard and loop.time() - self.heard_at < ALIVE_S
 
-    def send(self, op):
-        if self.state != "open":
+    def send(self, op: Op) -> bool:
+        if self.state != "open" or self.outbox is None:
             return False
         self.outbox.put_nowait(dumps(op))
         self.ops += 1
@@ -63,7 +82,7 @@ class Upstream:
         self.sent_at = asyncio.get_running_loop().time()
         return True
 
-    async def _connect(self):
+    async def _connect(self) -> aiohttp.ClientWebSocketResponse | None:
         companion, relay = self.companion, self.relay
         host = companion.base_url().removeprefix("http://")
         for attempt in (0, 1):
@@ -88,10 +107,10 @@ class Upstream:
                 )  # RELAY_STALE: a new relay session, then once more.
         return None
 
-    async def _run(self):
+    async def _run(self) -> None:
         try:
             ws = await self._connect()
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
+        except (aiohttp.ClientError, TimeoutError, OSError) as error:
             log(f"could not open the live updates: {clip(f'{type(error).__name__}: {error}')}")
             ws = None
         if ws is None:
@@ -104,14 +123,15 @@ class Upstream:
         self.activity, self.probing = (0, False), False
         # The bind and the state it carries are taken in one step: later changes go as ops.
         self.state = "open"
-        bind, rest = {"op": "bind", "client": self.relay.client_id}, []
+        bind: Bind = {"op": "bind", "client": self.relay.client_id}
+        rest: list[Op] = []
         for op in self.mux.bind_ops():
             if len(dumps({**bind, "ops": [*bind.get("ops", ()), op]})) <= REQUEST_BYTES:
                 bind.setdefault("ops", []).append(op)
             else:
                 rest.append(op)
-        for op in (bind, *rest):
-            self.send(op)
+        for queued in (bind, *rest):
+            self.send(queued)
         writer = self.companion.spawn(self._writer(ws, self.outbox))
         ticker = self.companion.spawn(self._ticker())
         self.mux.upstream_opened()
@@ -126,7 +146,7 @@ class Upstream:
                 if isinstance(frame, dict):
                     self.heard, self.heard_at, self.probing = True, loop.time(), False
                     self.mux.on_frame(frame, message.data)
-        except aiohttp.ClientError, ConnectionError, asyncio.TimeoutError:
+        except aiohttp.ClientError, ConnectionError, TimeoutError:
             pass
         finally:
             writer.cancel()
@@ -136,7 +156,9 @@ class Upstream:
             self.state, self.ws, self.outbox = "closed", None, None
             self.mux.upstream_closed(ws.close_code, deliberate, self.heard)
 
-    async def _writer(self, ws, outbox):
+    async def _writer(
+        self, ws: aiohttp.ClientWebSocketResponse, outbox: asyncio.Queue[str]
+    ) -> None:
         while True:
             text = await outbox.get()
             try:
@@ -146,7 +168,7 @@ class Upstream:
                 return
 
     # --- Liveness ----------------------------------------------------------------
-    def sync_activity(self, probe=False):
+    def sync_activity(self, probe: bool = False) -> None:
         """Send the screens' aggregate when it is due: at once when it rises from 0 or
         hidden changes, every ACTIVITY_S while it is above 0, every KEEPALIVE_S anyway,
         and when a screen waits for `alive` from a controller not heard lately."""
@@ -167,7 +189,7 @@ class Upstream:
             self.probing = self.probing or probe
             self.send({"op": "activity", "seconds": seconds, "hidden": hidden})
 
-    async def _ticker(self):
+    async def _ticker(self) -> None:
         while True:
             await asyncio.sleep(TICK_S)
             self.sync_activity()

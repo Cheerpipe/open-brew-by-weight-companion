@@ -1,5 +1,5 @@
-"""A fake controller for the relay and screen tests: the relay routes, relay admission, the claim and
-a ui-stream that answers ops the way the firmware does, written from the design's formulas
+"""A fake controller for the relay and screen tests: the relay routes, relay admission, the claim
+and a ui-stream that answers ops the way the firmware does, written from the design's formulas
 (not from the companion's code), so the two are checked against each other. Relay protocol 2:
 requests arrive signed and sealed, JSON answers leave sealed under the response counter.
 """
@@ -13,67 +13,96 @@ import os
 import re
 import struct
 import zlib
+from typing import TYPE_CHECKING, Any, TypedDict
 
-import aiohttp
 from aiohttp import web
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
 CLIENT = re.compile(r"[0-9a-f]{16,24}")
 CTX_SESSION, CTX_PASSWORD, CTX_BODY = 0, 1, 2
 
+# An op as the companion sent it: JSON, read as the firmware reads it.
+type Op = dict[str, Any]
+# A frame this fake sends.
+type Frame = dict[str, object]
 
-def b64(data):
+
+class Identity(TypedDict):
+    """A relayed request as admission identifies it, its sealed values opened."""
+
+    q: int
+    addr: str
+    screen: str
+    session: str
+    password: str
+
+
+def b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def mac(key, *parts):
+def mac(key: bytes, *parts: bytes) -> bytes:
     return hmac.new(key, b"".join(parts), hashlib.sha256).digest()
 
 
-def relay_key(secret, rb, nc):
+def relay_key(secret: bytes, rb: bytes, nc: bytes) -> bytes:
     """HKDF-SHA256(ikm=S, salt=rb‖nc, info="obbw-relay-v1", L=32), written out (RFC 5869)."""
     prk = hmac.new(rb + nc, secret, hashlib.sha256).digest()
     return hmac.new(prk, b"obbw-relay-v1\x01", hashlib.sha256).digest()
 
 
-def body_key(key):
+def body_key(key: bytes) -> bytes:
     """Kb = HKDF-SHA256(ikm=Kr, salt="", info="obbw-relay-body-v2", L=32), written out."""
     prk = hmac.new(bytes(32), key, hashlib.sha256).digest()
     return hmac.new(prk, b"obbw-relay-body-v2\x01", hashlib.sha256).digest()
 
 
-def nonce(direction, context, counter):
+def nonce(direction: bytes, context: int, counter: int) -> bytes:
     return direction + bytes((context, 0, 0)) + counter.to_bytes(8, "little")
 
 
-def seal(key, context, counter, plaintext):
+def seal(key: bytes, context: int, counter: int, plaintext: bytes) -> bytes:
     return AESGCM(key).encrypt(nonce(b"c", context, counter), plaintext, None)
 
 
-def open_(key, direction, context, counter, sealed):
+def open_(key: bytes, direction: bytes, context: int, counter: int, sealed: bytes) -> bytes:
     return AESGCM(key).decrypt(nonce(direction, context, counter), sealed, None)
 
 
-def relay_tag(key, method, uri, q, addr, screen, session):
+def relay_tag(
+    key: bytes, method: str, uri: str, q: int, addr: str, screen: str, session: str
+) -> str:
     canonical = "\n".join(["obbw-relay-v2", method, uri, str(q), addr, screen, session]) + "\n"
     return hmac.new(key, canonical.encode(), hashlib.sha256).digest()[:16].hex()
 
 
-def dumps(value):
+def dumps(value: object) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
-def index_answer(baselines, store, held, delta, epoch, rows):
-    """A firmware with deltas: the fields a link index answer adds to `epoch` for the flat newest-first
-    `rows`, asked from `held`. Listed, it carries `sum` and becomes the session's baseline (in
-    `baselines`); asked with the delta flag from the baseline's epoch, it lists only the difference
-    when that is smaller."""
+def index_answer(
+    baselines: dict[str, tuple[int, list[int]]],
+    store: str,
+    held: object,
+    delta: object,
+    epoch: int,
+    rows: list[int],
+) -> dict[str, object]:
+    """A firmware with deltas: the fields a link index answer adds to `epoch` for the flat
+    newest-first `rows`, asked from `held`. Listed, it carries `sum` and becomes the session's
+    baseline (in `baselines`); asked with the delta flag from the baseline's epoch, it lists only
+    the difference when that is smaller."""
     if held == epoch:
         return {}
-    fields, base = {"rows": rows}, baselines.get(store)
+    fields: dict[str, object] = {"rows": rows}
+    base = baselines.get(store)
     if delta and base and base[0] == held:
-        old, now = dict(zip(base[1][0::2], base[1][1::2])), dict(zip(rows[0::2], rows[1::2]))
+        old = dict(zip(base[1][0::2], base[1][1::2], strict=True))
+        now = dict(zip(rows[0::2], rows[1::2], strict=True))
         up = [value for rid, rev in now.items() if old.get(rid) != rev for value in (rid, rev)]
         gone = [rid for rid in old if rid not in now]
         if len(up) + len(gone) < len(rows):
@@ -84,35 +113,41 @@ def index_answer(baselines, store, held, delta, epoch, rows):
 
 
 class Controller:
-    def __init__(self, secret, companion_id):
+    def __init__(self, secret: bytes, companion_id: str) -> None:
         self.secret, self.companion_id = secret, companion_id
         self.mode = (
             "ok"  # ok, none (no relay route answers), forgotten, bad_erase, unknown, bad_proof
         )
         self.ui, self.link = True, False
-        self.rb, self.kr, self.kb, self.high, self.mask = os.urandom(16), None, None, 0, 0
+        self.rb = os.urandom(16)
+        self.kr: bytes | None = None
+        self.kb: bytes | None = None
+        self.high, self.mask = 0, 0
         self.responses = 0
         self.handshakes, self.stale_next = 0, False
         self.corrupt_body, self.corrupt_reply = False, False  # A man in the middle, for tests.
-        self.active = None  # activeWebUiClientId_
-        self.requests = []  # (method, uri, headers, body, identity)
-        self.wire = []  # The sealed bytes as they arrived: (session header, password header, body).
+        self.active: str | None = None  # activeWebUiClientId_
+        # Each request's method, URI, headers, body and identity.
+        self.requests: list[tuple[str, str, dict[str, str], bytes, Identity | None]] = []
+        # The sealed bytes as they arrived: (session header, password header, body).
+        self.wire: list[tuple[str, str, bytes]] = []
         self.request_id = 100
-        self.streams = []  # Open ui-stream sessions
-        self.sessions = asyncio.Queue()
+        self.streams: list[Session] = []  # Open ui-stream sessions
+        self.sessions: asyncio.Queue[Session] = asyncio.Queue()
         self.require_relay_stream = True
         self.epoch, self.boot = 5, 7  # The record stores' epoch and the boot in the answers below.
-        self.handler = None  # Optional override per test: async (session, op) -> handled?
+        # Optional override per test: async (session, op) -> handled?
+        self.handler: Callable[[Session, Op], Awaitable[bool]] | None = None
 
     # --- Relay routes -------------------------------------------------------------
-    async def relay_get(self, request):
+    async def relay_get(self, _request: web.Request) -> web.Response:
         if self.mode == "none":
             return web.Response(status=404, text="404: Not Found")
         if self.mode in ("forgotten", "bad_erase", "unknown"):
             return web.json_response({"error": "COMPANION_NOT_PAIRED"}, status=404)
         return web.json_response({"challenge": b64(self.rb), "protocol": 1})
 
-    async def relay_post(self, request):
+    async def relay_post(self, request: web.Request) -> web.Response:
         if self.mode == "none":
             return web.Response(status=404, text="404: Not Found")
         if request.content_type != "application/json":
@@ -138,7 +173,7 @@ class Controller:
         self.rb = os.urandom(16)
         return web.json_response(answer)
 
-    def admit(self, request):
+    def admit(self, request: web.Request) -> tuple[Identity | None, web.Response | None]:
         """(identity or None, refusal or None) as relay admission defines them; the sealed
         session and password values open here, so a recorded request names the plaintext."""
         value = request.headers.get("X-OBBW-Relay")
@@ -160,6 +195,7 @@ class Controller:
         if (
             self.stale_next
             or self.kr is None
+            or self.kb is None
             or tag
             != relay_tag(self.kr, request.method, request.raw_path, q, addr, screen, raw_session)
         ):
@@ -195,9 +231,9 @@ class Controller:
             "password": password,
         }, None
 
-    def answer(self, identity, payload, status=200):
+    def answer(self, identity: Identity | None, payload: object, status: int = 200) -> web.Response:
         """A JSON answer: sealed (X-OBBW-Enc names its counter) to a relayed request."""
-        if identity is None:
+        if identity is None or self.kb is None:  # A relayed request found the session's keys.
             return web.json_response(payload, status=status, dumps=dumps)
         self.responses += 1
         sealed = AESGCM(self.kb).encrypt(
@@ -213,7 +249,7 @@ class Controller:
         )
 
     # --- REST -------------------------------------------------------------------------
-    async def api(self, request):
+    async def api(self, request: web.Request) -> web.StreamResponse:
         identity, refusal = self.admit(request)
         if refusal is not None:
             return refusal
@@ -228,7 +264,7 @@ class Controller:
             and raw
             and not (request.method == "PATCH" and request.path == "/api/v1/ota")
         )
-        if sealed_body:
+        if sealed_body and identity is not None and self.kb is not None:
             try:
                 body = open_(self.kb, b"c", CTX_BODY, identity["q"], raw)
             except InvalidTag:
@@ -290,7 +326,7 @@ class Controller:
         return self.answer(identity, {"accepted": True, "requestId": self.request_id}, status=202)
 
     # --- ui-stream ----------------------------------------------------------------------
-    async def stream(self, request):
+    async def stream(self, request: web.Request) -> web.StreamResponse:
         host = request.headers.get("Host", "")
         if request.headers.get("Origin") not in (f"http://{host}", f"http://{host}:80"):
             return web.Response(status=403)
@@ -313,7 +349,7 @@ class Controller:
                 session.closed.set_result(ws.close_code)
         return ws
 
-    def app(self):
+    def app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/api/v1/companion/relay", self.relay_get)
         app.router.add_post("/api/v1/companion/relay", self.relay_post)
@@ -325,20 +361,22 @@ class Controller:
 class Session:
     """One controller-side ui-stream session with the firmware's answers to each op."""
 
-    def __init__(self, controller, ws, identity):
+    def __init__(
+        self, controller: Controller, ws: web.WebSocketResponse, identity: Identity | None
+    ) -> None:
         self.controller, self.ws, self.identity = controller, ws, identity
-        self.ops = []
+        self.ops: list[Op] = []
         self.bound = False
-        self.closed = asyncio.get_running_loop().create_future()
+        self.closed: asyncio.Future[int | None] = asyncio.get_running_loop().create_future()
         self.history = self.stats = None
         self.seq = 0
-        self.sent = []  # Every frame this session sent, as text.
+        self.sent: list[str] = []  # Every frame this session sent, as text.
 
-    async def send(self, frame):
+    async def send(self, frame: Frame) -> None:
         self.sent.append(dumps(frame))
         await self.ws.send_str(self.sent[-1])
 
-    async def on_text(self, text):
+    async def on_text(self, text: str) -> None:
         op = json.loads(text)
         self.ops.append(op)
         handler = self.controller.handler
@@ -346,7 +384,7 @@ class Session:
             return
         await self.answer(op)
 
-    async def answer(self, op):
+    async def answer(self, op: Op) -> None:
         name = op["op"]
         if name == "bind":
             if op.get("client") != self.controller.active:
@@ -399,7 +437,7 @@ class Session:
             await self.send(card_snapshot())
 
 
-def home_snapshot(**extra):
+def home_snapshot(**extra: object) -> Frame:
     changes = {
         "bootId": 7,
         "configMutable": True,
@@ -416,7 +454,7 @@ def home_snapshot(**extra):
     return {"v": 1, "type": "home", "boot": 7, "snapshot": True, "changes": changes}
 
 
-def card_snapshot(seq=1):
+def card_snapshot(seq: int = 1) -> Frame:
     return {
         "v": 1,
         "boot": 7,
@@ -431,7 +469,7 @@ def card_snapshot(seq=1):
     }
 
 
-def diagnostic_snapshot():
+def diagnostic_snapshot() -> Frame:
     return {
         "v": 1,
         "type": "diagnostic",
@@ -447,7 +485,7 @@ def diagnostic_snapshot():
     }
 
 
-def event(sequence):
+def event(sequence: int) -> Frame:
     return {
         "sequence": sequence,
         "atMs": sequence * 10,
@@ -459,8 +497,8 @@ def event(sequence):
     }
 
 
-def log_frame(events, **extra):
-    frame = {
+def log_frame(events: list[Frame], **extra: object) -> Frame:
+    frame: Frame = {
         "v": 1,
         "type": "log",
         "bootId": 7,
@@ -475,12 +513,15 @@ def log_frame(events, **extra):
     return frame
 
 
-def fingerprint(*parts):
-    """The standing page's tag: its epoch, window and content; a subscribe naming it gets bare ids."""
+def fingerprint(*parts: object) -> int:
+    """The standing page's tag: its epoch, window and content; a subscribe naming it gets bare
+    ids."""
     return zlib.crc32(dumps(parts).encode()) or 1
 
 
-def history_frame(op, snapshot, epoch=5, request=None, boot=7):
+def history_frame(
+    op: Op, snapshot: bool, epoch: int = 5, request: int | None = None, boot: int = 7
+) -> Frame:
     limit, direction = op.get("limit", 20), op.get("dir", "desc")
     ids = list(range(1, 4)) if direction == "desc" else list(range(3, 0, -1))
     records = [
@@ -512,10 +553,17 @@ def history_frame(op, snapshot, epoch=5, request=None, boot=7):
     }
 
 
-def stats_page(session, op, snapshot, epoch=5, request=None, boot=7):
+def stats_page(
+    session: Session,
+    op: Op,
+    snapshot: bool,
+    epoch: int = 5,
+    request: int | None = None,
+    boot: int = 7,
+) -> list[Frame]:
     """Two frames, a header frame and a continuation; a kept page's bare ids fit the first."""
     session.seq += 1
-    common = {
+    common: Frame = {
         "v": 1,
         "type": "stats",
         "boot": boot,
@@ -527,14 +575,15 @@ def stats_page(session, op, snapshot, epoch=5, request=None, boot=7):
         "limit": op.get("limit", 10),
         "hasMore": False,
     }
-    header, rows = {"window": op.get("window", 10)}, [[1, {"wCg": [10]}], [2, {"wCg": [20]}]]
+    header: Frame = {"window": op.get("window", 10)}
+    rows: list[list[object]] = [[1, {"wCg": [10]}], [2, {"wCg": [20]}]]
     tag = fingerprint(
         epoch,
         *(op.get(name) for name in ("offset", "limit", "sort", "dir", "filter")),
         header,
         rows,
     )
-    first = {
+    first: Frame = {
         **common,
         "snapshot": snapshot,
         "stats": header,

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """The Web UI relay against a fake controller: handshake, signing and sealing, the header
 whitelist, the client id rewrite, RELAY_STALE, erase, passthrough, the Web UI switch and the
 link flag. The fake controller (tests/fake_controller.py) verifies every relayed request with
@@ -7,23 +6,26 @@ its own copy of the design's formulas. Offline, inside the image (see the README
 
 import asyncio
 import json
-import sys
-import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-if not __debug__:
-    raise SystemExit("assertions are disabled (PYTHONOPTIMIZE); these checks would not run")
+import aiohttp
+import pytest
+from aiohttp.test_utils import TestServer
+from cryptography.exceptions import InvalidTag
+
+import fake_controller
+from companion import crypto
+from companion import relay as relay_module
+from companion.service import Companion, web_app
+from companion.store import Store
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from companion.store import Account
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tests"))
-import aiohttp  # noqa: E402
-from aiohttp.test_utils import TestServer  # noqa: E402
-
-import fake_controller  # noqa: E402
-from companion import crypto, relay as relay_module, service  # noqa: E402
-from companion.service import Companion, web_app  # noqa: E402
-
 V = json.loads((ROOT / "tests/fixtures/companion-link-v1.vectors.json").read_text())
 SECRET = bytes.fromhex(V["pairingSecret"])
 ID = "0b9f6a3c-2f4e-4d7a-9c1b-5e8f0a1d2c3b"
@@ -37,28 +39,52 @@ class Idle:
     ep = tok = 0
     refused = False
 
-    def __init__(self, store, events):
+    def __init__(self, store: Store, events: Companion) -> None:
         pass
 
-    def configure(self, *args):
+    def configure(self, *args: object) -> None:
         pass
 
-    def erase(self):
+    def erase(self) -> None:
         pass
 
-    def stop(self):
+    def stop(self) -> None:
         pass
 
+    def signed_in_for(self, _account: Account) -> bool:
+        return False
 
-async def eventually(predicate, timeout=3):
-    for _ in range(int(timeout / 0.02)):
+    def rejected_for(self, _account: Account) -> bool:
+        return False
+
+    async def read(self) -> tuple[int, dict[str, object] | None, int]:
+        return 0, None, 0
+
+    async def command(self, _command_id: int, _op: str, _value: int | None) -> int:
+        return 0
+
+
+async def eventually(predicate: Callable[[], bool], within: float = 3) -> None:
+    for _ in range(int(within / 0.02)):
         if predicate():
             return
         await asyncio.sleep(0.02)
     raise AssertionError("condition not reached")
 
 
-def relay_vectors():
+def last_identity(fake: fake_controller.Controller) -> fake_controller.Identity | None:
+    """The last request's relay identity; None when it arrived unsigned."""
+    return fake.requests[-1][4]
+
+
+def relayed(fake: fake_controller.Controller) -> fake_controller.Identity:
+    """The last request's relay identity: it arrived signed."""
+    identity = last_identity(fake)
+    assert identity is not None
+    return identity
+
+
+def test_relay_vectors() -> None:
     """The relay formulas against the firmware's shared vectors and the fake controller."""
     r = V["relay"]
     rb, nc = crypto.unb64(r["challenge"], 16), crypto.unb64(r["nonce"], 16)
@@ -66,26 +92,23 @@ def relay_vectors():
     assert crypto.mac(SECRET, b"Q", rb, nc) == crypto.unb64(r["reply"])
     assert crypto.mac(SECRET, b"E", nc) == crypto.unb64(r["erase"])
     key = crypto.relay_key(SECRET, rb, nc)
-    assert key.hex() == r["key"] and key == fake_controller.relay_key(SECRET, rb, nc)
+    assert key.hex() == r["key"]
+    assert key == fake_controller.relay_key(SECRET, rb, nc)
     kb = crypto.relay_body_key(key)
-    assert kb.hex() == r["bodyKey"] and kb == fake_controller.body_key(key), (
-        "Kb from the shared vectors"
-    )
+    assert kb.hex() == r["bodyKey"], "Kb from the shared vectors"
+    assert kb == fake_controller.body_key(key), "Kb from the shared vectors"
     # A seal opens only with its own context, its own request, and untouched bytes.
     sealed = crypto.relay_seal(kb, 0, 7, b"0123456789abcdef0123456789abcdef")
     assert fake_controller.open_(kb, b"c", 0, 7, sealed) == b"0123456789abcdef0123456789abcdef"
-    from cryptography.exceptions import InvalidTag
-
-    for opener in (
+    openers: tuple[Callable[[], bytes], ...] = (
         lambda: fake_controller.open_(kb, b"c", 1, 7, sealed),  # another context
         lambda: fake_controller.open_(kb, b"c", 0, 8, sealed),  # another request's q
         lambda: fake_controller.open_(kb, b"c", 0, 7, sealed[:-1] + bytes((sealed[-1] ^ 1,))),
-    ):
-        try:
+    )
+    for opener in openers:
+        # A seal never opens for another context, request or after tampering.
+        with pytest.raises(InvalidTag):
             opener()
-            raise AssertionError("a seal opened for another context, request or after tampering")
-        except InvalidTag:
-            pass
     for case in r["requests"]:
         _, q, addr, screen, tag = case["header"].split(" ")
         args = (case["method"], case["uri"], int(q), addr, screen, case["session"])
@@ -96,282 +119,284 @@ def relay_vectors():
     )
 
 
-async def main():
-    relay_vectors()
+async def relay_scenario(data: Path) -> None:
     fake = fake_controller.Controller(SECRET, ID)
     server = TestServer(fake.app(), host="127.0.0.1")
     await server.start_server()
+    assert server.port is not None
     target = ("Cafe Bar", ("127.0.0.1", server.port))
-    with tempfile.TemporaryDirectory(prefix="openbrewbyweight-relay-") as temporary:
-        data = Path(temporary)
-        service.Store(data).write("identity", {"id": ID, "key": V["companionPrivate"]})
-        async with (
-            aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as http,
-            aiohttp.ClientSession(auto_decompress=False) as browser,
-        ):
-            companion = Companion("Kitchen server", data, http, Idle)
-            relay = companion.relay
-            pages = TestServer(web_app(companion), host="127.0.0.1")
-            await pages.start_server()
-            base = f"http://127.0.0.1:{pages.port}"
+    Store(data).write("identity", {"id": ID, "key": V["companionPrivate"]})
+    async with (
+        aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as http,
+        aiohttp.ClientSession(auto_decompress=False) as browser,
+    ):
+        companion = Companion("Kitchen server", data, http, Idle)
+        relay = companion.relay
+        pages = TestServer(web_app(companion), host="127.0.0.1")
+        await pages.start_server()
+        base = f"http://127.0.0.1:{pages.port}"
 
-            async def call(method, path, client=A, real_ip="192.168.1.50", **kwargs):
-                headers = {
-                    "X-Real-IP": real_ip,
-                    **({"X-WebUI-Client": client} if client else {}),
-                    **kwargs.pop("headers", {}),
-                }
-                async with browser.request(method, base + path, headers=headers, **kwargs) as reply:
-                    return reply.status, dict(reply.headers), await reply.read()
-
-            # --- No controller yet -------------------------------------------------------
-            status, _, body = await call("GET", "/api/v1/status/admin")
-            assert status == 503 and json.loads(body)["error"] == "NO_CONTROLLER"
-
-            # --- Not paired: the plain proxy it always was -----------------------------------
-            companion.pairing.auto = False
-            companion.set_controller(target)
-            await asyncio.sleep(0.1)
-            assert (
-                relay.mode == "passthrough" and (await companion.status())["relay"] == "passthrough"
-            )
-            fake.active = A
-            status, _, body = await call("GET", "/api/v1/status/admin", headers={"Cookie": "x=1"})
-            method, uri, headers, _, identity = fake.requests[-1]
-            assert status == 200 and identity is None and headers["X-WebUI-Client"] == A
-            assert (
-                "Cookie" not in headers
-                and "X-Real-IP" not in headers
-                and "X-OBBW-Relay" not in headers
-            )
-
-            # --- Paired: one relay session, every call signed and sealed --------------------------
-            companion.store.save_pairing(SECRET, "Cafe Bar")
-            companion.pairing.state = "paired"
-            assert await relay.handshake() == "ready" and fake.handshakes == 1
-            assert (await companion.status())["relay"] == "ready" and relay.link is False, (
-                "no feature needs the link"
-            )
-            status, reply_headers, body = await call(
-                "POST",
-                "/api/v1/ui/claim",
-                json={},
-                headers={"X-WebUI-Session": "token", "X-Evil": "1", "Cookie": "x=1"},
-            )
-            assert status == 200 and json.loads(body)["active"] is True
-            method, uri, headers, _, identity = fake.requests[-1]
-            assert headers["X-WebUI-Client"] == relay.client_id and fake.active == relay.client_id
-            assert identity == {
-                "q": 1,
-                "addr": "192.168.1.50",
-                "screen": A,
-                "session": "token",
-                "password": "",
+        async def call(
+            method: str,
+            path: str,
+            client: str = A,
+            real_ip: str = "192.168.1.50",
+            *,
+            headers: Mapping[str, str] | None = None,
+            json: object = None,
+            data: bytes | None = None,
+        ) -> tuple[int, dict[str, str], bytes]:
+            sent = {
+                "X-Real-IP": real_ip,
+                **({"X-WebUI-Client": client} if client else {}),
+                **(headers or {}),
             }
-            assert not {"X-Evil", "Cookie", "X-Real-IP"} & set(headers)
-            # The wire carried ciphertext: the token never travelled as itself, and the
-            # sealing counter never reached the browser.
-            raw_session, raw_password, raw_body = fake.wire[-1]
-            assert raw_session != "token" and raw_password == "" and raw_body, (
-                "the body was sealed too"
-            )
-            assert "X-OBBW-Enc" not in reply_headers
-            assert (
-                companion.screens.mux.claimed == {A} and (await companion.status())["owner"] is True
-            )
-
-            # A claimed screen's calls carry the shared id; another screen's keep its own.
-            status, _, _ = await call("GET", "/api/v1/time/zones?q=a%20b&x=1")
-            assert status == 200 and fake.requests[-1][1] == "/api/v1/time/zones?q=a%20b&x=1", (
-                "the URI goes as sent"
-            )
-            assert (
-                fake.requests[-1][4]["q"] == 2
-                and fake.requests[-1][2]["X-WebUI-Client"] == relay.client_id
-            )
-            status, _, body = await call("GET", "/api/v1/status/admin", client=B)
-            assert status == 409 and fake.requests[-1][2]["X-WebUI-Client"] == B
-            assert companion.screens.mux.claimed == {A}, (
-                "an unclaimed screen's refusal is not a takeover"
-            )
-
-            # Addresses as nginx gives them.
-            await call("GET", "/api/v1/auth", real_ip="fe80::1%eth0")
-            assert fake.requests[-1][4]["addr"] == "fe80::1"
-            await call("GET", "/api/v1/auth", real_ip="")
-            assert fake.requests[-1][4]["addr"] == "0.0.0.0"
-
-            # --- Firmware updates: their headers and 64 KiB chunks, the password sealed ---------
-            # The range itself travels as it is (its integrity is the session sha256).
-            ota = {
-                "X-OTA-Transfer": "t1",
-                "X-OTA-Offset": "0",
-                "X-OTA-Length": "65536",
-                "Content-Range": "bytes 0-65535/65536",
-                "Content-Type": "application/octet-stream",
-                "X-Device-Password": "pw",
-            }
-            status, _, body = await call("PATCH", "/api/v1/ota", data=bytes(65536), headers=ota)
-            assert status == 200 and json.loads(body)["received"] == 65536
-            assert all(fake.requests[-1][2][name] == value for name, value in ota.items())
-            _, raw_password, raw_body = fake.wire[-1]
-            assert raw_password != "pw" and len(raw_body) == 65536, "password sealed, range plain"
-
-            # --- Seals that do not open: refused, never delivered -------------------------------
-            fake.corrupt_body = True
-            status, _, body = await call("POST", "/api/v1/config", json={"patch": {"a": 1}})
-            assert status == 400 and json.loads(body)["error"] == "RELAY_INVALID"
-            fake.corrupt_body, fake.corrupt_reply = False, True
-            status, _, body = await call("GET", "/api/v1/auth")
-            assert status == 502 and fake.requests[-1][4] is not None, (
-                "a tampered answer is never delivered"
-            )
-            assert relay.key is None, "the next request makes a new relay session"
-            fake.corrupt_reply = False
-
-            # --- Downloads stream through untouched ---------------------------------------------------
-            status, headers, body = await call("GET", "/api/v1/debug/export")
-            assert status == 200 and len(body) == 4 * (32 * 1024 + 2) and body[:2] == b"\x1f\x8b"
-            assert (
-                headers["Content-Encoding"] == "gzip"
-                and "export.gz" in headers["Content-Disposition"]
-            )
-
-            # --- RELAY_STALE: one new session and the same request again ----------------------------
-            fake.stale_next = True
-            status, _, body = await call("POST", "/api/v1/config", json={"patch": {"a": 1}})
-            assert status == 202 and fake.handshakes == 3, (
-                "the tampered answer cost one session already"
-            )
-            assert (
-                json.loads(fake.requests[-1][3]) == {"patch": {"a": 1}}
-                and fake.requests[-1][4]["q"] == 1
-            )
-
-            # A counter at its end starts a new session first.
-            relay.counter = relay_module.COUNTER_MAX
-            await call("GET", "/api/v1/auth")
-            assert fake.handshakes == 4 and fake.requests[-1][4]["q"] == 1
-
-            # --- The link opens only when the controller says a feature needs it [D4] ------------------
-            link = companion.spawn(companion.run_link())
-            await asyncio.sleep(0.3)
-            assert companion.link == "down" and not [
-                r for r in fake.requests if r[1] == "/api/v1/companion/link"
-            ]
-            # Admin → Companion's actions may change the switches: the relay asks again.
-            fake.link = True
-            await call("POST", "/api/v1/companion/admin", json={"action": "switches", "lm": True})
-            await eventually(lambda: fake.handshakes == 5 and relay.link is True)
-            await eventually(lambda: any(r[1] == "/api/v1/companion/link" for r in fake.requests))
-            link.cancel()
-
-            # --- A direct browser took the Web UI ------------------------------------------------------
-            fake.active = DIRECT
-            status, _, body = await call("GET", "/api/v1/status/admin")
-            assert status == 409 and json.loads(body)["error"] == "UI_TAKEN_OVER"
-            assert companion.screens.mux.claimed == set()
-            status, _, _ = await call("POST", "/api/v1/ui/claim", json={})
-            assert (
-                status == 200
-                and fake.active == relay.client_id
-                and companion.screens.mux.claimed == {A}
-            )
-
-            # --- The Web UI through the companion turned off ---------------------------------------
-            fake.ui = False
-            assert (
-                await relay.handshake() == "disabled"
-                and (await companion.status())["relay"] == "disabled"
-            )
-            status, _, body = await call("GET", "/api/v1/status/admin")
-            assert status == 409 and json.loads(body)["error"] == "COMPANION_UI_OFF"
-            status, _, _ = await call("GET", "/api/v1/ui/ui-stream")
-            assert status == 409
-            async with browser.get(
-                base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
+            async with browser.request(
+                method, base + path, headers=sent, json=json, data=data
             ) as reply:
-                assert reply.status == 403
-            async with browser.get(
-                base + "/__companion/ui-gate", headers={"X-Original-URI": "/sw.js?v=1"}
-            ) as reply:
-                assert reply.status == 204, "the service worker keeps updating"
-            async with browser.get(base + "/__companion/ui-off") as reply:
-                page = await reply.text()
-                assert (
-                    reply.status == 200
-                    and f"http://127.0.0.1:{server.port}/" in page
-                    and "@STYLE@" not in page
-                )
-            fake.ui = True
-            assert await relay.handshake() == "ready"
-            async with browser.get(
-                base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
-            ) as reply:
-                assert reply.status == 204
+                return reply.status, dict(reply.headers), await reply.read()
 
-            # --- A failed relay handshake: passthrough, the link always on ----------------------------
-            fake.mode = "none"
-            assert await relay.handshake() == "passthrough" and relay.link is True
-            fake.active = B
-            status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
-            assert (
-                status == 200
-                and fake.requests[-1][4] is None
-                and fake.requests[-1][2]["X-WebUI-Client"] == B
-            )
-            fake.require_relay_stream = False
-            async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
-                await ws.send_str(json.dumps({"op": "bind", "client": B}))
-                assert json.loads((await ws.receive()).data)["type"] == "home"
-                assert fake.streams[-1].identity is None, "the browser's own session, unsigned"
-            async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
-                await ws.send_str(json.dumps({"op": "bind", "client": A}))
-                message = await ws.receive()
-                assert message.type is aiohttp.WSMsgType.CLOSE and message.data == 4001, (
-                    "close codes pass through"
-                )
+        # --- No controller yet -------------------------------------------------------
+        status, _, body = await call("GET", "/api/v1/status/admin")
+        assert status == 503
+        assert json.loads(body)["error"] == "NO_CONTROLLER"
 
-            # --- A forged answer, an unsigned refusal, then a real erase ----------------------------------
-            fake.mode = "bad_proof"
-            assert await relay.handshake() == "passthrough" and companion.store.pairing()
-            fake.mode = "unknown"
-            await relay.handshake()
-            assert companion.pairing.state == "not_recognized" and companion.store.pairing(), (
-                "unsigned: nothing erased"
-            )
-            fake.mode = "ok"
-            assert await relay.handshake() == "ready" and companion.pairing.state == "paired"
-            fake.mode = "bad_erase"
-            await relay.handshake()
-            assert companion.store.pairing() and relay.mode == "passthrough"
-            fake.mode = "forgotten"
-            await relay.handshake()
-            assert companion.store.pairing() is None and companion.pairing.state == "unpaired"
-            assert relay.mode == "passthrough" and relay.link is None
+        # --- Not paired: the plain proxy it always was -----------------------------------
+        companion.pairing.auto = False
+        companion.set_controller(target)
+        await asyncio.sleep(0.1)
+        assert relay.mode == "passthrough"
+        assert (await companion.status())["relay"] == "passthrough"
+        fake.active = A
+        status, _, body = await call("GET", "/api/v1/status/admin", headers={"Cookie": "x=1"})
+        _, _, headers, _, identity = fake.requests[-1]
+        assert status == 200
+        assert identity is None
+        assert headers["X-WebUI-Client"] == A
+        assert "Cookie" not in headers
+        assert "X-Real-IP" not in headers
+        assert "X-OBBW-Relay" not in headers
 
-            async with browser.get(base + "/__companion/status") as reply:
-                status = await reply.json()
-            assert (
-                status["relay"] == "passthrough"
-                and status["screens"] == 0
-                and status["paired"] is False
-            )
-            assert set(status["views"]) == {
-                "home",
-                "settings",
-                "diagnostic",
-                "log",
-                "history",
-                "stats",
-            }
-            await pages.close()
-            await relay.close()
+        # --- Paired: one relay session, every call signed and sealed --------------------------
+        companion.store.save_pairing(SECRET, "Cafe Bar")
+        companion.pairing.state = "paired"
+        assert await relay.handshake() == "ready"
+        assert fake.handshakes == 1
+        assert (await companion.status())["relay"] == "ready", "no feature needs the link"
+        assert relay.link is False, "no feature needs the link"
+        status, reply_headers, body = await call(
+            "POST",
+            "/api/v1/ui/claim",
+            json={},
+            headers={"X-WebUI-Session": "token", "X-Evil": "1", "Cookie": "x=1"},
+        )
+        assert status == 200
+        assert json.loads(body)["active"] is True
+        _, _, headers, _, identity = fake.requests[-1]
+        assert headers["X-WebUI-Client"] == relay.client_id
+        assert fake.active == relay.client_id
+        assert identity == {
+            "q": 1,
+            "addr": "192.168.1.50",
+            "screen": A,
+            "session": "token",
+            "password": "",
+        }
+        assert not {"X-Evil", "Cookie", "X-Real-IP"} & set(headers)
+        # The wire carried ciphertext: the token never travelled as itself, and the
+        # sealing counter never reached the browser.
+        raw_session, raw_password, raw_body = fake.wire[-1]
+        assert raw_session != "token", "the body was sealed too"
+        assert raw_password == "", "the body was sealed too"
+        assert raw_body, "the body was sealed too"
+        assert "X-OBBW-Enc" not in reply_headers
+        assert companion.screens.mux.claimed == {A}
+        assert (await companion.status())["owner"] is True
+
+        # A claimed screen's calls carry the shared id; another screen's keep its own.
+        status, _, _ = await call("GET", "/api/v1/time/zones?q=a%20b&x=1")
+        assert status == 200, "the URI goes as sent"
+        assert fake.requests[-1][1] == "/api/v1/time/zones?q=a%20b&x=1", "the URI goes as sent"
+        assert relayed(fake)["q"] == 2
+        assert fake.requests[-1][2]["X-WebUI-Client"] == relay.client_id
+        status, _, body = await call("GET", "/api/v1/status/admin", client=B)
+        assert status == 409
+        assert fake.requests[-1][2]["X-WebUI-Client"] == B
+        assert companion.screens.mux.claimed == {A}, (
+            "an unclaimed screen's refusal is not a takeover"
+        )
+
+        # Addresses as nginx gives them.
+        await call("GET", "/api/v1/auth", real_ip="fe80::1%eth0")
+        assert relayed(fake)["addr"] == "fe80::1"
+        await call("GET", "/api/v1/auth", real_ip="")
+        assert relayed(fake)["addr"] == "0.0.0.0"
+
+        # --- Firmware updates: their headers and 64 KiB chunks, the password sealed ---------
+        # The range itself travels as it is (its integrity is the session sha256).
+        ota = {
+            "X-OTA-Transfer": "t1",
+            "X-OTA-Offset": "0",
+            "X-OTA-Length": "65536",
+            "Content-Range": "bytes 0-65535/65536",
+            "Content-Type": "application/octet-stream",
+            "X-Device-Password": "pw",
+        }
+        status, _, body = await call("PATCH", "/api/v1/ota", data=bytes(65536), headers=ota)
+        assert status == 200
+        assert json.loads(body)["received"] == 65536
+        assert all(fake.requests[-1][2][name] == value for name, value in ota.items())
+        _, raw_password, raw_body = fake.wire[-1]
+        assert raw_password != "pw", "password sealed, range plain"
+        assert len(raw_body) == 65536, "password sealed, range plain"
+
+        # --- Seals that do not open: refused, never delivered -------------------------------
+        fake.corrupt_body = True
+        status, _, body = await call("POST", "/api/v1/config", json={"patch": {"a": 1}})
+        assert status == 400
+        assert json.loads(body)["error"] == "RELAY_INVALID"
+        fake.corrupt_body, fake.corrupt_reply = False, True
+        status, _, body = await call("GET", "/api/v1/auth")
+        assert status == 502, "a tampered answer is never delivered"
+        assert last_identity(fake) is not None, "a tampered answer is never delivered"
+        assert relay.key is None, "the next request makes a new relay session"
+        fake.corrupt_reply = False
+
+        # --- Downloads stream through untouched ---------------------------------------------------
+        status, headers, body = await call("GET", "/api/v1/debug/export")
+        assert status == 200
+        assert len(body) == 4 * (32 * 1024 + 2)
+        assert body[:2] == b"\x1f\x8b"
+        assert headers["Content-Encoding"] == "gzip"
+        assert "export.gz" in headers["Content-Disposition"]
+
+        # --- RELAY_STALE: one new session and the same request again ----------------------------
+        fake.stale_next = True
+        status, _, body = await call("POST", "/api/v1/config", json={"patch": {"a": 1}})
+        assert status == 202, "the tampered answer cost one session already"
+        assert fake.handshakes == 3, "the tampered answer cost one session already"
+        assert json.loads(fake.requests[-1][3]) == {"patch": {"a": 1}}
+        assert relayed(fake)["q"] == 1
+
+        # A counter at its end starts a new session first.
+        relay.counter = relay_module.COUNTER_MAX
+        await call("GET", "/api/v1/auth")
+        assert fake.handshakes == 4
+        assert relayed(fake)["q"] == 1
+
+        # --- The link opens only when the controller says a feature needs it [D4]
+        link = companion.spawn(companion.run_link())
+        await asyncio.sleep(0.3)
+        assert companion.link == "down"
+        assert not [r for r in fake.requests if r[1] == "/api/v1/companion/link"]
+        # Admin → Companion's actions may change the switches: the relay asks again.
+        fake.link = True
+        await call("POST", "/api/v1/companion/admin", json={"action": "switches", "lm": True})
+        await eventually(lambda: fake.handshakes == 5 and relay.link is True)
+        await eventually(lambda: any(r[1] == "/api/v1/companion/link" for r in fake.requests))
+        link.cancel()
+
+        # --- A direct browser took the Web UI
+        fake.active = DIRECT
+        status, _, body = await call("GET", "/api/v1/status/admin")
+        assert status == 409
+        assert json.loads(body)["error"] == "UI_TAKEN_OVER"
+        assert companion.screens.mux.claimed == set()
+        status, _, _ = await call("POST", "/api/v1/ui/claim", json={})
+        assert status == 200
+        assert fake.active == relay.client_id
+        assert companion.screens.mux.claimed == {A}
+
+        # --- The Web UI through the companion turned off ---------------------------------------
+        fake.ui = False
+        assert await relay.handshake() == "disabled"
+        assert (await companion.status())["relay"] == "disabled"
+        status, _, body = await call("GET", "/api/v1/status/admin")
+        assert status == 409
+        assert json.loads(body)["error"] == "COMPANION_UI_OFF"
+        status, _, _ = await call("GET", "/api/v1/ui/ui-stream")
+        assert status == 409
+        async with browser.get(
+            base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
+        ) as reply:
+            assert reply.status == 403
+        async with browser.get(
+            base + "/__companion/ui-gate", headers={"X-Original-URI": "/sw.js?v=1"}
+        ) as reply:
+            assert reply.status == 204, "the service worker keeps updating"
+        async with browser.get(base + "/__companion/ui-off") as reply:
+            page = await reply.text()
+            assert reply.status == 200
+            assert f"http://127.0.0.1:{server.port}/" in page
+            assert "@STYLE@" not in page
+        fake.ui = True
+        assert await relay.handshake() == "ready"
+        async with browser.get(
+            base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
+        ) as reply:
+            assert reply.status == 204
+
+        # --- A failed relay handshake: passthrough, the link always on ----------------------------
+        fake.mode = "none"
+        assert await relay.handshake() == "passthrough"
+        assert relay.link is True
+        fake.active = B
+        status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
+        assert status == 200
+        assert last_identity(fake) is None
+        assert fake.requests[-1][2]["X-WebUI-Client"] == B
+        fake.require_relay_stream = False
+        async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
+            await ws.send_str(json.dumps({"op": "bind", "client": B}))
+            assert json.loads((await ws.receive()).data)["type"] == "home"
+            assert fake.streams[-1].identity is None, "the browser's own session, unsigned"
+        async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
+            await ws.send_str(json.dumps({"op": "bind", "client": A}))
+            message = await ws.receive()
+            assert message.type is aiohttp.WSMsgType.CLOSE, "close codes pass through"
+            assert message.data == 4001, "close codes pass through"
+
+        # --- A forged answer, an unsigned refusal, then a real erase
+        fake.mode = "bad_proof"
+        assert await relay.handshake() == "passthrough"
+        assert companion.store.pairing()
+        fake.mode = "unknown"
+        await relay.handshake()
+        assert companion.pairing.state == "not_recognized", "unsigned: nothing erased"
+        assert companion.store.pairing(), "unsigned: nothing erased"
+        fake.mode = "ok"
+        assert await relay.handshake() == "ready"
+        assert companion.pairing.state == "paired"
+        fake.mode = "bad_erase"
+        await relay.handshake()
+        assert companion.store.pairing()
+        assert relay.mode == "passthrough"
+        fake.mode = "forgotten"
+        await relay.handshake()
+        assert companion.store.pairing() is None
+        assert companion.pairing.state == "unpaired"
+        assert relay.mode == "passthrough"
+        assert relay.link is None
+
+        async with browser.get(base + "/__companion/status") as reply:
+            facts = await reply.json()
+        assert facts["relay"] == "passthrough"
+        assert facts["screens"] == 0
+        assert facts["paired"] is False
+        assert set(facts["views"]) == {
+            "home",
+            "settings",
+            "diagnostic",
+            "log",
+            "history",
+            "stats",
+        }
+        await pages.close()
+        await relay.close()
     await server.close()
-    print(
-        "Companion relay: handshake, signing, sealing, whitelist, client id, stale retry, erase, "
-        "passthrough and switch OK"
-    )
 
 
-asyncio.run(main())
+def test_relay(tmp_path: Path) -> None:
+    """Companion relay: handshake, signing, sealing, whitelist, client id, stale retry, erase,
+    passthrough and switch."""
+    asyncio.run(relay_scenario(tmp_path))

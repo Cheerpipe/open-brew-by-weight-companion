@@ -1,4 +1,5 @@
-"""The companion service: pairing, the Web UI relay, the controller link, the La Marzocco route and its pages.
+"""The companion service: pairing, the Web UI relay, the controller link, the La Marzocco route
+and its pages.
 
 It runs on its own thread and event loop inside the gateway supervisor, which
 tells it the controller's address on start and on every mDNS announcement.
@@ -7,6 +8,8 @@ updates, through a Unix socket.
 """
 
 import asyncio
+import contextlib
+import functools
 import hashlib
 import html
 import json
@@ -16,13 +19,13 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, TypeGuard, overload
 
 import aiohttp
 from aiohttp import web
 from cryptography.exceptions import InvalidTag
 
-from . import VERSION, crypto, dashboard, log
-from . import stats
+from . import VERSION, crypto, dashboard, log, stats
 from .archive import FETCH_MAX, Archive, Unavailable
 from .lamarzocco import LaMarzocco
 from .link import Erased, LinkClosed, open_link
@@ -31,6 +34,12 @@ from .pairing import Pairing
 from .relay import CLIENT_ID, Relay, address
 from .screens import Screens
 from .store import Store, offload
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine, Mapping
+
+    from .link import FrameCodec
+    from .store import Account
 
 HERE = Path(__file__).resolve().parent
 BACKOFF_S = (0, 5, 15, 60, 300)  # The first reopen is immediate; then it backs off.
@@ -66,28 +75,95 @@ HISTORY_TYPES = frozenset(
 )
 SERIAL_FORBIDDEN = set("\r\n:\\/")
 
+# The controller as the supervisor names it: (name, (ip, port)).
+type Target = tuple[str, tuple[str, int]]
+# One link frame, either way, as JSON.
+type Frame = dict[str, object]
+type Route = Literal["direct", "companion"]
+
+
+class Config(TypedDict):
+    """What the companion reads of the gateway's configuration."""
+
+    name: str
+    log_retention_days: int
+    log_retention_mb: int
+
+
+class ControllerCfg(TypedDict):
+    """The controller's `cfg` switches for La Marzocco."""
+
+    lm: bool
+    conn: Literal["ws", "api"]
+    observe: bool
+
+
+class ArchiveQuery(TypedDict):
+    """An archive tail's sort, direction, filters and keyset cursor, as the page asked."""
+
+    sort: str
+    dir: str
+    bad: bool
+    all: bool
+    result: list[str]
+    preset: list[int]
+    scale: list[int]
+    types: list[str]
+    cursor: tuple[int, ...] | None
+
+
+class LaMarzoccoClient(Protocol):
+    """What the companion uses of its La Marzocco client (lamarzocco.LaMarzocco)."""
+
+    @property
+    def sub(self) -> bool: ...
+    @property
+    def up(self) -> bool: ...
+    @property
+    def ep(self) -> int: ...
+    @property
+    def tok(self) -> int: ...
+    @property
+    def refused(self) -> bool: ...
+    def configure(self, account: Account | None, conn: str, observe: bool, /) -> None: ...
+    def erase(self) -> None: ...
+    def stop(self) -> None: ...
+    def signed_in_for(self, account: Account, /) -> bool: ...
+    def rejected_for(self, account: Account, /) -> bool: ...
+    async def read(self) -> tuple[int, dict[str, object] | None, int]: ...
+    async def command(self, command_id: int, op: str, value: int | None, /) -> int: ...
+
 
 class Companion:
-    def __init__(self, name, data, http, upstream):
+    def __init__(
+        self,
+        name: str,
+        data: Path,
+        http: aiohttp.ClientSession,
+        upstream: Callable[[Store, Companion], LaMarzoccoClient],
+    ) -> None:
         self.name, self.http = name, http
         self.store = Store(data)
         self.id, self.key = self.store.identity()
         self.public = crypto.public_point(self.key)
-        self.controller = None  # (name, (ip, port)) from the supervisor
-        self.device_name = None  # The controller's own name, from its `dev` frame.
-        self.device_id = (
-            None  # Its stable id (the webhook's deviceId), the log store's key, kept there.
-        )
-        self.tasks = set()
+        self.controller: Target | None = None  # From the supervisor.
+        self.device_name: str | None = None  # The controller's own name, from its `dev` frame.
+        # Its stable id (the webhook's deviceId), the log store's key, kept there.
+        self.device_id: str | None = None
+        self.tasks: set[asyncio.Task[Any]] = set()
         self.wake = asyncio.Event()
         self.pairing = Pairing(self)
         self.link, self.link_reason, self.failures = "down", "", 0
-        self.ws = self.outbox = None
-        self.route, self.hold, self.held = "direct", False, []
+        self.ws: aiohttp.ClientWebSocketResponse | None = None
+        self.outbox: asyncio.Queue[Frame] | None = None
+        self.route: Route = "direct"
+        self.hold = False
+        self.held: list[Frame] = []
         self.ping_now = asyncio.Event()
         self.heard_at = 0.0  # time.monotonic() of the last controller frame.
-        self.unknown_frames, self.unknown_kinds = 0, set()
-        self.cfg = {"lm": False, "conn": "ws", "observe": True}
+        self.unknown_frames = 0
+        self.unknown_kinds: set[str] = set()
+        self.cfg: ControllerCfg = {"lm": False, "conn": "ws", "observe": True}
         self.logs = LogStore(data)
         self.log_on, self.log_subscribed, self.log_identified, self.configured = (
             False,
@@ -95,44 +171,56 @@ class Companion:
             False,
             False,
         )
-        self.log_error, self.log_dropped = (
-            None,
-            0,
-        )  # Why the store is closed; frames that could not be keyed.
-        self.log_grants = {}  # sha256 of a Web UI session -> when the controller last accepted it.
-        self.log_denials = {}  # ...and when it last refused one, so a refused page does not keep asking.
+        # Why the store is closed; frames that could not be keyed.
+        self.log_error: str | None = None
+        self.log_dropped = 0
+        # sha256 of a Web UI session -> when the controller last accepted it.
+        self.log_grants: dict[str, float] = {}
+        # ...and when it last refused one, so a refused page does not keep asking.
+        self.log_denials: dict[str, float] = {}
         self.log_unreachable = 0.0  # When the controller last could not answer that question.
         self.retention = (RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT)
         self.archive = Archive(self)  # The shot and activation archive, in the same store.
-        # Sync requests waiting for the end of a sync hold, and the hold the controller's `hold` frames
-        # name: True during a shot (nothing crosses the link), None until the session's first one.
-        self.sync_due, self.sync_hold = {}, None
-        self.creds_gen = None  # Generation whose sign-in result the controller still waits for.
-        self.full_ep, self.full_task = None, None
-        self.expect, self.confirm_timer = None, None
+        # Sync requests waiting for the end of a sync hold, and the hold the controller's `hold`
+        # frames name: True during a shot (nothing crosses the link), None until the session's
+        # first one.
+        self.sync_due: dict[str, Frame] = {}
+        self.sync_hold: bool | None = None
+        # Generation whose sign-in result the controller still waits for.
+        self.creds_gen: int | None = None
+        self.full_ep: int | None = None
+        self.full_task: asyncio.Task[None] | None = None
+        self.expect: tuple[str, int | None] | None = None
+        self.confirm_timer: asyncio.TimerHandle | None = None
         self.command_lock = asyncio.Lock()
-        self.reported = None
+        self.reported: tuple[bool, int, bool] | None = None
         self.lm = upstream(self.store, self)
         self.relay = Relay(self)
         self.screens = Screens(self, self.relay)
 
-    def spawn(self, coroutine):
+    def spawn[T](self, coroutine: Coroutine[object, None, T]) -> asyncio.Task[T]:
         task = asyncio.create_task(coroutine)
         self.tasks.add(task)
         task.add_done_callback(self._done)
         return task
 
-    def _done(self, task):
+    def _done(self, task: asyncio.Task[Any]) -> None:
         self.tasks.discard(task)
         if not task.cancelled() and task.exception():
             log("task failed:\n" + "".join(traceback.format_exception(task.exception())))
 
     # --- Controller ----------------------------------------------------------
-    def base_url(self, scheme="http"):
-        ip, port = self.controller[1]
+    def _target(self) -> Target:
+        """The controller in use; asked for only once the supervisor named one."""
+        if self.controller is None:
+            raise RuntimeError("no controller yet")
+        return self.controller
+
+    def base_url(self, scheme: str = "http") -> str:
+        ip, port = self._target()[1]
         return f"{scheme}://{ip}" + ("" if port == 80 else f":{port}")
 
-    def set_controller(self, target):
+    def set_controller(self, target: Target | None) -> None:
         """The controller in use, on start and on each of its mDNS announcements."""
         if target is None:
             return
@@ -140,15 +228,17 @@ class Companion:
         self.controller = target
         if moved and self.ws is not None:
             log("the controller has a new address; reopening the link")
-            self.spawn(self.ws.close())
+            _ = self.spawn(self.ws.close())
         elif self.ws is not None:
             self.poke()  # It announced itself: a socket that died with a restart is found now.
         if self.ws is None:
             self.wake.set()  # Reconnect now instead of waiting out the backoff.
         self.pairing.start()
-        self.spawn(self.relay.handshake())  # Also how a forgotten companion learns it.
+        _ = self.spawn(self.relay.handshake())  # Also how a forgotten companion learns it.
 
-    async def controller_request(self, method, url, body=None):
+    async def controller_request(
+        self, method: str, url: str, body: Mapping[str, object] | None = None
+    ) -> tuple[int | None, dict[str, object]]:
         """(status, JSON object) from the controller, or (None, {}) when it did not answer."""
         try:
             async with self.http.request(
@@ -159,23 +249,24 @@ class Companion:
                 except ValueError:
                     data = None
                 return reply.status, data if isinstance(data, dict) else {}
-        except aiohttp.ClientError, asyncio.TimeoutError, OSError:
+        except aiohttp.ClientError, TimeoutError, OSError:
             return None, {}
 
-    async def paired(self, secret):
+    async def paired(self, secret: bytes) -> None:
         await offload(self.store.erase_pairing)
         self.lm.erase()
-        await offload(self.store.save_pairing, secret, self.controller[0])
-        log(f"paired with {self.controller[0]}")
+        await offload(self.store.save_pairing, secret, self._target()[0])
+        log(f"paired with {self._target()[0]}")
         if self.ws is not None:
-            self.spawn(self.ws.close())
+            _ = self.spawn(self.ws.close())
         self.wake.set()
-        self.spawn(self.relay.handshake())
+        _ = self.spawn(self.relay.handshake())
 
-    async def erase(self, why, history=True):
-        """Delete the pairing, the La Marzocco account and its installation key and, unless `history` is
-        false, the log history and the archive (Forget, D2). The page's erase of a pairing the controller
-        no longer recognizes keeps both: pairing that controller again reattaches to them (S4)."""
+    async def erase(self, why: str, history: bool = True) -> None:
+        """Delete the pairing, the La Marzocco account and its installation key and, unless
+        `history` is false, the log history and the archive (Forget, D2). The page's erase of a
+        pairing the controller no longer recognizes keeps both: pairing that controller again
+        reattaches to them (S4)."""
         await offload(self.store.erase_pairing)
         self.lm.erase()
         self.creds_gen = None
@@ -187,36 +278,39 @@ class Companion:
         if history:
             await self.erase_log()
             log(
-                f"{why}; its pairing, La Marzocco account, installation key, log history and archive are erased"
+                f"{why}; its pairing, La Marzocco account, installation key, log history and "
+                "archive are erased"
             )
         else:
             log(
-                f"{why}; its pairing, La Marzocco account and installation key are erased, the log history and "
-                "the archive are kept"
+                f"{why}; its pairing, La Marzocco account and installation key are erased, "
+                "the log history and the archive are kept"
             )
         self.wake.set()
 
-    def not_recognized(self):
-        """The controller does not know this companion, unsigned: stop using the account, keep every secret."""
+    def not_recognized(self) -> None:
+        """The controller does not know this companion, unsigned: stop using the account, keep
+        every secret."""
         if self.pairing.state == "paired":
             self.pairing.state = "not_recognized"
             self.lm.configure(None, self.cfg["conn"], self.cfg["observe"])
             log("the controller does not recognize this companion; La Marzocco is stopped")
 
-    async def recognized(self):
+    async def recognized(self) -> None:
         """A relay session proved the pairing: a controller that did not know us does again."""
         if self.pairing.state == "not_recognized":
             self.pairing.state = "paired"
             await self._apply_account()
 
-    def link_wanted(self, wanted):
-        """The relay learned whether a feature needs the link [D4]; with no relay it always opens."""
+    def link_wanted(self, wanted: bool | None) -> None:
+        """The relay learned whether a feature needs the link [D4]; with no relay it always
+        opens."""
         if wanted is False and self.ws is not None:
             log("the controller needs no link now; closing it")
-            self.spawn(self.ws.close())
+            _ = self.spawn(self.ws.close())
         self.wake.set()
 
-    def poke(self):
+    def poke(self) -> None:
         """Fresh evidence the controller answered (an announcement, a relay handshake):
         ping at once, so a link whose socket died with its restart — a reboot sends no
         FIN or RST — is found now, not at the next ping cadence. Also during a sync hold: a
@@ -226,7 +320,7 @@ class Companion:
             self.post({"t": "ping", "up": self.lm.up})
 
     # --- Link ----------------------------------------------------------------
-    async def run_link(self):
+    async def run_link(self) -> None:
         while True:
             try:
                 reason = await self._link()
@@ -250,17 +344,16 @@ class Companion:
                 f"link closed ({reason}){age}; reopening in {delay} s, "
                 "or as soon as the controller announces itself"
             )
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.wake.wait(), delay)
-            except asyncio.TimeoutError:
-                pass
 
-    async def _link(self):
+    async def _link(self) -> str | None:
         """One link attempt and its session: why it ended, or None to look again at once."""
         pairing = await offload(self.store.pairing)
         if self.controller is not None and pairing is not None and self.relay.link is None:
             # Nobody answered the relay handshake yet (the controller was off when this companion
-            # started): ask again on the link's backoff, since a manual address hears no announcement.
+            # started): ask again on the link's backoff, since a manual address hears no
+            # announcement.
             await self.relay.handshake()
             if self.relay.link is None:
                 log("the controller did not answer the relay handshake")
@@ -291,17 +384,18 @@ class Companion:
         self.pairing.state = "paired"
         return await self._session(ws, codec)
 
-    async def _session(self, ws, codec):
+    async def _session(self, ws: aiohttp.ClientWebSocketResponse, codec: FrameCodec) -> str:
         self.ws, self.outbox = ws, asyncio.Queue()
         self.link, self.link_reason = "open", ""
         self.hold, self.held, self.full_ep, self.reported = False, [], None, None
-        # This session's cfg and dev re-arm the logsub; the last session's cfg says nothing about this one.
+        # This session's cfg and dev re-arm the logsub; the last session's cfg says nothing about
+        # this one.
         self.log_subscribed = self.log_identified = self.configured = False
         self.sync_due, self.sync_hold = {}, None
         self.unknown_frames = 0
         self.unknown_kinds.clear()
         self.heard_at = 0.0
-        log(f"link open to {self.controller[0]}")
+        log(f"link open to {self._target()[0]}")
         writer = self.spawn(self._writer(ws, codec, self.outbox))
         pinger = self.spawn(self._pinger())
         try:
@@ -329,7 +423,7 @@ class Companion:
             await ws.close()
 
     @staticmethod
-    def _socket_reason(message, ws):
+    def _socket_reason(message: aiohttp.WSMessage, ws: aiohttp.ClientWebSocketResponse) -> str:
         """Why the socket ended. aiohttp converts a transport death into a CLOSED
         or ERROR message instead of raising, with a code it chose itself."""
         if message.type is aiohttp.WSMsgType.ERROR:
@@ -339,15 +433,15 @@ class Companion:
             return "SOCKET_RESET" if ws.close_code in (None, 1006) else "SOCKET_EOF"
         return "PROTOCOL"
 
-    def post(self, frame):
+    def post(self, frame: Frame) -> bool:
         if self.outbox is None:
             return False
         self.outbox.put_nowait(frame)
         return True
 
-    def post_sync(self, frame, key):
-        """A sync request (S17): sent at once outside a sync hold, so none crosses Wi-Fi during a shot;
-        otherwise it waits (one per `key`, the newest) for the hold's end."""
+    def post_sync(self, frame: Frame, key: str) -> bool:
+        """A sync request (S17): sent at once outside a sync hold, so none crosses Wi-Fi during a
+        shot; otherwise it waits (one per `key`, the newest) for the hold's end."""
         if self.outbox is None:
             return False
         if self.sync_hold is False:
@@ -355,15 +449,16 @@ class Companion:
         self.sync_due[key] = frame
         return True
 
-    def sync_blocked(self):
-        """Sync cannot flow now: the link is down, a hold is on (or not known yet), or a request waits."""
+    def sync_blocked(self) -> bool:
+        """Sync cannot flow now: the link is down, a hold is on (or not known yet), or a request
+        waits."""
         return self.outbox is None or self.sync_hold is not False or bool(self.sync_due)
 
-    def _hold_state(self, frame):
-        """The controller sends `hold` whenever a sync hold starts or ends, on every build: during one
-        nothing crosses the link either way (no ping, no sync request) and both sides trust it; at its
-        end the waiting requests go and a ping checks the link at once. A ping's answer carries the
-        store epochs, the replica's heartbeat."""
+    def _hold_state(self, frame: Frame) -> None:
+        """The controller sends `hold` whenever a sync hold starts or ends, on every build: during
+        one nothing crosses the link either way (no ping, no sync request) and both sides trust it;
+        at its end the waiting requests go and a ping checks the link at once. A ping's answer
+        carries the store epochs, the replica's heartbeat."""
         if frame.get("t") != "hold":
             return
         was, self.sync_hold = self.sync_hold, frame.get("sync") is True
@@ -376,7 +471,9 @@ class Companion:
         if "sh" in frame or "hi" in frame:
             self.archive.on_heartbeat(frame)
 
-    async def _writer(self, ws, codec, outbox):
+    async def _writer(
+        self, ws: aiohttp.ClientWebSocketResponse, codec: FrameCodec, outbox: asyncio.Queue[Frame]
+    ) -> None:
         while True:
             frame = await outbox.get()
             try:
@@ -390,10 +487,10 @@ class Companion:
                 await ws.close()
                 return
 
-    async def _pinger(self):
-        """A ping when the session opens, whenever `up` changes or the route turns to the companion,
-        and then every PING_S of the route; none during a sync hold, and one the moment it ends (only a
-        missing answer to that one finds a link lost during the shot)."""
+    async def _pinger(self) -> None:
+        """A ping when the session opens, whenever `up` changes or the route turns to the
+        companion, and then every PING_S of the route; none during a sync hold, and one the moment
+        it ends (only a missing answer to that one finds a link lost during the shot)."""
         loop = asyncio.get_running_loop()
         while True:
             while self.sync_hold:
@@ -406,7 +503,7 @@ class Companion:
                 self.ping_now.clear()
                 try:
                     await asyncio.wait_for(self.ping_now.wait(), max(0.0, deadline - loop.time()))
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     self._stalled(loop.time() - deadline)
                     break
                 if self.sync_hold:
@@ -418,11 +515,11 @@ class Companion:
                     route, deadline = self.route, loop.time() + PING_S[self.route]
 
     @staticmethod
-    def _stalled(late):
+    def _stalled(late: float) -> None:
         if late >= STALL_WARN_S:
             log(f"the event loop stood still {late:.0f} s before a ping")
 
-    async def _on_frame(self, frame):
+    async def _on_frame(self, frame: Frame) -> None:
         self.heard_at = time.monotonic()
         self._hold_state(frame)
         kind = frame.get("t")
@@ -433,7 +530,8 @@ class Companion:
             if len(self.unknown_kinds) < 8 and str(kind)[:32] not in self.unknown_kinds:
                 self.unknown_kinds.add(str(kind)[:32])
                 log(
-                    f"ignored a frame this version does not know ({str(kind)[:32]!r}); update the companion"
+                    f"ignored a frame this version does not know ({str(kind)[:32]!r}); "
+                    "update the companion"
                 )
         elif kind == "cfg":
             self.cfg = {
@@ -477,14 +575,14 @@ class Companion:
             command_id, op, value = frame.get("id"), frame.get("op"), frame.get("v")
             if type(command_id) is not int or command_id < 1:
                 raise LinkClosed("PROTOCOL", "command without an id")
-            if op not in ("temp", "standby", "on", "refresh") or (
-                op == "temp" and (type(value) is not int or not 0 < value < 2000)
-            ):
-                self.post({"t": "res", "id": command_id, "r": "failed", "http": 0})
+            if op == "temp" and type(value) is int and 0 < value < 2000:
+                _ = self.spawn(self._command(command_id, "temp", value))
+            elif isinstance(op, str) and op in ("standby", "on", "refresh"):
+                _ = self.spawn(self._command(command_id, op, None))  # These carry no value.
             else:
-                self.spawn(self._command(command_id, op, value))
+                self.post({"t": "res", "id": command_id, "r": "failed", "http": 0})
 
-    def _set_route(self, route):
+    def _set_route(self, route: Route) -> None:
         if route == self.route:
             return
         self.route = route
@@ -496,7 +594,7 @@ class Companion:
         else:
             self.held = []  # Nothing forwards on the direct route.
 
-    def _set_hold(self, on):
+    def _set_hold(self, on: bool) -> None:
         self.hold = on
         if not on and self.held:
             held, self.held = self.held, []
@@ -504,16 +602,21 @@ class Companion:
                 if frame["ep"] == self.lm.ep:  # An older subscription says nothing new.
                     self.post(frame)
 
-    def _device_name(self, name):
+    def _device_name(self, name: object) -> None:
         """The controller names itself when the link opens and again after a rename."""
         # isprintable() first: it is False for lone surrogates, whose encode() would raise.
-        if isinstance(name, str) and name.isprintable() and 0 < len(name.encode()) <= 32:
-            if name != self.device_name:
-                log(f"the controller is named '{name}'")
-                self.device_name = name
+        if (
+            isinstance(name, str)
+            and name.isprintable()
+            and 0 < len(name.encode()) <= 32
+            and name != self.device_name
+        ):
+            log(f"the controller is named '{name}'")
+            self.device_name = name
 
-    async def _device_id(self, value):
-        """The controller's stable id (its MAC text): the log store's key, kept across restarts."""
+    async def _device_id(self, value: object) -> None:
+        """The controller's stable id (its MAC text): the log store's key, kept across
+        restarts."""
         if not isinstance(value, str) or not value.isprintable() or not 0 < len(value) <= 24:
             return
         if value != self.device_id:
@@ -528,14 +631,14 @@ class Companion:
         self.archive.start()
 
     # --- Diagnostic log ---------------------------------------------------------
-    def _log_usable(self):
+    def _log_usable(self) -> bool:
         """A store that opened: a companion whose log store failed keeps every
         other feature (the relay, La Marzocco) and simply stores no history."""
         return self.logs.connection is not None
 
-    async def open_log(self):
-        """The log store and what it remembers: the controller's id, its archive switch and the sessions
-        it accepted."""
+    async def open_log(self) -> None:
+        """The log store and what it remembers: the controller's id, its archive switch and the
+        sessions it accepted."""
         try:
             await self.logs.open()
             self.device_id = await self.logs.meta("device")
@@ -549,7 +652,7 @@ class Companion:
             self.log_error = str(error)
             log(f"the log store could not open ({error}); the log history is disabled")
 
-    async def erase_log(self):
+    async def erase_log(self) -> None:
         if self._log_usable():
             try:
                 await self.logs.erase()
@@ -557,7 +660,7 @@ class Companion:
                 log(f"the log history could not be erased ({error})")
         self.device_id, self.log_grants, self.log_denials = None, {}, {}
 
-    async def _log_subscribe(self, resync=False):
+    async def _log_subscribe(self, resync: bool = False) -> None:
         """`logsub` with the stored cursor, once per session after cfg turned the
         stream on and `dev` named the controller (so the cursor is that
         controller's); `resync` asks again from it after a frame was lost.
@@ -576,12 +679,13 @@ class Companion:
             boot, after = await self.logs.cursor(self.device_id) or (0, 0)
         except sqlite3.Error as error:
             log(
-                f"the log store could not read its cursor ({error}); the log stream waits for the next link"
+                f"the log store could not read its cursor ({error}); "
+                "the log stream waits for the next link"
             )
             return
         self.post_sync({"t": "logsub", "on": True, "boot": boot, "after": after}, "logsub")
 
-    async def _on_log(self, frame):
+    async def _on_log(self, frame: Frame) -> None:
         """One page of the controller's log, stored with the hole it names.
 
         A log frame never closes the link: text out of bounds is cut, a frame
@@ -591,28 +695,33 @@ class Companion:
         """
         if not self._log_usable() or self.device_id is None:
             return  # A closed store logged why once; no id means no subscription either.
-        rows = _log_rows(frame)
-        if rows is None:
-            self.log_dropped += len(frame["e"]) if isinstance(frame.get("e"), list) else 1
+        parsed = _log_rows(frame)
+        if parsed is None:
+            events = frame.get("e")
+            self.log_dropped += len(events) if isinstance(events, list) else 1
             log("dropped a log frame whose events have no usable boot or sequence")
             return
+        boot, rows, miss = parsed
         try:
             await self.logs.apply(
                 self.device_id,
                 {
-                    "b": frame["b"],
+                    "b": boot,
                     "e": rows,
-                    "miss": frame.get("miss", 0),
+                    "miss": miss,
                     "reset": frame.get("reset") is True,
                 },
             )
         except sqlite3.Error as error:
             log(
-                f"the log store failed ({error}); asking the controller again from the stored cursor"
+                f"the log store failed ({error}); "
+                "asking the controller again from the stored cursor"
             )
             await self._log_subscribe(resync=True)
 
-    async def ui_access(self, headers, live=False):
+    async def ui_access(
+        self, headers: Mapping[str, str], live: bool = False
+    ) -> bool | tuple[bool, bool] | None:
         """Whether this browser may read the stored log and archive: exactly when
         the controller lets it open the Web UI (`GET /api/v1/auth` through the
         relay). Each session's answer is kept for LOG_ACCESS_RECHECK_S, and an
@@ -656,11 +765,12 @@ class Companion:
             log(f"the log store could not keep a Web UI session's access ({error})")
         return answer if live else allowed
 
-    async def _web_ui_allows(self, headers):
-        """The controller's answer for this browser: (signed in, Admin unlocked for this screen), or None
-        when it cannot answer. It asks through the relay as the screen itself (its own X-WebUI-Client,
-        signed), so the unlock it reads is that screen's, never the companion's shared client's; without
-        a relay session, or without the screen's id, nothing counts as unlocked."""
+    async def _web_ui_allows(self, headers: Mapping[str, str]) -> tuple[bool, bool] | None:
+        """The controller's answer for this browser: (signed in, Admin unlocked for this screen),
+        or None when it cannot answer. It asks through the relay as the screen itself (its own
+        X-WebUI-Client, signed), so the unlock it reads is that screen's, never the companion's
+        shared client's; without a relay session, or without the screen's id, nothing counts as
+        unlocked."""
         if self.controller is None:
             return None
         client = headers.get("X-WebUI-Client", "")
@@ -686,7 +796,7 @@ class Companion:
                 answer = json.loads(reply.data) if reply.status == 200 and reply.data else None
             finally:
                 reply.release()
-        except aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError:
+        except aiohttp.ClientError, TimeoutError, OSError, ValueError:
             return None
         if not isinstance(answer, dict):
             return None
@@ -696,11 +806,11 @@ class Companion:
         )
 
     # --- La Marzocco account ---------------------------------------------------
-    async def _apply_account(self):
+    async def _apply_account(self) -> None:
         account = await offload(self.store.credentials) if self.cfg["lm"] else None
         self.lm.configure(account, self.cfg["conn"], self.cfg["observe"])
 
-    async def _on_credentials(self, frame):
+    async def _on_credentials(self, frame: Frame) -> None:
         generation = frame.get("gen")
         if type(generation) is not int or generation < 0:
             raise LinkClosed("PROTOCOL", "credentials without a generation")
@@ -711,18 +821,25 @@ class Companion:
             log("the controller erased the La Marzocco account")
             return
         try:
+            pairing = await offload(self.store.pairing)
+            if pairing is None:
+                raise ValueError("not paired")
             plain = crypto.decrypt_credentials(
-                (await offload(self.store.pairing))["secret"],
+                pairing["secret"],
                 generation,
                 crypto.unb64(frame.get("iv"), 12),
                 crypto.unb64(frame.get("ct")),
             )
             decoded = json.loads(plain)
-            account = {key: decoded[key] for key in ("email", "password", "serial")}
+            account: Account = {
+                "email": decoded["email"],
+                "password": decoded["password"],
+                "serial": decoded["serial"],
+            }
             if not all(
                 isinstance(value, str) and value for value in account.values()
             ) or SERIAL_FORBIDDEN.intersection(account["serial"]):
-                raise ValueError()
+                raise ValueError
         except ValueError, KeyError, TypeError, InvalidTag:
             raise LinkClosed("PROTOCOL", "credentials did not decrypt") from None
         await offload(self.store.save_credentials, generation, account)
@@ -736,22 +853,23 @@ class Companion:
             await self._apply_account()
 
     # --- Events from the La Marzocco client ------------------------------------
-    def account(self, ok):
-        """A sign-in (also one a read or command needed) or a refusal: report it with the new token's life."""
+    def account(self, ok: bool) -> None:
+        """A sign-in (also one a read or command needed) or a refusal: report it with the new
+        token's life."""
         if self.creds_gen is not None and self.post(
             {"t": "creds", "gen": self.creds_gen, "ok": ok}
         ):
             self.creds_gen = None
         self._report(force=True)
 
-    def upstream(self):
+    def upstream(self) -> None:
         self.ping_now.set()
         self._report()
 
-    def subscribed(self):
+    def subscribed(self) -> None:
         self._start_full()
 
-    def pushed(self, data, ac):
+    def pushed(self, data: dict[str, object], ac: int) -> None:
         if self.expect and dashboard.confirms(data, *self.expect):
             self.expect = None
             if self.confirm_timer:
@@ -759,27 +877,27 @@ class Companion:
                 self.confirm_timer = None
         self._forward("push", data, ac)
 
-    def polled(self, data, ac, first):
+    def polled(self, data: dict[str, object], ac: int, first: bool) -> None:
         if first and self._forward("full", data, ac):
             self.full_ep = self.lm.ep
         elif not first:
             self._forward("read", data, ac)
 
-    def renewed(self):
+    def renewed(self) -> None:
         self._report(force=True)
         if self.route == "companion":
-            self.spawn(self._read_and_forward())
+            _ = self.spawn(self._read_and_forward())
 
-    def _report(self, force=False):
+    def _report(self, force: bool = False) -> None:
         state = (self.lm.sub, self.lm.ep, self.lm.refused)
-        frame = {"t": "lm", "sub": self.lm.sub, "ep": self.lm.ep, "tok": self.lm.tok}
+        frame: Frame = {"t": "lm", "sub": self.lm.sub, "ep": self.lm.ep, "tok": self.lm.tok}
         if self.lm.refused:
             frame["err"] = "auth"  # The subscription lives, but reads and commands answer 401/403.
         if (force or state != self.reported) and self.post(frame):
             self.reported = state
 
     # --- Machine state -----------------------------------------------------------
-    def _forward(self, kind, data, ac, ep=None):
+    def _forward(self, kind: str, data: dict[str, object], ac: int, ep: int | None = None) -> bool:
         """Send one observation while the route is the companion's; a hold keeps
         the latest push and read back until it ends."""
         if self.route != "companion" or self.outbox is None:
@@ -787,7 +905,7 @@ class Companion:
         reduced = dashboard.reduce(data, push=kind == "push")
         if reduced is None:
             return False
-        frame = {"t": "st", "k": kind, "ep": self.lm.ep if ep is None else ep, "d": reduced}
+        frame: Frame = {"t": "st", "k": kind, "ep": self.lm.ep if ep is None else ep, "d": reduced}
         if kind != "push":  # Pushes take their order from when the controller receives them.
             frame["ac"] = ac
         if kind != "full" and self.hold:  # The latest of each kind, in observation order.
@@ -795,11 +913,11 @@ class Companion:
             return True
         return self.post(frame)
 
-    def _start_full(self):
+    def _start_full(self) -> None:
         if self.route == "companion" and (self.full_task is None or self.full_task.done()):
             self.full_task = self.spawn(self._full())
 
-    async def _full(self):
+    async def _full(self) -> None:
         """The read after a new subscription, sent as `full` once per route start and epoch."""
         for index in range(len(FULL_RETRY_S)):
             if (
@@ -823,13 +941,13 @@ class Companion:
                     FULL_RETRY_S[index]
                 )  # Bounded: a route restart or epoch re-arms it.
 
-    async def _read_and_forward(self):
+    async def _read_and_forward(self) -> tuple[int, dict[str, object] | None]:
         status, data, ac = await self.lm.read()
         if data is not None:
             self._forward("read", data, ac)
         return status, data
 
-    async def _command(self, command_id, op, value):
+    async def _command(self, command_id: int, op: str, value: int | None) -> None:
         async with self.command_lock:
             if op == "refresh":
                 status, data = await self._read_and_forward()
@@ -860,16 +978,16 @@ class Companion:
                 else {"t": "res", "id": command_id, "r": "failed", "http": status}
             )
 
-    def _unconfirmed(self):
+    def _unconfirmed(self) -> None:
         """No push showed the command's outcome in time: read the machine once instead."""
         self.expect = self.confirm_timer = None
-        self.spawn(self._read_and_forward())
+        _ = self.spawn(self._read_and_forward())
 
     # --- Pages -----------------------------------------------------------------
-    async def status(self):
+    async def status(self) -> dict[str, object]:
         pairing = await offload(self.store.pairing)
         credentials = await offload(self.store.credentials)
-        log_facts = {
+        log_facts: dict[str, object] = {
             "enabled": self.log_on,
             "days": self.retention[0],
             "mb": self.retention[1],
@@ -883,6 +1001,7 @@ class Companion:
             )
         except sqlite3.Error as error:
             log_facts["error"] = str(error)
+        archive_facts: Mapping[str, object]
         try:
             archive_facts = await self.archive.facts()
         except sqlite3.Error as error:
@@ -923,14 +1042,15 @@ class Companion:
         }
 
 
-def _log_rows(frame):
-    """A `log` frame's events made storable, or None when one cannot be keyed
-    (no boot, no positive sequence): an unknown level reads as info and text
-    past its bounds is cut, so the content never costs an event."""
+def _log_rows(frame: Frame) -> tuple[int, list[list[int | str]], int] | None:
+    """A `log` frame's boot, its events made storable and its miss count, or None
+    when one cannot be keyed (no boot, no positive sequence): an unknown level
+    reads as info and text past its bounds is cut, so the content never costs an
+    event."""
     boot, events, miss = frame.get("b"), frame.get("e"), frame.get("miss", 0)
     if not _uint32(boot) or not isinstance(events, list) or not events or not _uint32(miss):
         return None
-    rows = []
+    rows: list[list[int | str]] = []
     for entry in events:
         if not isinstance(entry, list) or len(entry) != 6 or not _uint32(entry[0]) or entry[0] == 0:
             return None
@@ -945,21 +1065,21 @@ def _log_rows(frame):
                 str(message)[:LOG_MESSAGE_MAX],
             ]
         )
-    return rows
+    return boot, rows, miss
 
 
-def _uint32(value):
+def _uint32(value: object) -> TypeGuard[int]:
     return type(value) is int and 0 <= value < 2**32
 
 
-def render_page(name="page.html"):
+def render_page(name: str = "page.html") -> str:
     """A companion page, styled like the setup page it sits beside."""
     setup = (HERE.parent / "gateway" / "setup.html").read_text()
     style = setup[setup.index("<style>") + 7 : setup.index("</style>")]
     return (HERE / name).read_text().replace("@STYLE@", style)
 
 
-def web_app(companion):
+def web_app(companion: Companion) -> web.Application:
     page = render_page()
     notice = (
         render_page("ui-off.html")
@@ -968,25 +1088,26 @@ def web_app(companion):
     )
     no_store = {"Cache-Control": "no-store"}
 
-    async def show(request):
+    async def show(_request: web.Request) -> web.Response:
         return web.Response(text=page, content_type="text/html", headers=no_store)
 
-    async def gate(request):
-        """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens directly."""
+    async def gate(request: web.Request) -> web.Response:
+        """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens
+        directly."""
         page = request.headers.get("X-Original-URI", "").partition("?")[0]
         allowed = companion.relay.mode != "disabled" or page == "/sw.js"
         return web.Response(status=204 if allowed else 403)
 
-    async def ui_off(request):
+    async def ui_off(_request: web.Request) -> web.Response:
         address = html.escape(companion.base_url()) if companion.controller else ""
         return web.Response(
             text=notice.replace("@ADDRESS@", address), content_type="text/html", headers=no_store
         )
 
-    async def status(request):
+    async def status(_request: web.Request) -> web.Response:
         return web.json_response(await companion.status(), headers=no_store)
 
-    async def pair(request):
+    async def pair(request: web.Request) -> web.Response:
         if (
             request.content_type != "application/json"
         ):  # A web page elsewhere cannot send this without asking.
@@ -998,7 +1119,7 @@ def web_app(companion):
         companion.pairing.start(manual=True)
         return web.json_response(companion.pairing.status(), status=202, headers=no_store)
 
-    async def erase(request):
+    async def erase(request: web.Request) -> web.Response:
         if request.content_type != "application/json":
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
         if (
@@ -1017,19 +1138,21 @@ def web_app(companion):
         await companion.erase("erased on the companion's page", history=False)
         return web.json_response(await companion.status(), headers=no_store)
 
-    def _wall(value):
+    def _wall(text: str | None) -> int | None:
         """Wall seconds in uint32 range, or None when absent; ValueError otherwise."""
-        if value is None:
+        if text is None:
             return None
-        value = int(value)
+        value = int(text)
         if not 0 <= value < 2**32:
-            raise ValueError()
+            raise ValueError
         return value
 
-    def _log_query(request):
-        """The page's keyset cursor (boot, before; the newest first when absent), its size, and the
-        optional filters: `level` (the levels kept, from "cewid"), `category` and `at` (wall seconds:
-        start at the newest event at or before it)."""
+    def _log_query(
+        request: web.Request,
+    ) -> tuple[int, int, int, str | tuple[str, ...] | None, str | None, int | None] | None:
+        """The page's keyset cursor (boot, before; the newest first when absent), its size, and
+        the optional filters: `level` (the levels kept, from "cewid"), `category` and `at` (wall
+        seconds: start at the newest event at or before it)."""
         query = request.query
         try:
             boot = int(query.get("boot", FIRST_PAGE))
@@ -1048,10 +1171,12 @@ def web_app(companion):
             return None
         return boot, before, limit, levels and tuple(sorted(set(levels))), category, at
 
-    async def _log_refusal(request, live=False, admin=False):
+    async def _log_refusal(
+        request: web.Request, live: bool = False, admin: bool = False
+    ) -> web.Response | None:
         """The history answers with the controller down, but only to a browser it would let in;
-        changing the archive (`live`) needs the controller's answer now, and deleting (`admin`) also
-        needs Admin unlocked on the screen asking."""
+        changing the archive (`live`) needs the controller's answer now, and deleting (`admin`)
+        also needs Admin unlocked on the screen asking."""
         if not companion._log_usable():
             return web.json_response(
                 {"error": "STORE", "message": companion.log_error or "not open"}, status=503
@@ -1065,7 +1190,8 @@ def web_app(companion):
                 },
                 status=503,
             )
-        if not (answer[0] if live or admin else answer):
+        # A live answer (`live` or `admin`) is the pair, any other the verdict.
+        if not (answer[0] if isinstance(answer, tuple) else answer):
             return web.json_response(
                 {
                     "error": "AUTH_REQUIRED",
@@ -1074,7 +1200,7 @@ def web_app(companion):
                 },
                 status=401,
             )
-        if admin and not answer[1]:
+        if admin and isinstance(answer, tuple) and not answer[1]:
             log(f"refused {request.path}: Admin is not unlocked on the screen that asked")
             return web.json_response(
                 {
@@ -1086,7 +1212,7 @@ def web_app(companion):
             )
         return None
 
-    async def log_page(request):
+    async def log_page(request: web.Request) -> web.Response:
         query = _log_query(request)
         if query is None:
             return web.json_response({"error": "INVALID_REQUEST"}, status=400)
@@ -1107,8 +1233,9 @@ def web_app(companion):
             headers=no_store,
         )
 
-    async def log_export(request):
-        """The whole history, or the events between wall times `from` and `to` (either may be absent)."""
+    async def log_export(request: web.Request) -> web.StreamResponse:
+        """The whole history, or the events between wall times `from` and `to` (either may be
+        absent)."""
         try:
             since, until = _wall(request.query.get("from")), _wall(request.query.get("to"))
         except ValueError:
@@ -1134,7 +1261,7 @@ def web_app(companion):
         await answer.write(json.dumps(head)[:-1].encode() + b',"entries":[')
         cursor, first = span[0] if span else None, True
         try:
-            while cursor is not None:
+            while span is not None and cursor is not None:
                 entries, cursor = await companion.logs.chunk(device, *cursor, through=span[1])
                 for entry in entries:
                     await answer.write((("" if first else ",") + json.dumps(entry)).encode())
@@ -1147,7 +1274,7 @@ def web_app(companion):
         await answer.write_eof()
         return answer
 
-    async def log_delete(request):
+    async def log_delete(request: web.Request) -> web.Response:
         if request.content_type != "application/json":
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
         refusal = await _log_refusal(request, admin=True)
@@ -1161,12 +1288,26 @@ def web_app(companion):
         return web.json_response({"deleted": True}, headers=no_store)
 
     # --- The archive ---------------------------------------------------------
-    def _numbers(source, *names, optional=()):
-        """Whole numbers in uint32 range, a `generation` also below zero (records set aside); a name in
-        `optional` may be absent (None)."""
+    def _int(value: object) -> int:
+        """int() of a query's text or a JSON number; TypeError for any other JSON value."""
+        if not isinstance(value, str | int | float):
+            raise TypeError(type(value).__name__)
+        return int(value)
+
+    @overload
+    def _numbers(source: Mapping[str, object], *names: str) -> list[int] | None: ...
+    @overload
+    def _numbers(
+        source: Mapping[str, object], *names: str, optional: tuple[str, ...]
+    ) -> list[int | None] | None: ...
+    def _numbers(
+        source: Mapping[str, object], *names: str, optional: tuple[str, ...] = ()
+    ) -> list[int | None] | list[int] | None:
+        """Whole numbers in uint32 range, a `generation` also below zero (records set aside); a
+        name in `optional` may be absent (None)."""
         try:
             values = [
-                None if name in optional and source.get(name) is None else int(source[name])
+                None if name in optional and source.get(name) is None else _int(source[name])
                 for name in names
             ]
         except KeyError, TypeError, ValueError:
@@ -1175,51 +1316,59 @@ def web_app(companion):
             values
             if all(
                 value is None or (-(2**31) if name == "generation" else 0) <= value < 2**32
-                for name, value in zip(names, values)
+                for name, value in zip(names, values, strict=True)
             )
             else None
         )
 
-    def _invalid():
+    def _invalid() -> web.Response:
         return web.json_response({"error": "INVALID_REQUEST"}, status=400)
 
-    async def _archive_body(request, admin=False):
-        """(body, refusal): a JSON object from a browser the controller accepts right now (and, for
-        `admin`, from a screen with Admin unlocked)."""
+    async def _archive_body(
+        request: web.Request, admin: bool = False
+    ) -> dict[str, object] | web.Response:
+        """A JSON object from a browser the controller accepts right now (and, for `admin`, from a
+        screen with Admin unlocked), or the refusal."""
         if request.content_type != "application/json":
-            return None, web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+            return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
         try:
             body = await request.json()
         except ValueError:
             body = None
         if not isinstance(body, dict):
-            return None, _invalid()
-        return body, await _log_refusal(request, live=True, admin=admin)
+            return _invalid()
+        refusal = await _log_refusal(request, live=True, admin=admin)
+        return body if refusal is None else refusal
 
-    def _archive_query(store, query):
-        """The tail's sort, direction, cursor and filters with the controller's whitelists, or None."""
+    def _archive_query(store: str, query: Mapping[str, str]) -> tuple[ArchiveQuery, int] | None:
+        """The tail's sort, direction, cursor and filters with the controller's whitelists, or
+        None."""
 
-        def listed(name, allowed=None):
-            values = [value for value in query.get(name, "").split(",") if value]
-            if allowed is None:
-                values = [int(value) for value in values]
-                if not all(0 <= value < 2**32 for value in values):
-                    raise ValueError()
-            elif not set(values) <= allowed:
-                raise ValueError()
+        def numbers(name: str) -> list[int]:
+            values = [int(value) for value in query.get(name, "").split(",") if value]
+            if not all(0 <= value < 2**32 for value in values):
+                raise ValueError
             if len(values) > FILTER_MAX:
-                raise ValueError()
+                raise ValueError
+            return values
+
+        def listed(name: str, allowed: frozenset[str]) -> list[str]:
+            values = [value for value in query.get(name, "").split(",") if value]
+            if not set(values) <= allowed:
+                raise ValueError
+            if len(values) > FILTER_MAX:
+                raise ValueError
             return values
 
         try:
-            parsed = {
+            parsed: ArchiveQuery = {
                 "sort": query.get("sort", "date"),
                 "dir": query.get("dir", "desc"),
                 "bad": query.get("bad") == "1",
                 "all": query.get("all") == "1",
                 "result": listed("result", RESULTS) if store == "shots" else [],
-                "preset": listed("preset") if store == "shots" else [],
-                "scale": listed("scale") if store == "shots" else [],
+                "preset": numbers("preset") if store == "shots" else [],
+                "scale": numbers("scale") if store == "shots" else [],
                 "types": listed("types", HISTORY_TYPES) if store == "history" else [],
                 "cursor": tuple(int(part) for part in query["cursor"].split(":"))
                 if "cursor" in query
@@ -1241,7 +1390,7 @@ def web_app(companion):
             return None
         return parsed, limit
 
-    async def archive_rows(request):
+    async def archive_rows(request: web.Request) -> web.Response:
         store = request.match_info["store"]
         query = _archive_query(store, request.query)
         if query is None:
@@ -1256,7 +1405,7 @@ def web_app(companion):
         rows, following, holes, generations, presets = await companion.archive.store.tail(
             companion.device_id, store, *query
         )
-        answer = {
+        answer: dict[str, object] = {
             "device": companion.device_id,
             "rows": rows,
             "next": following,
@@ -1267,9 +1416,10 @@ def web_app(companion):
             answer["presets"] = presets
         return web.json_response(answer, headers=no_store)
 
-    async def archive_stats(request):
-        """The Stats header over the whole history (S13), or 503 STATS_UNAVAILABLE: the browser then
-        shows the controller's own header, labelled as covering only its shots, and asks again."""
+    async def archive_stats(request: web.Request) -> web.Response:
+        """The Stats header over the whole history (S13), or 503 STATS_UNAVAILABLE: the browser
+        then shows the controller's own header, labelled as covering only its shots, and asks
+        again."""
         query = request.query
         try:
             window, active, epoch = (
@@ -1281,7 +1431,7 @@ def web_app(companion):
                 "shots", {key: query[key] for key in ("result", "preset", "scale") if key in query}
             )
         except KeyError, ValueError:
-            filters = None
+            return _invalid()
         if (
             filters is None
             or window not in STATS_WINDOWS
@@ -1305,7 +1455,7 @@ def web_app(companion):
             return web.json_response({"error": "STATS_UNAVAILABLE"}, status=503)
         return web.json_response({"stats": header, "good": good, "epoch": synced}, headers=no_store)
 
-    async def archive_trace(request):
+    async def archive_trace(request: web.Request) -> web.Response:
         identity = _numbers(request.query, "id", "boot", "end")
         if identity is None:
             return _invalid()
@@ -1317,37 +1467,46 @@ def web_app(companion):
             return web.json_response({"error": "NO_SHOT_TRACE"}, status=404)
         return web.Response(body=data, content_type="application/octet-stream", headers=no_store)
 
-    def _found(done):
+    def _found(done: bool) -> web.Response:
         return (
             web.json_response({"ok": True}, headers=no_store)
             if done
             else web.json_response({"error": "NOT_FOUND"}, status=404)
         )
 
-    async def archive_rate(request):
-        body, refusal = await _archive_body(request)
-        if refusal is not None:
-            return refusal
+    async def archive_rate(request: web.Request) -> web.Response:
+        body = await _archive_body(request)
+        if isinstance(body, web.Response):
+            return body
         values = _numbers(body, "generation", "id", "rating", optional=("generation",))
-        if values is None or values[2] > 5:
+        if values is None:
             return _invalid()
-        return _found(await companion.archive.store.rate(companion.device_id, *values))
-
-    async def archive_delete(request):
-        """One record only the archive holds (rotated out of the controller, or from an earlier history),
-        from a screen with Admin unlocked; the controller deletes its own records itself, and the
-        archive follows on its next sync."""
-        body, refusal = await _archive_body(request, admin=True)
-        if refusal is not None:
-            return refusal
-        values = _numbers(body, "generation", "id", optional=("generation",))
-        if values is None or body.get("store") not in FETCH_MAX:
+        generation, record_id, rating = values
+        if record_id is None or rating is None or rating > 5:  # Only the generation is optional.
             return _invalid()
         return _found(
-            await companion.archive.store.remove(companion.device_id, body["store"], *values)
+            await companion.archive.store.rate(companion.device_id, generation, record_id, rating)
         )
 
-    async def archive_export(request):
+    async def archive_delete(request: web.Request) -> web.Response:
+        """One record only the archive holds (rotated out of the controller, or from an earlier
+        history), from a screen with Admin unlocked; the controller deletes its own records itself,
+        and the archive follows on its next sync."""
+        body = await _archive_body(request, admin=True)
+        if isinstance(body, web.Response):
+            return body
+        values = _numbers(body, "generation", "id", optional=("generation",))
+        store = body.get("store")
+        if values is None or store not in FETCH_MAX or not isinstance(store, str):
+            return _invalid()
+        generation, record_id = values
+        if record_id is None:  # Only the generation is optional.
+            return _invalid()
+        return _found(
+            await companion.archive.store.remove(companion.device_id, store, generation, record_id)
+        )
+
+    async def archive_export(request: web.Request) -> web.StreamResponse:
         refusal = await _log_refusal(request)
         if refusal is not None:
             return refusal
@@ -1364,12 +1523,14 @@ def web_app(companion):
         head = {"format": "openbrewbyweight-companion-archive", "version": 1, "device": device}
         await answer.write(json.dumps(head)[:-1].encode())
         for key, read in (
-            ("shots", lambda after: store.chunk(device, "shots", after)),
-            ("history", lambda after: store.chunk(device, "history", after)),
-            ("traces", lambda after: store.trace_chunk(device, after)),
+            ("shots", functools.partial(store.chunk, device, "shots")),
+            ("history", functools.partial(store.chunk, device, "history")),
+            ("traces", functools.partial(store.trace_chunk, device)),
         ):
             await answer.write(f',"{key}":['.encode())
-            after, first = (-(2**63), 0), True  # Records set aside sit below generation 1.
+            # Records set aside sit below generation 1.
+            after: tuple[int, int] | None = (-(2**63), 0)
+            first = True
             while after is not None:
                 items, after = await read(after)
                 for item in items:
@@ -1404,18 +1565,20 @@ def web_app(companion):
 class Handle:
     """What the supervisor's thread may call; each call runs on the companion's loop."""
 
-    loop = companion = stopping = None
+    loop: asyncio.AbstractEventLoop | None = None
+    companion: Companion | None = None
+    stopping: asyncio.Event | None = None
 
-    def controller(self, target):
-        if self.loop:
+    def controller(self, target: Target | None) -> None:
+        if self.loop and self.companion:
             self.loop.call_soon_threadsafe(self.companion.set_controller, target)
 
-    def stop(self):
-        if self.loop:
+    def stop(self) -> None:
+        if self.loop and self.stopping:
             self.loop.call_soon_threadsafe(self.stopping.set)
 
 
-async def _retention(companion):
+async def _retention(companion: Companion) -> None:
     """On start and daily: prune the log store by age, then to the size budget,
     and refresh its consistent copy for backups of the data folder."""
     while True:
@@ -1431,7 +1594,9 @@ async def _retention(companion):
         await asyncio.sleep(RETENTION_S)
 
 
-async def _serve(cfg, data, socket_path, handle, ready):
+async def _serve(
+    cfg: Config, data: Path, socket_path: Path, handle: Handle, ready: threading.Event
+) -> None:
     # One connection per request: the controller has few sockets.
     async with (
         aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as controller,
@@ -1447,20 +1612,21 @@ async def _serve(cfg, data, socket_path, handle, ready):
         await companion.open_log()
         runner = web.AppRunner(web_app(companion), access_log=None)
         await runner.setup()
-        socket_path.unlink(missing_ok=True)
+        await offload(functools.partial(socket_path.unlink, missing_ok=True))
         await web.UnixSite(runner, str(socket_path)).start()
-        socket_path.chmod(0o666)  # nginx workers run as the nginx user.
+        await offload(socket_path.chmod, 0o666)  # nginx workers run as the nginx user.
+        stopping_event = asyncio.Event()
         handle.loop, handle.companion, handle.stopping = (
             asyncio.get_running_loop(),
             companion,
-            asyncio.Event(),
+            stopping_event,
         )
         ready.set()
         log(f"'{cfg['name']}' version {VERSION} is running")
         link = companion.spawn(companion.run_link())
-        companion.spawn(_loop_watchdog())
-        companion.spawn(_retention(companion))
-        stopping = companion.spawn(handle.stopping.wait())
+        _ = companion.spawn(_loop_watchdog())
+        _ = companion.spawn(_retention(companion))
+        stopping = companion.spawn(stopping_event.wait())
         try:
             await asyncio.wait({link, stopping}, return_when=asyncio.FIRST_COMPLETED)
             if not stopping.done():
@@ -1472,7 +1638,7 @@ async def _serve(cfg, data, socket_path, handle, ready):
             await companion.logs.close()
 
 
-async def _loop_watchdog():
+async def _loop_watchdog() -> None:
     """Measure the loop's own sleep overshoot: whatever blocks the loop shows up here."""
     loop = asyncio.get_running_loop()
     while True:
@@ -1481,17 +1647,18 @@ async def _loop_watchdog():
         late = loop.time() - before - WATCHDOG_S
         if late >= STALL_BREACH_S:
             log(
-                f"the event loop stood still {late:.0f} s: long enough for the controller to miss its pings"
+                f"the event loop stood still {late:.0f} s: "
+                "long enough for the controller to miss its pings"
             )
         elif late >= STALL_WARN_S:
             log(f"the event loop stood still {late:.0f} s")
 
 
-def start(cfg, data, run, on_exit):
+def start(cfg: Config, data: Path, run: Path, on_exit: Callable[[], object]) -> Handle:
     """Run the companion on its own thread; on_exit runs if it ever stops."""
     handle, ready = Handle(), threading.Event()
 
-    def main():
+    def main() -> None:
         try:
             asyncio.run(_serve(cfg, data, run / "companion.sock", handle, ready))
         except Exception:

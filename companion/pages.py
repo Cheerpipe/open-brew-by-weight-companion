@@ -1,4 +1,4 @@
-"""The Stats and History pages, built from the archive's copy as the controller's ui-stream sends them.
+"""The Stats and History pages, built from the archive's copy as the ui-stream sends them.
 
 A port of the firmware's page senders (`sendStatsStream`, `sendHistoryStream`,
 `formatShotStatsRow` and the Stats header's text): the same members in the
@@ -13,6 +13,28 @@ shot, `archiveTrace` (in a Stats row's last object, beside its curve).
 
 import json
 import zlib
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+# A JSON value as json.loads returns it: a stored row's body.
+type Json = bool | int | float | str | list[Json] | dict[str, Json] | None
+
+
+class Page(TypedDict):
+    """A page from the archive's copy (Archive.page): each row is (id, text, archive only)."""
+
+    boot: int
+    epoch: int
+    good: int
+    total: int
+    offset: int
+    limit: int
+    hasMore: bool
+    rows: list[tuple[int, str, bool]]
+    archive: dict[str, object] | None
+
 
 # kStatsRowColumns, in the firmware's order.
 COLUMNS = (
@@ -26,8 +48,9 @@ COLUMNS = (
 )
 NAMES = COLUMNS.split(",")
 FRAME_BYTES = 8192  # kStatsStreamFrameBytes
-# Decimals each number is printed with (%.1f, %.2f, FixedText(ms, 3)); every other number is an integer.
-PLACES = {
+# Decimals each number is printed with (%.1f, %.2f, FixedText(ms, 3)); every other number
+# is an integer.
+PLACES: dict[str | None, int] = {
     **dict.fromkeys(
         (
             "durationS",
@@ -73,7 +96,7 @@ PLACES = {
 }
 
 
-def text(value, key=None):
+def text(value: object, key: str | None = None) -> str:
     """JSON as the firmware prints it: compact, UTF-8 as is, numbers with their own decimals."""
     if value is None or isinstance(value, bool):
         return json.dumps(value)
@@ -84,6 +107,8 @@ def text(value, key=None):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
         return "[" + ",".join(text(item, key) for item in value) + "]"
+    if not isinstance(value, dict):
+        raise TypeError(f"{type(value).__name__} is not JSON")
     return (
         "{"
         + ",".join(f"{json.dumps(name)}:{text(item, name)}" for name, item in value.items())
@@ -91,7 +116,7 @@ def text(value, key=None):
     )
 
 
-def marks(only, generation, trace=None):
+def marks(only: bool, generation: int, trace: object = None) -> dict[str, object]:
     """The archive's markers on a row it alone holds."""
     if not only:
         return {}
@@ -102,7 +127,7 @@ def marks(only, generation, trace=None):
     }
 
 
-def stats_row(body, marked=None):
+def stats_row(body: Mapping[str, object], marked: Mapping[str, object] | None = None) -> str:
     """formatShotStatsRow: the values in column order, then the curve object (and the markers)."""
     curve = {name: value for name, value in body.items() if name not in NAMES_SET}
     return (
@@ -114,28 +139,35 @@ def stats_row(body, marked=None):
     )
 
 
-def history_row(body, marked=None):
+def history_row(body: Mapping[str, object], marked: Mapping[str, object] | None = None) -> str:
     return text({**body, **(marked or {})})
 
 
-def _tag(*parts):
+def _tag(*parts: str) -> int:
     return zlib.crc32("\n".join(parts).encode()) or 1
 
 
-def _rows(page, kept):
+def _rows(page: Page, kept: bool) -> list[str]:
     return [str(rid) if kept and not only else row for rid, row, only in page["rows"]]
 
 
-def _flag(value):
+def _flag(value: bool) -> str:
     return "true" if value else "false"
 
 
-def stats_frames(page, seq, request, snapshot, header=None, kept=0):
-    """A Stats page's frames. `page`: boot, epoch, good, total, offset, limit, hasMore and `rows` (each row's
-    id, text and whether only the archive holds it); `header` the header dict (None leaves it out, as for
-    Home's rows-only fetch); `kept` a tag the screen still holds: when it is this page's, the rows go as
-    their ids (whole when only the archive holds them: an id may repeat across histories).
-    Returns (frames, tag)."""
+def stats_frames(
+    page: Page,
+    seq: int,
+    request: int,
+    snapshot: bool,
+    header: Mapping[str, object] | None = None,
+    kept: int = 0,
+) -> tuple[list[str], int]:
+    """A Stats page's frames. `page`: boot, epoch, good, total, offset, limit, hasMore and `rows`
+    (each row's id, text and whether only the archive holds it); `header` the header dict (None
+    leaves it out, as for Home's rows-only fetch); `kept` a tag the screen still holds: when it is
+    this page's, the rows go as their ids (whole when only the archive holds them: an id may repeat
+    across histories). Returns (frames, tag)."""
     header_text = text(header) if header is not None else ""
     tag = _tag(
         header_text,
@@ -174,8 +206,9 @@ def stats_frames(page, seq, request, snapshot, header=None, kept=0):
             return frames, tag
 
 
-def history_frame(page, request, snapshot, kept=0):
-    """A History page's one frame (at most 120 records stay under the frame budget). Returns (frame, tag)."""
+def history_frame(page: Page, request: int, snapshot: bool, kept: int = 0) -> tuple[str, int]:
+    """A History page's one frame (at most 120 records stay under the frame budget).
+    Returns (frame, tag)."""
     tag = _tag(
         json.dumps([page[name] for name in ("epoch", "total", "offset", "limit")]),
         *(row for _, row, _ in page["rows"]),

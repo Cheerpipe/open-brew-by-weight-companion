@@ -17,6 +17,7 @@ import ipaddress
 import json
 import os
 import re
+from typing import TYPE_CHECKING, Literal
 
 import aiohttp
 from cryptography.exceptions import InvalidTag
@@ -24,6 +25,13 @@ from yarl import URL
 
 from . import crypto, log
 from .store import offload
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from .service import Companion
+
+type Mode = Literal["passthrough", "ready", "disabled"]
 
 PATH = "/api/v1/companion/relay"
 PROTOCOL = 1
@@ -63,7 +71,7 @@ READ_LIMIT = 64 * 1024  # JSON answers are read whole: claims, commands and erro
 TIMEOUT = aiohttp.ClientTimeout(total=300, connect=5, sock_read=180)
 
 
-def address(text):
+def address(text: str | None) -> str:
     """The browser's address from nginx's X-Real-IP, as the header carries it."""
     try:
         return str(ipaddress.ip_address((text or "").split("%")[0]))
@@ -71,49 +79,59 @@ def address(text):
         return "0.0.0.0"
 
 
+class Reply(aiohttp.ClientResponse):
+    """A controller's answer; `data` holds its whole body when it is a small JSON answer."""
+
+    data: bytes | None = None
+
+
 class Relay:
-    def __init__(self, companion):
+    def __init__(self, companion: Companion) -> None:
         self.companion = companion
         self.client_id = os.urandom(
             12
         ).hex()  # The controller's one Web UI client for every screen.
-        self.mode = "passthrough"  # passthrough, ready or disabled
-        self.link = None  # Whether the controller wants the link; None until it answered.
-        self.key, self.body_key, self.counter, self.generation = None, None, 0, 0
+        self.mode: Mode = "passthrough"
+        # Whether the controller wants the link; None until it answered.
+        self.link: bool | None = None
+        self.key: bytes | None = None
+        self.body_key: bytes | None = None
+        self.counter, self.generation = 0, 0
         self.lock = asyncio.Lock()
-        self.http = None
-        self.reported = None
+        self.http: aiohttp.ClientSession | None = None
+        self.reported: str | None = None
 
-    def session(self):
+    def session(self) -> aiohttp.ClientSession:
         """Connections that close after each request and pass bodies through untouched."""
         if self.http is None or self.http.closed:
             self.http = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(force_close=True),
                 auto_decompress=False,
                 timeout=TIMEOUT,
+                response_class=Reply,
             )
         return self.http
 
-    async def close(self):
+    async def close(self) -> None:
         if self.http is not None:
             await self.http.close()
 
-    def reset(self, link=None):
+    def reset(self, link: bool | None = None) -> None:
         self.key, self.body_key, self.counter, self.mode = None, None, 0, "passthrough"
         self._set_link(link)
 
-    def _set_link(self, link):
+    def _set_link(self, link: bool | None) -> None:
         if link != self.link:
             self.link = link
             self.companion.link_wanted(link)
 
-    def _note(self, state):
+    def _note(self, state: str) -> None:
         if state != self.reported:
             self.reported = state
             log(state)
 
     # --- Handshake -------------------------------------------------------------
-    async def handshake(self):
+    async def handshake(self) -> Mode:
         """A new relay session; callers waiting at the same time share one."""
         generation = self.generation
         async with self.lock:
@@ -124,11 +142,12 @@ class Relay:
                 except ValueError:
                     self.reset(True)
                     self._note(
-                        "the controller sent a malformed relay answer; the Web UI passes straight through"
+                        "the controller sent a malformed relay answer; "
+                        "the Web UI passes straight through"
                     )
         return self.mode
 
-    async def _handshake(self):
+    async def _handshake(self) -> None:
         companion, pairing = self.companion, await offload(self.companion.store.pairing)
         if companion.controller is None:
             return
@@ -146,13 +165,14 @@ class Relay:
         elif status != 200 or reply.get("protocol") != PROTOCOL:
             self.reset(True)
             self._note(
-                f"the relay handshake answered HTTP {status} with protocol {reply.get('protocol')!r}; "
+                f"the relay handshake answered HTTP {status} "
+                f"with protocol {reply.get('protocol')!r}; "
                 "the Web UI passes straight through, one screen at a time"
             )
         else:
             await self._prove(url, pairing["secret"], crypto.unb64(reply.get("challenge"), 16))
 
-    async def _prove(self, url, secret, challenge):
+    async def _prove(self, url: str, secret: bytes, challenge: bytes) -> None:
         companion, nonce = self.companion, os.urandom(16)
         proof = crypto.mac(secret, b"R", challenge, nonce)
         status, reply = await companion.controller_request(
@@ -166,7 +186,8 @@ class Relay:
             ):
                 self.reset()
                 self._note(
-                    "the controller did not prove the pairing secret; the Web UI passes straight through"
+                    "the controller did not prove the pairing secret; "
+                    "the Web UI passes straight through"
                 )
                 return
             key = crypto.relay_key(secret, challenge, nonce)
@@ -174,7 +195,8 @@ class Relay:
             self.mode = "disabled" if reply.get("ui") is False else "ready"
             self._set_link(reply.get("link") is True)
             await companion.recognized()
-            companion.poke()  # The controller just proved itself again: a dead link socket is found now.
+            # The controller just proved itself again: a dead link socket is found now.
+            companion.poke()
             self._note(
                 "relay ready: every screen shares the controller's Web UI"
                 if self.mode == "ready"
@@ -193,11 +215,14 @@ class Relay:
         else:
             self.reset()
             self._note(
-                f"the controller refused the relay: HTTP {status} {reply.get('error') or ''}".strip()
+                f"the controller refused the relay: "
+                f"HTTP {status} {reply.get('error') or ''}".strip()
             )
 
     # --- Requests --------------------------------------------------------------
-    def admit(self, method, uri, addr, screen, session=""):
+    def admit(
+        self, method: str, uri: str, addr: str, screen: str, session: str = ""
+    ) -> tuple[str | None, int, str]:
         """Allocate q and build the header with the session sealed for it.
 
         Returns (header, q, sealed session or ""), or (None, 0, "") when the
@@ -215,11 +240,15 @@ class Relay:
         tag = crypto.relay_tag(self.key, method, uri, q, addr, screen, sealed)
         return f"2 {q} {addr} {screen} {tag}", q, sealed
 
-    def header(self, method, uri, addr, screen, session=""):
+    def header(
+        self, method: str, uri: str, addr: str, screen: str, session: str = ""
+    ) -> str | None:
         """The signed X-OBBW-Relay value; None when the session needs a new handshake first."""
         return self.admit(method, uri, addr, screen, session)[0]
 
-    async def signed(self, method, uri, addr, screen, session=""):
+    async def signed(
+        self, method: str, uri: str, addr: str, screen: str, session: str = ""
+    ) -> str | None:
         value = self.header(method, uri, addr, screen, session)
         if value is None and self.mode != "disabled":
             await self.handshake()
@@ -228,7 +257,9 @@ class Relay:
             )
         return value
 
-    async def sealed(self, method, uri, addr, screen, session=""):
+    async def sealed(
+        self, method: str, uri: str, addr: str, screen: str, session: str = ""
+    ) -> tuple[str | None, int, str]:
         """`signed`, keeping the q and the sealed session that belong to it."""
         value, q, sealed_session = self.admit(method, uri, addr, screen, session)
         if value is None and self.mode != "disabled":
@@ -238,7 +269,7 @@ class Relay:
         return value, q, sealed_session
 
     @staticmethod
-    def forwarded(incoming, client=None):
+    def forwarded(incoming: Mapping[str, str], client: str | None = None) -> dict[str, str]:
         """The whitelisted request headers; `client` replaces the browser's X-WebUI-Client."""
         headers = {name: incoming[name] for name in FORWARDED if name in incoming}
         client = client or incoming.get("X-WebUI-Client")
@@ -246,8 +277,18 @@ class Relay:
             headers["X-WebUI-Client"] = client
         return headers
 
-    async def request(self, method, uri, incoming, body, addr, screen, rewrite):
-        """One relayed request, sealed and signed, retried once after RELAY_STALE (no handler ran then).
+    async def request(
+        self,
+        method: str,
+        uri: str,
+        incoming: Mapping[str, str],
+        body: bytes,
+        addr: str,
+        screen: str,
+        rewrite: bool,
+    ) -> Reply | None:
+        """One relayed request, sealed and signed, retried once after RELAY_STALE (no handler ran
+        then).
 
         Returns the open response with `data` set to its whole body when it is a small
         JSON answer (None otherwise: the caller streams it), or None without a relay session.
@@ -255,12 +296,12 @@ class Relay:
         for attempt in (0, 1):
             session = incoming.get("X-WebUI-Session", "")
             value, q, sealed_session = await self.sealed(method, uri, addr, screen, session)
-            if value is None:
-                return None
             # The keys this request was signed and sealed with: another screen's
             # request may rotate the session while this one is in flight, and the
             # answer still has to open with the keys that asked.
             body_key = self.body_key
+            if value is None or body_key is None:
+                return None
             headers = self.forwarded(incoming, self.client_id if rewrite else None)
             if sealed_session:
                 headers["X-WebUI-Session"] = sealed_session
@@ -288,8 +329,9 @@ class Relay:
                 continue
             await self._open(reply, body_key)
             return reply
+        return None
 
-    async def _open(self, reply, body_key):
+    async def _open(self, reply: Reply, body_key: bytes) -> None:
         """Open a sealed answer; a seal that does not open is never delivered."""
         counter = reply.headers.get(SEALED_RESPONSE_HEADER)
         if counter is None:
@@ -301,19 +343,23 @@ class Relay:
         )
         reply.release()
         try:
+            if sealed is None:  # Too large to read whole, so it cannot open either.
+                raise ValueError("the sealed answer is too large")
             reply.data = crypto.relay_open(body_key, int(counter), sealed)
-        except InvalidTag, ValueError, TypeError:
+        except (InvalidTag, ValueError, TypeError) as error:
             log("the controller's sealed answer did not open; starting a new relay session")
             self.key, self.body_key = None, None  # The next request makes a new session.
             raise aiohttp.ClientResponseError(
                 reply.request_info, (), status=502, message="the sealed answer did not open"
-            )
+            ) from error
 
-    async def passthrough(self, method, uri, incoming, body):
+    async def passthrough(
+        self, method: str, uri: str, incoming: Mapping[str, str], body: bytes
+    ) -> Reply:
         """Today's transparent proxy: the browser's own id, nothing signed."""
         return await self._send(method, uri, self.forwarded(incoming), body)
 
-    async def _send(self, method, uri, headers, body):
+    async def _send(self, method: str, uri: str, headers: dict[str, str], body: bytes) -> Reply:
         reply = await self.session().request(
             method,
             URL(self.companion.base_url() + uri, encoded=True),
@@ -322,6 +368,8 @@ class Relay:
             allow_redirects=False,
             skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding"),
         )
+        if not isinstance(reply, Reply):  # The session's response_class: never another.
+            raise TypeError(f"unexpected response class {type(reply).__name__}")
         reply.data = None
         if (
             reply.content_type == "application/json"
@@ -334,7 +382,7 @@ class Relay:
         return reply
 
 
-def _error(data):
+def _error(data: bytes) -> object:
     try:
         value = json.loads(data)
     except ValueError:
@@ -342,7 +390,7 @@ def _error(data):
     return value.get("error") if isinstance(value, dict) else None
 
 
-def response_headers(reply):
+def response_headers(reply: aiohttp.ClientResponse) -> list[tuple[str, str]]:
     return [
         (name, value)
         for name, value in reply.headers.items()
