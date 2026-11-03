@@ -470,6 +470,24 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             assert not lm.refused
             assert not lm.policy
 
+            # A refusal is probed by itself, with nothing else reading (the direct route): terms
+            # accepted elsewhere.
+            monkeypatch.setattr(lamarzocco, "PROBE_S", 0.2)
+            lm.stop()  # Ends the probes the refusals above left asleep for the full five minutes.
+            cloud.refuse_dashboard, cloud.refusal = 403, policy
+            assert (await lm.read())[0] == 403
+            assert lm.refused
+            assert lm.probe in lm.tasks
+            reads = cloud.calls.count("dashboard")
+            await asyncio.sleep(0.5)
+            assert cloud.calls.count("dashboard") > reads, "a probe reads with nothing else reading"
+            assert lm.refused, "a probe keeps a refusal the cloud keeps"
+            cloud.refuse_dashboard, cloud.refusal = 0, None
+            await events.wait(lambda: not lm.refused)
+            await asyncio.sleep(0.05)
+            assert lm.probe not in lm.tasks, "the probe ends with the refusal"
+            monkeypatch.setattr(lamarzocco, "PROBE_S", 5 * 60)
+
             # The installation survives a restart: no second registration, same id.
             events = Events()
             lm = client(events)

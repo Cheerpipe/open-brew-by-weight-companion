@@ -32,6 +32,7 @@ STOMP_HOST = "lion.lamarzocco.io"
 HTTP_TIMEOUT_S = 10
 RENEW_AFTER_S = 50 * 60  # Tokens live 60 minutes; renewing at 50 keeps far more than 210 s in hand.
 RENEW_RETRY_S = 60
+PROBE_S = 5 * 60  # While reads are refused, one probe read this often, whatever the route.
 POLL_S = 30
 PING_S = 15
 PONG_TIMEOUT_S = 30
@@ -215,6 +216,7 @@ class LaMarzocco:
         self.last_command = 0
         self.tasks: set[asyncio.Task[None]] = set()
         self.renewal: asyncio.Task[None] | None = None
+        self.probe: asyncio.Task[None] | None = None
         self.session_lock = asyncio.Lock()
 
     # --- State the companion reports ---------------------------------------
@@ -304,6 +306,19 @@ class LaMarzocco:
                 else "La Marzocco accepts reads and commands again"
             )
             self.events.upstream()
+        if refused and self.probe not in self.tasks:
+            self.probe = self._spawn(self._probe_loop())
+
+    async def _probe_loop(self) -> None:
+        """Read while refused.
+
+        On the direct route nothing else reads, so a refusal that clears elsewhere (terms
+        accepted in the La Marzocco app or on the controller) would otherwise hold until a
+        restart.
+        """
+        while self.refused:
+            await asyncio.sleep(PROBE_S)
+            await self.read()
 
     def _answered_refusal(self, status: int, text: str) -> None:
         """Mark a 401/403 to a read or command.

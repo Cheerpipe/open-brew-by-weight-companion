@@ -308,7 +308,10 @@ the account only has to accept La Marzocco's latest terms, so the token is
 kept and the controller is told the refusal is a pending policy. The
 companion never accepts the terms itself; the La Marzocco app or the
 controller does, and the companion's next successful read clears the
-refusal.
+refusal. While a refusal lasts, the companion reads the dashboard once every
+five minutes whichever route the controller uses, so a refusal that clears
+elsewhere is noticed and the controller can route through the companion
+again without a restart.
 
 It runs while it holds the account, the controller's La Marzocco switch is
 on and **Show power state** is on, whether the controller uses it or not.

@@ -222,13 +222,14 @@ page:
   `La Marzocco answers 401/403 to reads and commands` in the log, mean the
   cloud accepted the sign-in but refuses the dashboard and commands: the
   account no longer has access to the machine. Correct the account in the Web
-  UI as well.
+  UI as well. The companion checks again every five minutes, so a refusal
+  that La Marzocco lifts on its own clears by itself.
 - **Connected, but La Marzocco asks the account to accept its latest terms**
   on the companion's page, and `La Marzocco needs the account to accept its
   latest terms` in the log, mean La Marzocco published new terms and refuses
   reads and commands until the account accepts them. Accept them in the La
   Marzocco app, or with **Accept here** on the controller's Home screen; the
-  companion's next read then works again by itself.
+  companion notices within five minutes, with no restart.
 
 ## The log history is empty or asks you to sign in
 
