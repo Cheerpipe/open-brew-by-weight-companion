@@ -6,6 +6,10 @@ import os
 import queue
 import re
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 RELEASE = "1.0.0"
 # The image carries the commit it was built from (Docker build argument
@@ -28,23 +32,22 @@ _ROOT.propagate = False
 _stdout = logging.StreamHandler(sys.stdout)
 _stdout.setFormatter(logging.Formatter(_FORMAT, _DATEFMT))
 _ROOT.addHandler(_stdout)
-_listener = None
+# At most one: the running listener and the handler that feeds its queue.
+_running: list[tuple[logging.handlers.QueueListener, logging.handlers.QueueHandler]] = []
 
 logger = _ROOT.getChild("companion")
-gateway_logger = _ROOT.getChild("gateway")
 
 
-def configure_logging(data, max_bytes=512 * 1024, backups=8):
+def configure_logging(data: Path, max_bytes: int = 512 * 1024, backups: int = 8) -> None:
     """Persist the log under <data>/log, written by a background thread.
 
     Called once on the supervisor, after the check/scan/mdns-check dispatch:
     the healthcheck process must not share the rotating file, and scan's
     stdout stays parseable by ./setup.
     """
-    global _listener
-    if _listener is not None:
+    if _running:
         return
-    handlers = [_stdout]
+    handlers: list[logging.Handler] = [_stdout]
     try:
         (data / "log").mkdir(mode=0o700, parents=True, exist_ok=True)
         file = logging.handlers.RotatingFileHandler(
@@ -55,26 +58,31 @@ def configure_logging(data, max_bytes=512 * 1024, backups=8):
     except OSError as error:
         _ROOT.warning("obbw.setup: no persistent log under %s (%s); stdout only", data, error)
         return
-    _listener = logging.handlers.QueueListener(queue.SimpleQueue(), *handlers)
-    _ROOT.addHandler(logging.handlers.QueueHandler(_listener.queue))
+    listener = logging.handlers.QueueListener(queue.SimpleQueue(), *handlers)
+    feed = logging.handlers.QueueHandler(listener.queue)
+    _running.append((listener, feed))
+    _ROOT.addHandler(feed)
     _ROOT.removeHandler(_stdout)
-    _listener.start()
+    listener.start()
 
 
-def stop_logging():
-    """Flush the queue and hand stdout back for the way down."""
-    global _listener
-    if _listener is not None:
-        _listener.stop()
-        _listener = None
+def stop_logging() -> None:
+    """Flush the queue, close the file and hand stdout back for the way down."""
+    if _running:
+        listener, feed = _running.pop()
+        listener.stop()
         _ROOT.addHandler(_stdout)
+        _ROOT.removeHandler(feed)
+        for handler in listener.handlers:
+            if handler is not _stdout:
+                handler.close()
 
 
-def log(message):
+def log(message: str) -> None:
     logger.info("%s", message)
 
 
-def clip(text, limit=120):
+def clip(text: object, limit: int = 120) -> str:
     """A one-line, trimmed excerpt for log lines: exception messages and error bodies."""
     line = " ".join(str(text).split())
     return line[:limit] + "…" if len(line) > limit else line

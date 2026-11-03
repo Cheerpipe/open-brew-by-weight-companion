@@ -2,8 +2,12 @@
 
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
 from . import PROTOCOL, VERSION, crypto, log
+
+if TYPE_CHECKING:
+    from .service import Companion
 
 PATH = "/api/v1/companion/pair"
 POLL_S = 1
@@ -16,24 +20,27 @@ REFUSALS = {
 
 
 class Pairing:
-    def __init__(self, companion):
+    def __init__(self, companion: Companion) -> None:
         self.companion = companion
         self.state = "paired" if companion.store.pairing() else "unpaired"
-        self.code = None
+        self.code: str | None = None
         self.expires_at = 0.0
         self.auto = True  # Entry point (a): one request on its own, until it is answered.
-        self.task = None
+        self.task: asyncio.Task[None] | None = None
 
-    def status(self):
-        status = {"state": self.state}
+    def status(self) -> dict[str, str | int | None]:
+        status: dict[str, str | int | None] = {"state": self.state}
         if self.state == "pending":
             status.update(
                 code=self.code, expiresInS=max(0, int(self.expires_at - time.monotonic()))
             )
         return status
 
-    def start(self, manual=False):
-        """Send one request to the known controller (the Pair button sets manual); False if none was sent."""
+    def start(self, manual: bool = False) -> bool:
+        """Send one request to the known controller (the Pair button sets manual).
+
+        False if none was sent.
+        """
         if self.companion.controller is None or (self.task and not self.task.done()):
             return False
         if not manual and (not self.auto or self.state != "unpaired"):
@@ -42,7 +49,7 @@ class Pairing:
         self.task = self.companion.spawn(self._run())
         return True
 
-    def _controller_key(self, reply):
+    def _controller_key(self, reply: dict[str, object]) -> bytes | None:
         try:
             key = (
                 crypto.unb64(reply.get("controllerKey"), 65) if reply.get("controllerKey") else None
@@ -54,9 +61,13 @@ class Pairing:
             return None
         return key
 
-    async def _run(self):
-        """Commit, then reveal: the key goes out only after the controller's key arrived; the code after that."""
-        companion, url = self.companion, self.companion.base_url() + PATH
+    async def _run(self) -> None:
+        """Commit, then reveal: the key goes out only after the controller's key arrived; the code
+        after that."""
+        companion = self.companion
+        if companion.controller is None:  # start() spawns this only for a known controller.
+            return
+        url = companion.base_url() + PATH
         self.state, self.code, key = "requesting", None, None
         request = {
             "id": companion.id,
@@ -72,9 +83,13 @@ class Pairing:
             self.auto = self.state in ("unreachable", "rate_limited")
             return
         self.state = "pending"
-        self.expires_at = time.monotonic() + int(reply.get("expiresInS") or 600)
+        expires = reply.get("expiresInS")
+        self.expires_at = time.monotonic() + int(
+            expires if isinstance(expires, int | float | str) and expires else 600
+        )
         log(
-            f"pairing requested from {companion.controller[0]}; waiting for approval in Admin → Companion"
+            f"pairing requested from {companion.controller[0]};"
+            " waiting for approval in Admin → Companion"
         )
         while time.monotonic() < self.expires_at:
             key = key or self._controller_key(reply)
@@ -85,13 +100,19 @@ class Pairing:
                 if status == 202:
                     self.code = crypto.sas(companion.public, key)
                 elif status is not None:
-                    return self._refused(status, reply)
+                    self._refused(status, reply)
+                    return
             await asyncio.sleep(POLL_S)
             status, reply = await companion.controller_request("GET", f"{url}?id={companion.id}")
             state = reply.get("state") if status == 200 else "pending"
             if state == "pending":
                 continue
-            if state == "approved" and self.code and self._controller_key(reply) in (None, key):
+            if (
+                state == "approved"
+                and self.code
+                and key is not None  # Always: the code is made from the key.
+                and self._controller_key(reply) in (None, key)
+            ):
                 try:
                     await companion.paired(
                         crypto.pairing_secret(companion.key, companion.public, key)
@@ -105,19 +126,17 @@ class Pairing:
                     self.state = "paired"
             else:
                 self.state = (
-                    "error"
-                    if state == "approved"
-                    else state
-                    if state in ("denied", "expired")
-                    else "expired"
+                    "error" if state == "approved" else "denied" if state == "denied" else "expired"
                 )
                 log(f"pairing {self.state}")
             return
         self.state = "expired"
         log("pairing expired")
 
-    def _refused(self, status, reply):
-        self.state = "unreachable" if status is None else REFUSALS.get(reply.get("error"), "error")
+    def _refused(self, status: int | None, reply: dict[str, object]) -> None:
+        error = reply.get("error")
+        refusal = REFUSALS.get(error, "error") if isinstance(error, str) else "error"
+        self.state = "unreachable" if status is None else refusal
         log(
             "the controller did not answer the pairing request"
             if status is None

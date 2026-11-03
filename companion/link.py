@@ -1,15 +1,18 @@
 """Companion link v2: the opening handshake and the signed frame codec."""
 
-import asyncio
 import hashlib
 import hmac
 import json
 import os
 import socket
+from typing import TYPE_CHECKING
 
 import aiohttp
 
 from . import LINK_PROTOCOL, clip, crypto
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 MAX_FRAME = 4096
 # The controller's record frames (the archive's index, pages and traces) may
@@ -23,9 +26,9 @@ ACK_TIMEOUT_S = 30
 
 
 class LinkClosed(Exception):
-    """The link failed or the controller refused it; `code` is the reason shown on the status page."""
+    """The link failed or the controller refused it; `code` is the reason on the status page."""
 
-    def __init__(self, code, detail=""):
+    def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(f"{code} {detail}".strip())
         self.code, self.detail = code, detail
 
@@ -37,14 +40,14 @@ class Erased(Exception):
 class FrameCodec:
     """`<mac>.<json>` frames with a per-direction sequence that starts at 1 and grows by one."""
 
-    def __init__(self, key, send=b"c", receive=b"f"):
+    def __init__(self, key: bytes, send: bytes = b"c", receive: bytes = b"f") -> None:
         self.key, self.send_dir, self.receive_dir = key, send, receive
         self.sent = self.received = 0
 
-    def _tag(self, direction, body):
+    def _tag(self, direction: bytes, body: str) -> str:
         return hmac.new(self.key, direction + body.encode(), hashlib.sha256).hexdigest()[:32]
 
-    def encode(self, frame):
+    def encode(self, frame: Mapping[str, object]) -> str:
         body = json.dumps({"q": self.sent + 1, **frame}, separators=(",", ":"))
         text = f"{self._tag(self.send_dir, body)}.{body}"
         if len(text) > LIMIT[self.send_dir]:
@@ -54,7 +57,7 @@ class FrameCodec:
         self.sent += 1
         return text
 
-    def decode(self, text):
+    def decode(self, text: str) -> dict[str, object]:
         tag, dot, body = text.partition(".")
         if (
             len(text.encode()) > LIMIT[self.receive_dir]
@@ -76,7 +79,7 @@ class FrameCodec:
         return frame
 
 
-async def _receive(ws):
+async def _receive(ws: aiohttp.ClientWebSocketResponse) -> dict[str, object]:
     message = await ws.receive(timeout=STEP_TIMEOUT_S)
     if message.type is not aiohttp.WSMsgType.TEXT:
         raise LinkClosed("CLOSED", "the controller closed the link while opening it")
@@ -89,8 +92,10 @@ async def _receive(ws):
     return reply
 
 
-async def open_link(http, url, hello, secret):
-    """Open and authenticate the link; returns (websocket, codec), or raises LinkClosed or Erased."""
+async def open_link(
+    http: aiohttp.ClientSession, url: str, hello: Mapping[str, object], secret: bytes
+) -> tuple[aiohttp.ClientWebSocketResponse, FrameCodec]:
+    """Open and authenticate the link: (websocket, codec), or it raises LinkClosed or Erased."""
     try:
         ws = await http.ws_connect(
             url,
@@ -100,7 +105,7 @@ async def open_link(http, url, hello, secret):
         )
     except aiohttp.WSServerHandshakeError as error:
         raise LinkClosed("NOT_PAIRED" if error.status == 404 else f"HTTP_{error.status}") from None
-    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
+    except (aiohttp.ClientError, TimeoutError, OSError) as error:
         raise LinkClosed("UNREACHABLE", clip(f"{type(error).__name__}: {error}")) from None
     try:
         ws.get_extra_info("socket").setsockopt(
@@ -115,7 +120,7 @@ async def open_link(http, url, hello, secret):
             if hmac.compare_digest(
                 crypto.unb64(reply.get("mac"), 32), crypto.mac(secret, b"E", nc)
             ):
-                raise Erased()
+                raise Erased
             raise LinkClosed("AUTH", "erase failed its MAC check")
         if reply.get("t") == "error":
             code = str(reply.get("code") or "ERROR")
@@ -135,7 +140,7 @@ async def open_link(http, url, hello, secret):
     except ValueError:
         await ws.close()
         raise LinkClosed("PROTOCOL", "malformed opening field") from None
-    except asyncio.TimeoutError, aiohttp.ClientError, ConnectionError:
+    except TimeoutError, aiohttp.ClientError, ConnectionError:
         await ws.close()
         raise LinkClosed("CLOSED", "the link failed while opening") from None
     except BaseException:

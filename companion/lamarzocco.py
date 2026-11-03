@@ -13,13 +13,17 @@ import json
 import time
 import traceback
 import uuid
+from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import clip, crypto, dashboard, log
-from .store import offload
+from .store import Account, Store, offload
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine, Mapping
 
 API_ROOT = "https://lion.lamarzocco.io/api/customer-app"
 WS_URL = "wss://lion.lamarzocco.io/ws/connect"
@@ -47,7 +51,7 @@ COMMANDS = {
 }
 
 
-class AuthRejected(Exception):
+class AuthRejectedError(Exception):
     """La Marzocco answered 401 or 403 to a sign-in: the account itself was refused."""
 
 
@@ -55,16 +59,27 @@ class TransportError(Exception):
     pass
 
 
-def _answered(what, status, text=""):
+class Events(Protocol):
+    """What the client reports to (the companion): see LaMarzocco."""
+
+    def account(self, ok: bool) -> None: ...
+    def upstream(self) -> None: ...
+    def subscribed(self) -> None: ...
+    def pushed(self, data: dict[str, object], ac: int) -> None: ...
+    def polled(self, data: dict[str, object], ac: int, first: bool) -> None: ...
+    def renewed(self) -> None: ...
+
+
+def _answered(what: str, status: int, text: str = "") -> str:
     """`<what> answered <status>`, with a trimmed excerpt of the body when there is one."""
     return f"{what} answered {status} {clip(text)}".rstrip()
 
 
-def _uuid(raw):
+def _uuid(raw: bytes) -> str:
     return str(uuid.UUID(bytes=raw[:16], version=4))
 
 
-def request_proof(text, secret):
+def request_proof(text: str, secret: bytes) -> str:
     """La Marzocco's request proof, byte for byte as the controller computes it."""
     work = bytearray(secret)
     for byte in text.encode():
@@ -78,7 +93,7 @@ def request_proof(text, secret):
 class Installation:
     """Identity of the companion's own La Marzocco installation."""
 
-    def __init__(self, key):
+    def __init__(self, key: ec.EllipticCurvePrivateKey) -> None:
         self.key = key
         self.id = _uuid(crypto.sha256(crypto.scalar(key)))
         self.public_der = key.public_key().public_bytes(
@@ -88,7 +103,7 @@ class Installation:
         id_hash = crypto.b64(crypto.sha256(self.id.encode()))
         self.secret = crypto.sha256(f"{self.id}.{self.public_b64}.{id_hash}".encode())
 
-    def registration(self):
+    def registration(self) -> tuple[dict[str, str], str]:
         """Headers and body of POST /auth/init."""
         proof = request_proof(
             f"{self.id}.{crypto.b64(crypto.sha256(self.public_der))}", self.secret
@@ -98,7 +113,7 @@ class Installation:
             "X-Request-Proof": proof,
         }, f'{{"pk":"{self.public_b64}"}}'
 
-    def signed_headers(self):
+    def signed_headers(self) -> dict[str, str]:
         nonce = str(uuid.uuid4())
         timestamp = str(time.time_ns() // 1000000)
         base = f"{self.id}.{nonce}.{timestamp}"
@@ -112,7 +127,7 @@ class Installation:
         }
 
 
-def stomp_frame(command, headers, body=""):
+def stomp_frame(command: str, headers: Mapping[str, str], body: str = "") -> str:
     return (
         command
         + "\n"
@@ -123,12 +138,13 @@ def stomp_frame(command, headers, body=""):
     )
 
 
-def stomp_parse(frame):
+def stomp_parse(frame: str) -> tuple[str, dict[str, str], str] | None:
     """(command, headers, body) of one NUL-delimited STOMP frame, or None for a heart-beat."""
     frame = frame.lstrip("\r\n")
     if not frame:
         return None
-    lines, rest = [], frame
+    lines: list[str] = []
+    rest = frame
     while True:
         line, newline, rest = rest.partition("\n")
         if not newline:
@@ -137,7 +153,7 @@ def stomp_parse(frame):
         if not line:
             break
         lines.append(line)
-    headers = {}
+    headers: dict[str, str] = {}
     for line in lines[1:]:
         key, colon, value = line.partition(":")
         if not colon:
@@ -159,41 +175,49 @@ class LaMarzocco:
     Marzocco on its own connection, so this client does not even sign in.
     """
 
-    def __init__(self, store, http, events, api_root=API_ROOT, ws_url=WS_URL):
+    def __init__(
+        self,
+        store: Store,
+        http: aiohttp.ClientSession,
+        events: Events,
+        api_root: str = API_ROOT,
+        ws_url: str = WS_URL,
+    ) -> None:
         self.store, self.http, self.events = store, http, events
         self.api_root, self.ws_url = api_root, ws_url
-        self.wanted = (None, "ws", True)
-        self.account = None
-        self.installation = None
-        self.access = self.refresh = None
+        self.wanted: tuple[tuple[str, str, str] | None, str, bool] = (None, "ws", True)
+        self.account: tuple[str, str, str] | None = None
+        self.installation: Installation | None = None
+        self.access: str | None = None
+        self.refresh: str | None = None
         self.issued_at = 0.0
         self.rejected = False
         self.sub, self.ep, self.alive_at = False, 0, 0.0
         self.last_message_at = 0.0
         self.refused = False
         self.last_command = 0
-        self.tasks = set()
-        self.renewal = None
+        self.tasks: set[asyncio.Task[None]] = set()
+        self.renewal: asyncio.Task[None] | None = None
         self.session_lock = asyncio.Lock()
 
     # --- State the companion reports ---------------------------------------
     @property
-    def up(self):
+    def up(self) -> bool:
         window = PONG_TIMEOUT_S if self.wanted[1] == "ws" else 2 * POLL_S + HTTP_TIMEOUT_S
         return self.sub and time.monotonic() - self.alive_at < window
 
     @property
-    def tok(self):
+    def tok(self) -> int:
         return max(0, int(self.issued_at + RENEW_AFTER_S - time.monotonic())) if self.access else 0
 
-    def signed_in_for(self, account):
+    def signed_in_for(self, account: Account) -> bool:
         return self.access is not None and self.account == _identity(account)
 
-    def rejected_for(self, account):
+    def rejected_for(self, account: Account) -> bool:
         return self.rejected and self.account == _identity(account)
 
     # --- Lifecycle -----------------------------------------------------------
-    def configure(self, account, conn, observe):
+    def configure(self, account: Account | None, conn: str, observe: bool) -> None:
         """Run with this account (None stops), connection type ('ws' or 'api') and observation."""
         wanted = (_identity(account), conn, observe)
         if wanted == self.wanted:
@@ -204,39 +228,40 @@ class LaMarzocco:
             self.account, self.rejected = wanted[0], False
             self.access = self.refresh = None
         if self._usable():
-            self._spawn(self._run())
+            _ = self._spawn(self._run())
 
-    def stop(self):
+    def stop(self) -> None:
         for task in self.tasks:
             task.cancel()
         self.tasks.clear()
         self.refused = False
         self._set_subscribed(False)
 
-    def _usable(self):
+    def _usable(self) -> bool:
         return self.account is not None and not self.rejected and self.wanted[2]
 
-    def erase(self):
-        """Forget the account and the installation (the pairing is gone): a later account registers a new one."""
+    def erase(self) -> None:
+        """Forget the account and the installation (the pairing is gone).
+
+        A later account registers a new one.
+        """
         self.configure(None, *self.wanted[1:])
         self.installation = None
         self.access = self.refresh = None
         self.refused = False
 
-    def _spawn(self, coroutine):
+    def _spawn(self, coroutine: Coroutine[object, object, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(coroutine)
         self.tasks.add(task)
         task.add_done_callback(self._done)
         return task
 
-    def _done(self, task):
+    def _done(self, task: asyncio.Task[None]) -> None:
         self.tasks.discard(task)
-        if not task.cancelled() and task.exception():
-            log(
-                "La Marzocco task failed:\n" + "".join(traceback.format_exception(task.exception()))
-            )
+        if not task.cancelled() and (error := task.exception()) is not None:
+            log("La Marzocco task failed:\n" + "".join(traceback.format_exception(error)))
 
-    def _set_subscribed(self, subscribed):
+    def _set_subscribed(self, subscribed: bool) -> None:
         if subscribed:
             self.ep += 1
             self.alive_at = time.monotonic()
@@ -244,8 +269,8 @@ class LaMarzocco:
             self.sub = subscribed
             self.events.upstream()
 
-    def _refused(self, refused):
-        """Reads or commands answered 401/403: the subscription lives, but the data plane does not."""
+    def _refused(self, refused: bool) -> None:
+        """Reads or commands answered 401/403: the subscription lives, the data plane does not."""
         if refused != self.refused:
             self.refused = refused
             log(
@@ -255,7 +280,7 @@ class LaMarzocco:
             )
             self.events.upstream()
 
-    async def _run(self):
+    async def _run(self) -> None:
         attempt = 0
         while True:
             try:
@@ -267,13 +292,13 @@ class LaMarzocco:
                     await self._websocket()
                 else:
                     await self._poll()
-            except AuthRejected:
+            except AuthRejectedError:
                 self._reject()
                 return
             except (
                 TransportError,
                 aiohttp.ClientError,
-                asyncio.TimeoutError,
+                TimeoutError,
                 ValueError,
                 OSError,
             ) as error:
@@ -281,11 +306,12 @@ class LaMarzocco:
                 delay = RETRY_S[min(attempt, len(RETRY_S) - 1)]
                 attempt = attempt + 1 if attempt < len(RETRY_S) - 1 else 0
                 log(
-                    f"La Marzocco connection lost ({error or type(error).__name__}); retrying in {delay} s"
+                    f"La Marzocco connection lost ({str(error) or type(error).__name__});"
+                    f" retrying in {delay} s"
                 )
                 await asyncio.sleep(delay)
 
-    def _reject(self):
+    def _reject(self) -> None:
         log("La Marzocco refused the account; waiting for new credentials from the controller")
         self.rejected = True
         self.access = self.refresh = None
@@ -293,7 +319,14 @@ class LaMarzocco:
         self.events.account(False)
 
     # --- HTTP ----------------------------------------------------------------
-    async def _request(self, method, path, body=None, authenticated=True, registration=False):
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        body: str | None = None,
+        authenticated: bool = True,
+        registration: bool = False,
+    ) -> tuple[int, str]:
         if self.installation is None:
             self.installation = Installation((await offload(self.store.installation_key))[0])
         headers = {"Accept": "application/json", "User-Agent": "OpenBrewByWeight/1"}
@@ -316,21 +349,21 @@ class LaMarzocco:
                 timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S),
             ) as reply:
                 return reply.status, await reply.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
+        except (aiohttp.ClientError, TimeoutError, OSError) as error:
             why = clip(f"{type(error).__name__}: {error}")
             raise TransportError(f"{method} {path.rsplit('/', 1)[-1]}: {why}") from None
 
-    def _tokens(self, text):
+    def _tokens(self, text: str) -> None:
         tokens = dashboard.parse(text)
-        if not isinstance(tokens.get("accessToken"), str) or not isinstance(
-            tokens.get("refreshToken"), str
-        ):
+        access, refresh = tokens.get("accessToken"), tokens.get("refreshToken")
+        if not isinstance(access, str) or not isinstance(refresh, str):
             raise TransportError("sign-in answer without tokens")
-        self.access, self.refresh = tokens["accessToken"], tokens["refreshToken"]
+        self.access, self.refresh = access, refresh
         self.issued_at = time.monotonic()
 
-    async def _sign_in(self):
-        account = await offload(self.store.credentials) or {}
+    async def _sign_in(self) -> None:
+        saved = await offload(self.store.credentials)
+        account: Mapping[str, object] = saved or {}
         if not (await offload(self.store.installation_key))[1]:
             status, text = await self._request(
                 "POST", "/auth/init", authenticated=False, registration=True
@@ -342,21 +375,23 @@ class LaMarzocco:
         body = json.dumps({"username": account.get("email"), "password": account.get("password")})
         status, text = await self._request("POST", "/auth/signin", body, authenticated=False)
         if status in (401, 403):
-            raise AuthRejected()
+            raise AuthRejectedError
         if status != 200:
             raise TransportError(_answered("sign-in", status, text))
         self._tokens(text)
         log("signed in to La Marzocco")
 
-    async def _session(self, renew=False):
-        """An access token. Only the renew loop (renew) replaces a valid one; a missing one (at start, after a
-        401) is refreshed or signed in here, and every new token outside the renew loop is reported."""
+    async def _session(self, renew: bool = False) -> None:
+        """An access token. Only the renew loop (renew) replaces a valid one; a missing one (at
+        start, after a 401) is refreshed or signed in here, and every new token outside the renew
+        loop is reported."""
         async with self.session_lock:
             if self.access and not renew:
                 return
             refreshed = False
             if self.refresh:
-                account = await offload(self.store.credentials) or {}
+                saved = await offload(self.store.credentials)
+                account: Mapping[str, object] = saved or {}
                 body = json.dumps({"username": account.get("email"), "refreshToken": self.refresh})
                 try:
                     status, text = await self._request(
@@ -373,13 +408,13 @@ class LaMarzocco:
             if not (renew and refreshed):
                 self.events.account(True)
 
-    async def _renew_loop(self):
+    async def _renew_loop(self) -> None:
         while True:
             while (due := self.issued_at + RENEW_AFTER_S - time.monotonic()) > 0:
                 await asyncio.sleep(due)  # A sign-in meanwhile (after a 401) moves the deadline.
             try:
                 await self._session(renew=True)
-            except AuthRejected:
+            except AuthRejectedError:
                 self._reject()
                 return
             except (TransportError, ValueError) as error:
@@ -390,15 +425,16 @@ class LaMarzocco:
                 continue
             self.events.renewed()
 
-    async def read(self):
-        """One dashboard read: (HTTP status, parsed dashboard or None, last command id when taken)."""
+    async def read(self) -> tuple[int, dict[str, object] | None, int]:
+        """One dashboard read: (HTTP status, parsed dashboard or None, last command id when
+        taken)."""
         ac = self.last_command
-        if not self._usable():
+        if self.account is None or not self._usable():
             return 0, None, ac
         try:
             await self._session()
             status, text = await self._request("GET", f"/things/{self.account[2]}/dashboard")
-        except AuthRejected:
+        except AuthRejectedError:
             self._reject()
             return 0, None, ac
         except (TransportError, ValueError) as error:
@@ -415,28 +451,28 @@ class LaMarzocco:
             return status, dashboard.parse(text) if status == 200 else None, ac
         except ValueError as error:
             log(
-                f"La Marzocco sent a dashboard the controller could not decode ({clip(error)}); dropped"
+                "La Marzocco sent a dashboard the controller could not decode"
+                f" ({clip(error)}); dropped"
             )
             return status, None, ac
 
-    async def command(self, command_id, op, value=None):
+    async def command(self, command_id: int, op: str, value: int | None = None) -> int:
         """Send one command; returns its HTTP status (0 for a transport failure)."""
-        if not self._usable():
+        if self.account is None or not self._usable():
             return 0
-        body = (
-            f'{{"boilerIndex":1,"targetTemperature":{value // 10}.{value % 10}}}'
-            if op == "temp"
-            else '{"mode":"StandBy"}'
-            if op == "standby"
-            else '{"mode":"BrewingMode"}'
-        )
+        if op == "temp":
+            if value is None:
+                raise TypeError("a temp command needs its value")
+            body = f'{{"boilerIndex":1,"targetTemperature":{value // 10}.{value % 10}}}'
+        else:
+            body = '{"mode":"StandBy"}' if op == "standby" else '{"mode":"BrewingMode"}'
         self.last_command = command_id
         try:
             await self._session()
             status, _ = await self._request(
                 "POST", f"/things/{self.account[2]}/command/{COMMANDS[op]}", body
             )
-        except AuthRejected:
+        except AuthRejectedError:
             self._reject()
             return 0
         except (TransportError, ValueError) as error:
@@ -450,10 +486,10 @@ class LaMarzocco:
         return status
 
     # --- Observation ---------------------------------------------------------
-    async def _poll(self):
+    async def _poll(self) -> None:
         first = True
         while True:
-            status, data, ac = await self.read()
+            _, data, ac = await self.read()
             if data is None:
                 raise TransportError("the dashboard read failed")  # read() named the reason.
             if first:
@@ -463,7 +499,9 @@ class LaMarzocco:
             first = False
             await asyncio.sleep(POLL_S)
 
-    async def _websocket(self):
+    async def _websocket(self) -> None:
+        if self.account is None or self.installation is None:
+            raise RuntimeError("no session to follow")  # _run opens one first.
         serial = self.account[2]
         destination, subscription = f"/ws/sn/{serial}/dashboard", "companion"
         headers = {"User-Agent": "OpenBrewByWeight/1", **self.installation.signed_headers()}
@@ -507,7 +545,7 @@ class LaMarzocco:
                         )
                     try:
                         message = await ws.receive(timeout=min(deadline, next_ping) - now)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         if time.monotonic() >= next_ping:
                             await ws.ping()
                             next_ping = time.monotonic() + PING_S
@@ -519,13 +557,15 @@ class LaMarzocco:
                         self.alive_at = time.monotonic()
                         continue
                     if message.type not in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                        code = message.data if isinstance(message.data, int) else ws.close_code
                         why = (
                             type(message.data).__name__
                             if isinstance(message.data, BaseException)
-                            else f"code {message.data if isinstance(message.data, int) else ws.close_code}"
+                            else f"code {code}"
                         )
                         idle = (
-                            f"{time.monotonic() - self.last_message_at:.0f} s since its last message"
+                            f"{time.monotonic() - self.last_message_at:.0f} s"
+                            " since its last message"
                             if self.last_message_at
                             else "no message ever arrived"
                         )
@@ -539,7 +579,13 @@ class LaMarzocco:
             finally:
                 self._set_subscribed(False)
 
-    async def _stomp(self, ws, frame, destination, subscription):
+    async def _stomp(
+        self,
+        ws: aiohttp.ClientWebSocketResponse,
+        frame: str,
+        destination: str,
+        subscription: str,
+    ) -> None:
         parsed = stomp_parse(frame)
         if parsed is None:
             return
@@ -570,6 +616,6 @@ class LaMarzocco:
             raise TransportError(f"unexpected STOMP {command}")
 
 
-def _identity(account):
+def _identity(account: Account | None) -> tuple[str, str, str] | None:
     """What makes a different La Marzocco session: email, password and machine serial."""
     return (account["email"], account["password"], account["serial"]) if account else None

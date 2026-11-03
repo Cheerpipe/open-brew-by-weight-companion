@@ -6,6 +6,10 @@ checked or converted here, and each event is filtered on its own (no diffing).
 """
 
 import json
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 WIDGETS = {
     "CMMachineStatus": ("mode",),
@@ -16,14 +20,22 @@ WIDGETS = {
 CONSUMED = {"connected", "widgets", "removedWidgets", "code", "output"}.union(*WIDGETS.values())
 
 
-def _unique(pairs):
+class Reduced(TypedDict, total=False):
+    """What reduce keeps of one event."""
+
+    connected: object
+    widgets: list[dict[str, object]]
+    removedWidgets: list[str]
+
+
+def _unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
     keys = [key for key, _ in pairs]
     if any(keys.count(key) > 1 for key in CONSUMED.intersection(keys)):
         raise ValueError("a consumed key is repeated")  # The controller rejects these too.
     return dict(pairs)
 
 
-def parse(text):
+def parse(text: str) -> dict[str, object]:
     """La Marzocco JSON payload; ValueError when it is not an object or repeats a consumed key."""
     value = json.loads(text, object_pairs_hook=_unique)
     if not isinstance(value, dict):
@@ -31,32 +43,34 @@ def parse(text):
     return value
 
 
-def _code(entry):
-    return (
-        entry if isinstance(entry, str) else entry.get("code") if isinstance(entry, dict) else None
-    )
+def _code(entry: object) -> str | None:
+    code = entry.get("code") if isinstance(entry, dict) else entry
+    return code if isinstance(code, str) else None
 
 
-def reduce(dashboard, push):
+def reduce(dashboard: Mapping[str, object], push: bool) -> Reduced | None:
     """The consumed fields this event carries, or None when it carries none."""
     codes = (
         WIDGETS if push else {code: keys for code, keys in WIDGETS.items() if code != "CMBackFlush"}
     )
-    reduced = {"connected": dashboard["connected"]} if "connected" in dashboard else {}
-    widgets = []
-    for widget in dashboard.get("widgets") if isinstance(dashboard.get("widgets"), list) else ():
-        keys = codes.get(_code(widget)) if isinstance(widget, dict) else None
+    reduced: Reduced = {"connected": dashboard["connected"]} if "connected" in dashboard else {}
+    widgets: list[dict[str, object]] = []
+    listed = dashboard.get("widgets")
+    for widget in listed if isinstance(listed, list) else ():
+        code = _code(widget) if isinstance(widget, dict) else None
+        keys = None if code is None else codes.get(code)
         output = widget.get("output") if keys else None
         kept = (
             {key: output[key] for key in keys if key in output}
-            if isinstance(output, dict)
+            if keys and isinstance(output, dict)
             else None
         )
         if kept:
             widgets.append({"code": widget["code"], "output": kept})
+    gone = dashboard.get("removedWidgets")
     removed = (
-        [_code(entry) for entry in dashboard.get("removedWidgets") or () if _code(entry) in codes]
-        if isinstance(dashboard.get("removedWidgets"), list)
+        [code for code in map(_code, gone) if code is not None and code in codes]
+        if isinstance(gone, list)
         else []
     )
     if widgets:
@@ -66,9 +80,10 @@ def reduce(dashboard, push):
     return reduced or None
 
 
-def confirms(dashboard, op, value):
+def confirms(dashboard: Mapping[str, object], op: str, value: int | None) -> bool:
     """True when a push shows the outcome of an accepted command."""
-    for widget in dashboard.get("widgets") if isinstance(dashboard.get("widgets"), list) else ():
+    listed = dashboard.get("widgets")
+    for widget in listed if isinstance(listed, list) else ():
         output = widget.get("output") if isinstance(widget, dict) else None
         if not isinstance(output, dict):
             continue
@@ -80,7 +95,10 @@ def confirms(dashboard, op, value):
                 and round(target * 10) == value
             ):
                 return True
-        if op in ("standby", "on") and widget.get("code") == "CMMachineStatus":
-            if output.get("mode") == ("StandBy" if op == "standby" else "BrewingMode"):
-                return True
+        if (
+            op in ("standby", "on")
+            and widget.get("code") == "CMMachineStatus"
+            and output.get("mode") == ("StandBy" if op == "standby" else "BrewingMode")
+        ):
+            return True
     return False
