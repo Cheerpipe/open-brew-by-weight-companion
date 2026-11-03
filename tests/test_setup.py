@@ -1,16 +1,14 @@
-#!/usr/bin/env python3
-"""./setup with a fake Docker: the .env migration, and the controller search with its step messages."""
+"""./setup with a fake Docker: the .env migration, and the controller search.
+
+The search is checked with its step messages.
+"""
 
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
-if not __debug__:
-    raise SystemExit("assertions are disabled (PYTHONOPTIMIZE); these checks would not run")
-if not shutil.which("bash"):
-    raise SystemExit("bash is not on the PATH; ./setup needs it")
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 OLD = """# Free address for the gateway
@@ -34,8 +32,16 @@ COMPANION_HTTPS_PORT=8443
 OBBW_CONTROLLER_URL=http://192.168.1.50
 """
 
-with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
-    folder, tools = Path(temporary) / "companion", Path(temporary) / "bin"
+
+@pytest.fixture
+def bash() -> str:
+    path = shutil.which("bash")
+    assert path, "bash is not on the PATH; ./setup needs it"
+    return path
+
+
+def test_env_migration(tmp_path: Path, bash: str) -> None:
+    folder, tools = tmp_path / "companion", tmp_path / "bin"
     folder.mkdir()
     tools.mkdir()
     shutil.copy(ROOT / "setup", folder / "setup")
@@ -44,33 +50,37 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
     (tools / "docker").chmod(0o755)
     env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"}
 
-    def run():
+    def run() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(folder / "setup"), "--yes"],
+            [bash, str(folder / "setup"), "--yes"],
             env=env,
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
+            check=False,
         )
 
     (folder / ".env").write_text(OLD)
     result = run()
-    assert result.returncode == 1 and "cannot use Docker" in result.stderr, result
+    assert result.returncode == 1, result
+    assert "cannot use Docker" in result.stderr, result
     assert "Renamed the settings" in result.stdout
     assert (folder / ".env").read_text() == NEW
     assert (folder / ".env.bak").read_text() == OLD, "the earlier file is kept"
 
     (folder / ".env.bak").unlink()
     result = run()
-    assert "Renamed" not in result.stdout and (folder / ".env").read_text() == NEW
+    assert "Renamed" not in result.stdout
+    assert (folder / ".env").read_text() == NEW
     assert not (folder / ".env.bak").exists(), "an already migrated .env is left alone"
 
-# The controller search, against a fake Docker whose companion finds nothing over mDNS. The scenarios
-# run at once because each waits out the real 20 s mDNS step.
+
+# The controller search, against a fake Docker whose companion finds nothing over mDNS.
 FAKE_DOCKER = r"""#!/bin/sh
 state=$FAKE_STATE
 case "$*" in
-info | "compose build" | "compose ps"* | "rm "* | "ps -aq"*) [ "$1" = compose ] && [ "$2" = ps ] && echo id ;;
+info | "compose build" | "compose ps"* | "rm "* | "ps -aq"*)
+	[ "$1" = compose ] && [ "$2" = ps ] && echo id ;;
 "compose version --short") echo 2.30.0 ;;
 "version -f"*) echo 27.0 ;;
 "compose up"*)
@@ -78,7 +88,10 @@ info | "compose build" | "compose ps"* | "rm "* | "ps -aq"*) [ "$1" = compose ] 
 	case "$*" in *--force-recreate*) touch "$state/restarted" ;; esac ;;
 *"gateway.py check"*)
 	echo "ok setup-page"
-	if [ -f "$state/restarted" ]; then echo "ok controller openbrewbyweight 192.168.4.194:80 scan"; exit 0; fi
+	if [ -f "$state/restarted" ]; then
+		echo "ok controller openbrewbyweight 192.168.4.194:80 scan"
+		exit 0
+	fi
 	echo "fail controller not found yet"
 	exit 1 ;;
 *"gateway.py scan") echo scan >>"$state/scans"; cat "$state/scan" ;;
@@ -95,12 +108,16 @@ SCENARIOS = {
     "none": "range 192.168.4.0/24 253 9\n",
     "skip": "skip 172.17.0.0/16 is larger than /22\n",
 }
-with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
+
+
+def test_controller_search(tmp_path: Path, bash: str) -> None:
+    """The controller search with its step messages.
+
+    The scenarios run at once because each waits out the real 20 s mDNS step.
+    """
     runs = {}
     for name, scan in SCENARIOS.items():
-        folder, tools, state = (
-            Path(temporary) / name / part for part in ("companion", "bin", "state")
-        )
+        folder, tools, state = (tmp_path / name / part for part in ("companion", "bin", "state"))
         for path in (folder, tools, state):
             path.mkdir(parents=True)
         shutil.copy(ROOT / "setup", folder / "setup")
@@ -114,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
             folder,
             state,
             subprocess.Popen(
-                ["bash", str(folder / "setup"), "--yes"],
+                [bash, str(folder / "setup"), "--yes"],
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -143,34 +160,35 @@ with tempfile.TemporaryDirectory(prefix="openbrewbyweight-setup-") as temporary:
         "Running (",
         'Using "openbrewbyweight" at 192.168.4.194, found by searching your network.',
     ]
-    assert [line[: len(want)] for line, want in zip(steps[1:], expected)] == expected, steps
+    assert [
+        line[: len(want)] for line, want in zip(steps[1:], expected, strict=False)
+    ] == expected, steps
     assert "OBBW_CONTROLLER_URL=http://192.168.1.50" in env_file, "the search sets nothing in .env"
     assert (state / "up").read_text().splitlines()[-1].endswith("--force-recreate"), (
         "restarted to use it"
     )
 
     code, out, err, env_file, state = results["several"]
-    assert code == 0 and "Found 2 controllers (" in out, (out, err)
+    assert code == 0, (out, err)
+    assert "Found 2 controllers (" in out, (out, err)
     assert '1. "Cafe Bar" at 192.168.4.20 (firmware 1.0.0)' in out
     assert '2. "openbrewbyweight" at 192.168.4.194 (firmware 1.1.0)' in out
     assert env_file.splitlines()[-1] == "OBBW_CONTROLLER_NAME=Cafe Bar", "--yes takes the first one"
 
     code, out, err, env_file, state = results["twins"]
-    assert code == 0 and 'More than one controller is called "openbrewbyweight"' in out, (out, err)
+    assert code == 0, (out, err)
+    assert 'More than one controller is called "openbrewbyweight"' in out, (out, err)
     assert "OBBW_CONTROLLER_URL=http://192.168.4.20" in env_file, "same names: its address instead"
 
     code, out, err, env_file, state = results["none"]
-    assert code == 1 and "No controller answered (" in out and "Set OBBW_CONTROLLER_URL" in err, (
-        out,
-        err,
-    )
+    assert code == 1, (out, err)
+    assert "No controller answered (" in out, (out, err)
+    assert "Set OBBW_CONTROLLER_URL" in err, (out, err)
     code, out, err, env_file, state = results["skip"]
-    assert (
-        code == 1 and "Not searching your network for it: 172.17.0.0/16 is larger than /22." in out
-    ), out
-    assert "Searching" not in out and "Set OBBW_CONTROLLER_URL" in err
+    assert code == 1, out
+    assert "Not searching your network for it: 172.17.0.0/16 is larger than /22." in out, out
+    assert "Searching" not in out
+    assert "Set OBBW_CONTROLLER_URL" in err
     assert all(
         (result[4] / "scans").read_text().count("scan") == 1 for result in results.values()
     ), "one search per ./setup run"
-
-print("Setup: .env migration and controller search OK")

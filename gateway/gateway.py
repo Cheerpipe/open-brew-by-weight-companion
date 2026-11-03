@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Supervisor of Open Brew by Weight Companion and its HTTPS gateway.
 
 Finds the controller over mDNS, publishes the companion's own `.local` name,
@@ -14,6 +13,7 @@ import html
 import http.client
 import ipaddress
 import json
+import logging
 import math
 import os
 import plistlib
@@ -27,12 +27,36 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
-import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast, override
 from urllib.parse import urlsplit
+
+from zeroconf import (
+    IPVersion,
+    RecordUpdate,
+    RecordUpdateListener,
+    ServiceBrowser,
+    ServiceInfo,
+    ServiceStateChange,
+    Zeroconf,
+    const,
+)
+from zeroconf._dns import DNSAddress, DNSPointer, DNSQuestion
+from zeroconf._protocol.incoming import DNSIncoming
+from zeroconf._protocol.outgoing import DNSOutgoing
+
+# The image runs this file as /opt/gateway/gateway.py; the companion package sits beside it.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from companion import VERSION, configure_logging, stop_logging
+from companion.service import start as start_companion
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping, Sequence
+
+# Under the companion's "obbw" logger, so its persistent log carries the supervisor's lines too.
+logger = logging.getLogger("obbw.gateway")
 
 HERE = Path(__file__).resolve().parent
 # Settings are COMPANION_<name>; the HTTPS gateway's earlier names still work.
@@ -47,7 +71,7 @@ LEGACY = {
 }
 
 
-def setting(env, name):
+def setting(env: Mapping[str, str], name: str) -> str:
     return (env.get("COMPANION_" + name) or env.get(LEGACY.get(name, ""), "") or "").strip()
 
 
@@ -75,12 +99,90 @@ SCAN_AFTER_S = (
 STORED_TIMEOUT_S = (
     3  # A single probe of the stored controller may wait out a Wi-Fi power-save beacon.
 )
-PRIVATE = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+PRIVATE = tuple(ipaddress.IPv4Network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 ROUTES = Path("/proc/net/route")
 OPENSSL_CNF = "[req]\ndistinguished_name=dn\n[dn]\n"
+# The image's own tools, by absolute path so no command depends on the PATH; a missing one
+# fails with its path in the error.
+OPENSSL = "/usr/bin/openssl"
+NGINX = "/usr/sbin/nginx"
+QRENCODE = "/usr/bin/qrencode"
+IP = "/sbin/ip"
+
+type Address = tuple[str, int]
+type Target = tuple[str, Address]  # (name, (ip, port))
 
 
-def instance_name(value):
+class Config(TypedDict):
+    name: str
+    hostname: str
+    ip: str
+    http_port: int
+    https_port: int
+    controller: Address | None
+    controller_name: str
+    mdns_publish: bool
+    log_retention_days: int
+    log_retention_mb: int
+
+
+class Identity(TypedDict):
+    name: str
+    firmware: str
+
+
+class Found(TypedDict):
+    name: str
+    firmware: str
+    ip: str
+    port: int
+
+
+class Probe(Protocol):
+    def __call__(
+        self, ip: str, port: int = 80, timeout: float = SCAN_TIMEOUT_S
+    ) -> Found | None: ...
+
+
+class Seen(TypedDict):
+    controller: bool
+    note: str
+
+
+class ControllerStatus(TypedDict):
+    name: str
+    ip: str
+    port: int
+    source: str
+
+
+class Status(TypedDict):
+    """status.json, as write_status publishes it and check reads it."""
+
+    name: str
+    hostname: str
+    ip: str
+    mdns_publish: bool
+    setup_url: str
+    secure_url: str
+    controller: ControllerStatus | None
+    seen: dict[str, Seen]
+    certificate_expires: str
+
+
+class CompanionStatus(TypedDict):
+    link: str
+
+
+type Event = (
+    tuple[Literal["tick", "nginx", "companion"]]
+    | tuple[Literal["found"], Target]
+    | tuple[Literal["skip"], str, bool, str]
+    | tuple[Literal["scanned"], list[Found]]
+)
+
+
+def instance_name(value: str) -> str:
     """COMPANION_NAME as the controller accepts it (1 to 32 bytes, no control characters)."""
     name = "".join(c for c in value if c.isprintable()).strip()
     if not name:
@@ -91,28 +193,24 @@ def instance_name(value):
     return name.encode()[:32].decode(errors="ignore").strip() or "Companion"
 
 
-def log(message):
-    try:
-        from companion import gateway_logger
-    except ImportError:  # Before the path is set up, or in standalone tests: plain stdout.
-        print(f"gateway: {message}", flush=True)
-        return
-    gateway_logger.info("%s", message)
+def log(message: str) -> None:
+    logger.info("%s", message)
 
 
-def local_ip():
+def local_ip() -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.connect(
             ("192.0.2.1", 9)
         )  # UDP connect sends nothing; it only picks the default-route address.
-        return probe.getsockname()[0]
+        address: str = probe.getsockname()[0]  # (host, port) for AF_INET
+        return address
 
 
-def enabled(value):
+def enabled(value: str) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
-def load_config(env):
+def load_config(env: Mapping[str, str]) -> Config:
     host = (setting(env, "HOSTNAME") or "openbrewbyweight-secure").lower().rstrip(".")
     controller = None
     if url := (env.get("OBBW_CONTROLLER_URL") or "").strip():
@@ -136,30 +234,42 @@ def load_config(env):
     }
 
 
-def _bounded(value, low, high, default):
+def _bounded(value: str | None, low: int, high: int, default: int) -> int:
     """A positive whole setting within bounds, or the default."""
+    if value is None:
+        return default
     try:
         parsed = int(value)
-    except TypeError, ValueError:
+    except ValueError:
         return default
     return min(max(parsed, low), high)
 
 
-def static_controller(cfg):
+def static_controller(cfg: Config) -> Target | None:
     """Return the configured controller when its address needs no mDNS lookup."""
     if cfg["controller"] and cfg["controller"][0].replace(".", "").isdigit():
         return cfg["controller"][0], cfg["controller"]
     return None
 
 
-def wanted(cfg, *names):
-    """True without OBBW_CONTROLLER_NAME, or when it is one of these names (a space matches a hyphen)."""
+def wanted(cfg: Config, *names: str) -> bool:
+    """True without OBBW_CONTROLLER_NAME, or when it is one of these names.
+
+    A space matches a hyphen.
+    """
     want = cfg["controller_name"].replace(" ", "-")
     return not want or want in {name.lower().replace(" ", "-") for name in names}
 
 
-def match_controller(cfg, instance, server, properties, addresses, port):
-    """Map one `_http._tcp` service to ((label, (ip, port)), None), or (None, why it was skipped)."""
+def match_controller(
+    cfg: Config,
+    instance: str,
+    server: str,
+    properties: Mapping[bytes, bytes | None],
+    addresses: Sequence[str],
+    port: int,
+) -> tuple[Target, None] | tuple[None, str]:
+    """Map one `_http._tcp` service to ((label, (ip, port)), None), or (None, why it is skipped)."""
     host = server.rstrip(".").lower()
     ipv4 = [a for a in addresses if ":" not in a]
     if cfg["controller"]:
@@ -174,8 +284,8 @@ def match_controller(cfg, instance, server, properties, addresses, port):
     return (instance, (ipv4[0], port)), None
 
 
-def controller_identity(body):
-    """The controller's /api/v1/integration/info answer as {name, firmware}, or None for anything else."""
+def controller_identity(body: str | bytes) -> Identity | None:
+    """The controller's /api/v1/integration/info answer as {name, firmware}, or None otherwise."""
     try:
         info = json.loads(body)
     except ValueError:
@@ -189,15 +299,21 @@ def controller_identity(body):
         and isinstance(info.get("authRequired"), bool)
     ):
         return None
-    clean = lambda text: "".join(c for c in text if c.isprintable() and not c.isspace())[:48] or "?"
+
+    def clean(text: str) -> str:
+        return "".join(c for c in text if c.isprintable() and not c.isspace())[:48] or "?"
+
     return {
         "name": "".join(c for c in info["name"] if c.isprintable()).strip()[:32] or "?",
         "firmware": clean(info["firmwareVersion"]),
     }
 
 
-def probe_controller(ip, port=80, timeout=SCAN_TIMEOUT_S):
-    """One GET of the identity route: {name, firmware, ip, port}, or None. No redirect, proxy or retry."""
+def probe_controller(ip: str, port: int = 80, timeout: float = SCAN_TIMEOUT_S) -> Found | None:
+    """One GET of the identity route: {name, firmware, ip, port}, or None.
+
+    No redirect, proxy or retry.
+    """
     connection = http.client.HTTPConnection(ip, port, timeout=timeout)
     try:
         connection.request("GET", SCAN_PATH, headers={"Accept": "application/json"})
@@ -207,10 +323,10 @@ def probe_controller(ip, port=80, timeout=SCAN_TIMEOUT_S):
         return None
     finally:
         connection.close()
-    return info and {**info, "ip": ip, "port": port}
+    return None if info is None else {**info, "ip": ip, "port": port}
 
 
-def lan_network(ip, routes=ROUTES):
+def lan_network(ip: str, routes: Path = ROUTES) -> ipaddress.IPv4Network | None:
     """The companion's own IPv4 network: the most specific on-link route that holds its address."""
     best, address = None, ipaddress.ip_address(ip)
     try:
@@ -223,7 +339,7 @@ def lan_network(ip, routes=ROUTES):
         destination, mask = (
             socket.inet_ntoa(struct.pack("=I", int(fields[i], 16))) for i in (1, 7)
         )
-        network = ipaddress.ip_network(f"{destination}/{mask}", strict=False)
+        network = ipaddress.IPv4Network(f"{destination}/{mask}", strict=False)
         if (
             network.prefixlen
             and address in network
@@ -233,8 +349,10 @@ def lan_network(ip, routes=ROUTES):
     return best
 
 
-def scan_plan(cfg, routes=ROUTES):
-    """(network, hosts to probe, None), or (network or None, [], why the network is not searched)."""
+def scan_plan(
+    cfg: Config, routes: Path = ROUTES
+) -> tuple[ipaddress.IPv4Network | None, list[str], str | None]:
+    """(network, hosts to probe, None), or (network or None, [], why it is not searched)."""
     network = lan_network(cfg["ip"], routes)
     if network is None:
         return None, [], f"no network interface of its own holds {cfg['ip']}"
@@ -245,22 +363,25 @@ def scan_plan(cfg, routes=ROUTES):
     return network, [str(host) for host in network.hosts() if str(host) != cfg["ip"]], None
 
 
-def scan_seconds(hosts):
+def scan_seconds(hosts: Sequence[str]) -> int:
     return math.ceil(len(hosts) / SCAN_WORKERS) * SCAN_TIMEOUT_S + 1
 
 
-def scan_hosts(cfg, hosts, probe=probe_controller):
+def scan_hosts(cfg: Config, hosts: Iterable[str], probe: Probe = probe_controller) -> list[Found]:
     """Probe each host once, SCAN_WORKERS at a time: the matching controllers, in address order."""
     with ThreadPoolExecutor(SCAN_WORKERS) as pool:
         return [found for found in pool.map(probe, hosts) if found and wanted(cfg, found["name"])]
 
 
-def scan_target(found):
+def scan_target(found: Found) -> Target:
     return found["name"], (found["ip"], found["port"])
 
 
-def scan(cfg, data, probe=probe_controller, routes=ROUTES):
-    """`gateway.py scan`, for ./setup: one line per step and controller; stores the controller when one answers."""
+def scan(cfg: Config, data: Path, probe: Probe = probe_controller, routes: Path = ROUTES) -> int:
+    """`gateway.py scan`, for ./setup: one line per step and controller.
+
+    Stores the controller when one answers.
+    """
     if cfg["controller"]:
         print("skip OBBW_CONTROLLER_URL chooses the controller")
         return 1
@@ -278,8 +399,14 @@ def scan(cfg, data, probe=probe_controller, routes=ROUTES):
 
 
 def fallback(
-    cfg, current, events, stop, probe=probe_controller, routes=ROUTES, delays=SCAN_AFTER_S
-):
+    cfg: Config,
+    current: Callable[[], tuple[Target | None, str]],
+    events: queue.Queue[Event],
+    stop: threading.Event,
+    probe: Probe = probe_controller,
+    routes: Path = ROUTES,
+    delays: Sequence[float] = SCAN_AFTER_S,
+) -> None:
     """Search the network for the controller while mDNS has not found it and none answers.
 
     Runs on its own thread unless OBBW_CONTROLLER_URL is set. The first search comes delays[0] s
@@ -294,10 +421,10 @@ def fallback(
             return
         if (
             target
-            and (found := probe(*target[1], timeout=STORED_TIMEOUT_S))
-            and wanted(cfg, found["name"])
+            and (stored := probe(*target[1], timeout=STORED_TIMEOUT_S))
+            and wanted(cfg, stored["name"])
         ):
-            events.put(("scanned", [found]))
+            events.put(("scanned", [stored]))
             delay = delays[-1]
             continue
         network, hosts, why = scan_plan(cfg, routes)
@@ -325,14 +452,14 @@ def fallback(
             )
 
 
-def openssl(*args):
-    result = subprocess.run(["openssl", *args], capture_output=True, text=True)
+def openssl(*args: str) -> str:
+    result = subprocess.run([OPENSSL, *args], capture_output=True, text=True, check=False)
     if result.returncode:
         raise RuntimeError(f"openssl {args[0]} failed: {result.stderr.strip()}")
     return result.stdout
 
 
-def ensure_certificates(cfg, data):
+def ensure_certificates(cfg: Config, data: Path) -> bool:
     """Create or renew the CA and server certificate; return True when files changed."""
     host, ca, ca_key = cfg["hostname"], data / f"{CA_NAME}.crt", data / f"{CA_NAME}.key"
     leaf, leaf_key, cnf = data / "server.crt", data / "server.key", data / "openssl.cnf"
@@ -355,7 +482,8 @@ def ensure_certificates(cfg, data):
     ):
         if ca.exists():
             log(
-                f"the CA does not cover {host}; creating a new one, so every device must be set up again"
+                f"the CA does not cover {host}; creating a new one, "
+                "so every device must be set up again"
             )
         openssl(
             "req",
@@ -417,7 +545,7 @@ def ensure_certificates(cfg, data):
     return changed
 
 
-def mobileconfig(ca_der, host):
+def mobileconfig(ca_der: bytes, host: str) -> bytes:
     """Apple configuration profile that installs the CA as a trusted root."""
     digest = hashlib.sha256(ca_der).hexdigest()
     ident = f"org.openbrewbyweight.gateway.{host}"
@@ -444,17 +572,17 @@ def mobileconfig(ca_der, host):
     )
 
 
-def fill(template, values):
+def fill(template: str, values: Mapping[str, object]) -> str:
     for key, value in values.items():
         template = template.replace(f"@{key}@", str(value))
     return template
 
 
-def site_url(scheme, cfg, port, default):
+def site_url(scheme: str, cfg: Config, port: int, default: int) -> str:
     return f"{scheme}://{cfg['hostname']}" + ("" if port == default else f":{port}")
 
 
-def upstream(target):
+def upstream(target: Target | None) -> str:
     return (
         target[1][0] + ("" if target[1][1] == 80 else f":{target[1][1]}")
         if target
@@ -462,10 +590,10 @@ def upstream(target):
     )
 
 
-def qr_svg(text):
+def qr_svg(text: str) -> str:
     try:
         return subprocess.run(
-            ["qrencode", "-t", "SVG", "--inline", "-m", "1", "-o", "-", text],
+            [QRENCODE, "-t", "SVG", "--inline", "-m", "1", "-o", "-", text],
             capture_output=True,
             text=True,
             check=True,
@@ -475,7 +603,7 @@ def qr_svg(text):
         return ""
 
 
-def write_site(cfg, data, run, target):
+def write_site(cfg: Config, data: Path, run: Path, target: Target | None) -> None:
     """Render nginx.conf and the setup page for the current controller."""
     www = run / "www"
     www.mkdir(parents=True, exist_ok=True)
@@ -487,7 +615,7 @@ def write_site(cfg, data, run, target):
     values = {
         "SECURE_URL": html.escape(site_url("https", cfg, cfg["https_port"], 443)),
         "NAME": html.escape(cfg["name"]),
-        "VERSION": html.escape(companion_version()),
+        "VERSION": html.escape(VERSION),
         "HOSTNAME": html.escape(cfg["hostname"]),
         "CA_NAME": CA_NAME,
         "FINGERPRINT": ":".join(fingerprint[i : i + 2] for i in range(0, len(fingerprint), 2)),
@@ -535,22 +663,19 @@ def write_site(cfg, data, run, target):
     )
 
 
-def companion_version():
-    """The companion's version for the page footer, read from its package without importing it."""
-    sys.path.insert(0, str(HERE.parent))
-    from companion import VERSION
+def write_status(
+    cfg: Config, data: Path, run: Path, target: Target | None, source: str, seen: dict[str, Seen]
+) -> None:
+    """Publish the gateway's state at /__companion/gateway.
 
-    return VERSION
-
-
-def write_status(cfg, data, run, target, source, seen):
-    """Publish the gateway's state at /__companion/gateway for ./setup, health checks and monitoring."""
+    For ./setup, health checks and monitoring.
+    """
     expires = (
         openssl("x509", "-in", str(data / "server.crt"), "-noout", "-enddate")
         .strip()
         .split("=", 1)[1]
     )
-    status = {
+    status: Status = {
         "name": cfg["name"],
         "hostname": cfg["hostname"],
         "ip": cfg["ip"],
@@ -574,11 +699,11 @@ def write_status(cfg, data, run, target, source, seen):
     temporary.replace(run / "status.json")
 
 
-def controller_filter(cfg):
+def controller_filter(cfg: Config) -> str:
     return f"{cfg['controller']}|{cfg['controller_name']}"
 
 
-def remembered_controller(cfg, data):
+def remembered_controller(cfg: Config, data: Path) -> tuple[Target, str] | None:
     """(controller, source) found last with the same settings, used at start until mDNS confirms it.
 
     The source is "remembered" for one found over mDNS and "scan" for one found by searching.
@@ -594,7 +719,7 @@ def remembered_controller(cfg, data):
         return None
 
 
-def remember_controller(cfg, data, target, via="mdns"):
+def remember_controller(cfg: Config, data: Path, target: Target, via: str = "mdns") -> None:
     (data / CONTROLLER_FILE).write_text(
         json.dumps(
             {
@@ -608,33 +733,45 @@ def remember_controller(cfg, data, target, via="mdns"):
     )
 
 
-def https_get(cfg, data, path):
+def https_get(cfg: Config, data: Path, path: str) -> int:
     """GET path through the gateway's own HTTPS server, verifying it against the gateway CA."""
     context = ssl.create_default_context(cafile=str(data / f"{CA_NAME}.crt"))
-    with socket.create_connection(("127.0.0.1", cfg["https_port"]), timeout=15) as raw:
-        with context.wrap_socket(raw, server_hostname=cfg["hostname"]) as tls:
-            tls.sendall(
-                f"GET {path} HTTP/1.1\r\nHost: {cfg['hostname']}\r\nConnection: close\r\n\r\n".encode()
-            )
-            return int(tls.recv(64).split()[1])
+    with (
+        socket.create_connection(("127.0.0.1", cfg["https_port"]), timeout=15) as raw,
+        context.wrap_socket(raw, server_hostname=cfg["hostname"]) as tls,
+    ):
+        tls.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: {cfg['hostname']}\r\nConnection: close\r\n\r\n".encode()
+        )
+        return int(tls.recv(64).split()[1])
 
 
-def check(cfg, data, through_controller):
-    """Probe the running gateway from inside its container: one line per finding, exit 1 on a problem.
+def http_json(cfg: Config, path: str) -> object:
+    """GET path from the gateway's own plain-HTTP server: its JSON answer; OSError if not 2xx."""
+    connection = http.client.HTTPConnection("127.0.0.1", cfg["http_port"], timeout=5)
+    try:
+        connection.request("GET", path)
+        reply = connection.getresponse()
+        if not 200 <= reply.status < 300:
+            raise OSError(f"HTTP Error {reply.status}: {reply.reason}")
+        return json.load(reply)
+    finally:
+        connection.close()
 
-    Without --controller nothing reaches the controller, so Docker health checks add no Wi-Fi traffic.
+
+def check(cfg: Config, data: Path, through_controller: bool) -> int:
+    """Probe the running gateway from inside its container: one line per finding.
+
+    Exits 1 on a problem. Without --controller nothing reaches the controller, so Docker health
+    checks add no Wi-Fi traffic.
     """
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{cfg['http_port']}/__companion/gateway", timeout=5
-        ) as reply:
-            status = json.load(reply)
+        # Both answers come from this gateway's own nginx and companion.
+        status = cast("Status", http_json(cfg, "/__companion/gateway"))
         print("ok setup-page")
         print(f"ok https {https_get(cfg, data, '/__companion/ping')}")
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{cfg['http_port']}/__companion/status", timeout=5
-        ) as reply:
-            print(f"ok companion link {json.load(reply)['link']}")
+        companion = cast("CompanionStatus", http_json(cfg, "/__companion/status"))
+        print(f"ok companion link {companion['link']}")
     except (OSError, ValueError, IndexError) as error:
         print(f"fail gateway {error}")
         return 1
@@ -645,9 +782,11 @@ def check(cfg, data, through_controller):
         print("fail controller not found yet")
         return 1
     print(
-        f"ok controller {controller['name']} {controller['ip']}:{controller['port']} {controller['source']}"
+        f"ok controller {controller['name']} {controller['ip']}:{controller['port']} "
+        f"{controller['source']}"
     )
     if through_controller:
+        code: int | Exception
         try:
             code = https_get(cfg, data, "/")
         except (OSError, ValueError, IndexError) as error:
@@ -657,19 +796,18 @@ def check(cfg, data, through_controller):
     return 0
 
 
-def mdns_check(cfg, host="openbrewbyweight.local", wait_s=3):
-    """`gateway.py mdns-check [name.local]`: show where mDNS answers about the controller reach this container.
+def mdns_check(cfg: Config, host: str = "openbrewbyweight.local", *, wait_s: float = 3) -> int:
+    """`gateway.py mdns-check [name.local]`: where mDNS answers reach this container.
 
-    Prints the interfaces, their flags and multicast groups, then asks for host's address and the
-    `_http._tcp` services three ways, printing every packet that arrives and on which interface:
-    legacy unicast (from a random port, so the answer comes back unicast), QM from port 5353 (the
-    answer goes to the multicast group) and QU from port 5353 (unicast to port 5353, which the running
-    companion may receive instead of this check). It changes nothing in the running companion.
+    Shows where answers about the controller arrive. Prints the interfaces, their flags and
+    multicast groups, then asks for host's address and the `_http._tcp` services three ways,
+    printing every packet that arrives and on which interface: legacy unicast (from a random port,
+    so the answer comes back unicast), QM from port 5353 (the answer goes to the multicast group)
+    and QU from port 5353 (unicast to port 5353, which the running companion may receive instead
+    of this check). It changes nothing in the running companion.
     """
-    from zeroconf import DNSAddress, DNSIncoming, DNSOutgoing, DNSPointer, DNSQuestion, const
-
     addresses = subprocess.run(
-        ["ip", "-4", "-o", "addr"], capture_output=True, text=True
+        [IP, "-4", "-o", "addr"], capture_output=True, text=True, check=False
     ).stdout.splitlines()
     for line in addresses:
         flags = int((Path("/sys/class/net") / line.split()[1] / "flags").read_text(), 16)
@@ -685,7 +823,8 @@ def mdns_check(cfg, host="openbrewbyweight.local", wait_s=3):
         "Multicast groups (FB0000E0 is mDNS, 224.0.0.251):\n"
         + Path("/proc/net/igmp").read_text().rstrip()
     )
-    host, group, results = host.rstrip(".").lower() + ".", ("224.0.0.251", 5353), {}
+    results: dict[str, str | None] = {}
+    host, group = host.rstrip(".").lower() + ".", ("224.0.0.251", 5353)
     for label, port, unicast in (
         ("legacy unicast", 0, False),
         ("QM", 5353, False),
@@ -712,7 +851,8 @@ def mdns_check(cfg, host="openbrewbyweight.local", wait_s=3):
                 query.add_question(question)
             sock.sendto(query.packets()[0], group)
             print(
-                f"\n{label}: asked for {host} and _http._tcp.local. from {cfg['ip']}:{sock.getsockname()[1]}"
+                f"\n{label}: asked for {host} and _http._tcp.local. "
+                f"from {cfg['ip']}:{sock.getsockname()[1]}"
             )
             deadline, results[label] = time.monotonic() + wait_s, None
             while (left := deadline - time.monotonic()) > 0:
@@ -750,20 +890,7 @@ def mdns_check(cfg, host="openbrewbyweight.local", wait_s=3):
     return 0 if all(results.values()) else 1
 
 
-def main():
-    from zeroconf import (
-        DNSAddress,
-        IPVersion,
-        RecordUpdateListener,
-        ServiceBrowser,
-        ServiceInfo,
-        ServiceStateChange,
-        Zeroconf,
-    )
-
-    sys.path.insert(0, str(HERE.parent))
-    from companion.service import start as start_companion
-
+def main() -> None:
     cfg = load_config(os.environ)
     if sys.argv[1:2] == ["check"]:
         raise SystemExit(check(cfg, DATA, "--controller" in sys.argv))
@@ -771,31 +898,35 @@ def main():
         raise SystemExit(scan(cfg, DATA))
     if sys.argv[1:2] == ["mdns-check"]:
         raise SystemExit(mdns_check(cfg, *sys.argv[2:3]))
-    from companion import configure_logging, stop_logging
-
     configure_logging(DATA)  # The supervisor only: check/scan never share the rotating file.
     target, source = static_controller(cfg), "manual"
     if not target and (saved := remembered_controller(cfg, DATA)):
         target, source = saved
     ensure_certificates(cfg, DATA)
     write_site(cfg, DATA, RUN, target)
-    seen = {}
+    seen: dict[str, Seen] = {}
     write_status(cfg, DATA, RUN, target, source, seen)
-    nginx = subprocess.Popen(["nginx", "-c", str(RUN / "nginx.conf"), "-g", "daemon off;"])
-    events = queue.Queue()
+    nginx = subprocess.Popen([NGINX, "-c", str(RUN / "nginx.conf"), "-g", "daemon off;"])
+    events: queue.Queue[Event] = queue.Queue()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    threading.Thread(target=lambda: (nginx.wait(), events.put(("nginx",))), daemon=True).start()
+
+    def watch_nginx() -> None:
+        nginx.wait()
+        events.put(("nginx",))
+
+    threading.Thread(target=watch_nginx, daemon=True).start()
     companion = start_companion(cfg, DATA, RUN, lambda: events.put(("companion",)))
     companion.controller(target)
 
     zc = Zeroconf(interfaces=[cfg["ip"]], ip_version=IPVersion.V4Only)
-    heard, heard_lock = (
-        set(),
-        threading.Lock(),
-    )  # Devices whose mDNS address records reached the companion.
+    heard: set[str] = set()  # Devices whose mDNS address records reached the companion.
+    heard_lock = threading.Lock()
 
     class Heard(RecordUpdateListener):
-        def async_update_records(self, zc, now, records):
+        @override
+        def async_update_records(
+            self, zc: Zeroconf, now: float, records: list[RecordUpdate]
+        ) -> None:
             with heard_lock:
                 heard.update(r.new.name for r in records if isinstance(r.new, DNSAddress))
 
@@ -814,12 +945,14 @@ def main():
         )
         log(f"publishing {cfg['hostname']} at {cfg['ip']}")
 
-    def on_change(zeroconf, service_type, name, state_change):
+    def on_change(
+        zeroconf: Zeroconf, service_type: str, name: str, state_change: ServiceStateChange
+    ) -> None:
         if state_change is ServiceStateChange.Removed:
             return  # Keep the last address; a restarting controller announces itself again.
         instance = name.removesuffix("." + service_type)
         info = zeroconf.get_service_info(service_type, name, timeout=INFO_TIMEOUT_MS)
-        found, reason = (
+        matched = (
             match_controller(
                 cfg,
                 instance,
@@ -828,20 +961,23 @@ def main():
                 info.parsed_addresses(IPVersion.V4Only),
                 info.port,
             )
-            if info and info.server
+            # The service record sets the server and port together.
+            if info and info.server and info.port is not None
             else (None, "no answer yet")
         )
         is_controller = bool(info and info.properties.get(b"obbw") == b"1")
-        events.put(("found", found) if found else ("skip", instance, is_controller, reason))
+        events.put(
+            ("found", matched[0]) if matched[0] else ("skip", instance, is_controller, matched[1])
+        )
 
-    def note(instance, is_controller, reason):
+    def note(instance: str, is_controller: bool, reason: str) -> bool:
         """Record what discovery made of a device; return True when that changed."""
         if seen.get(instance) == {"controller": is_controller, "note": reason}:
             return False
         seen[instance] = {"controller": is_controller, "note": reason}
         return True
 
-    browser = None
+    browser: ServiceBrowser | None = None
     if source != "manual" or not target:
         browser = ServiceBrowser(zc, HTTP_SERVICE, handlers=[on_change])
         log(
@@ -869,7 +1005,7 @@ def main():
             except queue.Empty:
                 event = ("tick",)
             try:
-                if event[0] == "tick" and searching:
+                if event[0] == "tick" and searching and browser:
                     with heard_lock:
                         others = sorted(
                             n.removesuffix(".local.") for n in heard - {cfg["hostname"] + "."}
@@ -877,7 +1013,8 @@ def main():
                     log(
                         "no controller confirmed yet; asking the network again ("
                         + (
-                            f"mDNS reaches the companion from {len(others)} devices: {', '.join(others[:5])}"
+                            f"mDNS reaches the companion from {len(others)} devices: "
+                            f"{', '.join(others[:5])}"
                             if others
                             else f"no mDNS answer from any device has reached {cfg['ip']}"
                         )
@@ -900,6 +1037,7 @@ def main():
                 elif (
                     event[0] == "found"
                     and source == "mdns"
+                    and target is not None
                     and event[1][0] != target[0]
                     and not cfg["controller_name"]
                 ):
@@ -925,8 +1063,8 @@ def main():
                     if found != target:
                         remember_controller(cfg, DATA, found, "scan")
                         log(
-                            f"controller {found[0]} at {found[1][0]}:{found[1][1]}, found by searching the network "
-                            f"(firmware {event[1][0]['firmware']})"
+                            f"controller {found[0]} at {found[1][0]}:{found[1][1]}, "
+                            f"found by searching the network (firmware {event[1][0]['firmware']})"
                         )
                         note(found[0], True, "in use")
                         site_changed = True
@@ -950,7 +1088,7 @@ def main():
                 # One bad event must not end the supervisor; ten in a row is a state a
                 # restart clears better than a limp.
                 unhandled += 1
-                log("an event was not handled:\n" + traceback.format_exc())
+                logger.info("an event was not handled:", exc_info=True)
                 if unhandled >= 10:
                     status = 1
                     break
