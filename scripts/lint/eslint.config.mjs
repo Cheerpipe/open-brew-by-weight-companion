@@ -18,4 +18,12 @@ export default [
       ...js.configs.recommended.rules,
     },
   },
+  {
+    files: ["scripts/lint/**/*.mjs"],
+    languageOptions: { ecmaVersion: 2024, sourceType: "module", globals: globals.node },
+    linterOptions: { reportUnusedDisableDirectives: "error", noInlineConfig: true },
+    rules: {
+      ...js.configs.recommended.rules,
+    },
+  },
 ];

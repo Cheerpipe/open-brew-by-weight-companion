@@ -38,6 +38,9 @@ PROTOCOL = 1
 CTX_SESSION, CTX_PASSWORD, CTX_BODY = 0, 1, 2
 COUNTER_MAX = 0xFFFFFFFF
 CLIENT_ID = re.compile(r"[0-9a-f]{16,24}")
+# The relay header's browser address when there is none: the placeholder the firmware's link
+# protocol defines ("0.0.0.0"), a header value only and never an address anything binds to.
+NO_ADDRESS = str(ipaddress.IPv4Address(0))
 # What the controller reads from a browser's request; everything else stays here.
 FORWARDED = (
     "Content-Type",
@@ -76,7 +79,7 @@ def address(text: str | None) -> str:
     try:
         return str(ipaddress.ip_address((text or "").split("%")[0]))
     except ValueError:
-        return "0.0.0.0"
+        return NO_ADDRESS
 
 
 class Reply(aiohttp.ClientResponse):

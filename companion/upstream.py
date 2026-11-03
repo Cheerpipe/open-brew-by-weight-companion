@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 import aiohttp
 
 from . import clip, log
+from .relay import NO_ADDRESS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -86,7 +87,7 @@ class Upstream:
         companion, relay = self.companion, self.relay
         host = companion.base_url().removeprefix("http://")
         for attempt in (0, 1):
-            value = await relay.signed("GET", PATH, "0.0.0.0", relay.client_id)
+            value = await relay.signed("GET", PATH, NO_ADDRESS, relay.client_id)
             if value is None:
                 return None
             try:
