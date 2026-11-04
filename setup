@@ -344,7 +344,9 @@ setup_url=$(docker compose exec -T companion python3 -c 'import json; print(json
 bold "Done"
 say "On each phone, tablet or computer, open $setup_url (plain http) and follow the"
 say "steps for that device. On a phone, scan this code:"
-docker compose exec -T companion qrencode -t ANSIUTF8 -m 2 "$setup_url" || true
+docker compose exec -T companion python3 -c \
+	'import segno, sys; segno.make(sys.argv[1], error="l", boost_error=False).terminal(border=2, compact=True)' \
+	"$setup_url" || true
 if [[ $(env_get COMPOSE_FILE) != *host* ]]; then
 	say "This server itself cannot open the companion's address; every other device can."
 fi

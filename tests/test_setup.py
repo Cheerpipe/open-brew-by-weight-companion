@@ -40,6 +40,13 @@ def bash() -> str:
     return path
 
 
+def test_qr_comes_from_the_images_library() -> None:
+    """The image ships segno and no qrencode command, whose call failed at the end of each run."""
+    script = (ROOT / "setup").read_text()
+    assert "segno.make" in script
+    assert "qrencode" not in script
+
+
 def test_env_migration(tmp_path: Path, bash: str) -> None:
     folder, tools = tmp_path / "companion", tmp_path / "bin"
     folder.mkdir()

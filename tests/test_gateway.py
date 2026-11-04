@@ -132,7 +132,7 @@ def verify(ca: Path, leaf: Path, host: str) -> bool:
 
 
 def test_certificates_rendering_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    # qrencode is replaced so the page shows which text each QR code carries.
+    # qr_svg is replaced so the page shows which text each QR code carries.
     monkeypatch.setattr(gateway, "qr_svg", lambda text: f"<svg data-text='{text}'></svg>")
     cfg = gateway.load_config(BASE)
     with tempfile.TemporaryDirectory(prefix="openbrewbyweight-gateway-") as temporary:
