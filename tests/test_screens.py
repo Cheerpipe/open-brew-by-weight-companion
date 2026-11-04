@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import aiohttp
+import pytest
 from aiohttp.test_utils import TestServer
 
 import fake_controller
@@ -25,8 +26,6 @@ from fake_controller import event, history_frame, log_frame
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    import pytest
 
     from companion.store import Account
 
@@ -201,6 +200,13 @@ async def ops_after(session: fake_controller.Session, count: int) -> list[fake_c
     async with asyncio.timeout(OPS_S):
         await eventually(lambda: len(session.ops) >= count)
     return session.ops
+
+
+def test_an_op_number_must_be_finite() -> None:
+    """`1e400` parses as infinity, which int() cannot take."""
+    for value in (json.loads("1e400"), float("nan"), 10**400):
+        with pytest.raises(mux.InvalidOpError):
+            mux._integer(value, 0, 10)
 
 
 def test_replay_fixture_is_the_firmwares() -> None:

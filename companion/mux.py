@@ -152,8 +152,8 @@ def _integer(value: object, low: int, high: int) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
+        or not low <= value <= high  # First: int() cannot take infinity.
         or value != int(value)
-        or not low <= value <= high
     ):
         raise InvalidOpError
     return int(value)
