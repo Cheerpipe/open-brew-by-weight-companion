@@ -639,6 +639,24 @@ async def scenario() -> None:
             slow.send("x" * 600000)
             assert await c.closed() == 4002
 
+            # --- The relay session ends: no screen stays ------------------------------------------
+            e = await screen(3).open()
+            await e.next("home")
+            fake.ui = False
+            assert await companion.relay.handshake() == "disabled"
+            assert await e.closed() == 4001
+            assert await a.closed() == 4001
+            assert await b.closed() == 4001
+            assert not the_mux.claimed
+            await eventually(lambda: the_mux.upstream.state == "closed")
+            fake.ui = True
+            assert await companion.relay.handshake() == "ready"
+            a = await screen(0).open()
+            session = await asyncio.wait_for(fake.sessions.get(), 2)
+            b = await screen(1).open()
+            await a.next("home")
+            await b.next("home")
+
             # --- A signed-out screen loses its claim and live updates; the others keep theirs -----
             for path, code in (("/api/v1/auth/logout", 200), ("/api/v1/status/admin", 401)):
                 d = await screen(3).open()

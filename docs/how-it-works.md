@@ -460,6 +460,11 @@ no queue and goes at once. A request from a browser that left while it waited is
 dropped. A signed-out screen (a relayed logout or `401 AUTH_REQUIRED`) loses its
 claim and its live updates, closed with `4001`.
 
+**The relay ends.** When the relay session ends for good (a Forget, an erase, the
+Web UI through the companion turned off), the claims go, every screen is closed
+with `4001` and the shared session closes. A controller that is busy or does not
+answer a handshake (5xx, no reply) ends nothing: the session stays.
+
 **Takeover and loss.** When a browser opens the Web UI at the controller's
 own address, the controller closes the shared session with `4001`; every
 screen is closed with `4001` (reason `direct`) and offers **Reload**. Losing
@@ -729,7 +734,8 @@ mux serves Shots and History from (`companion/mux.py`, `companion/pages.py`).
 `/__companion/status` returns the same state as JSON for the Web UI's
 Diagnostic page: `name`, `version`, `id`, `paired`, `pairedWith`, the
 `controller`, `pairing` (`state`, and the `code` while pending), `relay`
-(`passthrough`, `ready` or `disabled`), `screens` (screens connected),
+(`passthrough`, `ready` or `disabled`; `passthrough` with `paired` true means no
+session yet, and nothing is proxied), `screens` (screens connected),
 `owner` (whether the companion holds the controller's Web UI claim),
 `views` (screens per view: `home`, `settings`, `diagnostic`, `log`,
 `history`, `stats`), `link`

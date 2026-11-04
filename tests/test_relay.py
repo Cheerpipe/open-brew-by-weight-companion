@@ -352,7 +352,7 @@ async def relay_scenario(data: Path) -> None:
             status, _, body = await call("GET", "/api/v1/status/admin", client=client)
             assert status == 502
             assert len(fake.requests) == seen, "nothing crossed in clear"
-            assert companion.screens.mux.claimed == {A}, "no claim without a relay session"
+            assert not companion.screens.mux.claimed, "no claim without a relay session"
             with pytest.raises(aiohttp.WSServerHandshakeError) as refusal:
                 await browser.ws_connect(base + "/api/v1/ui/ui-stream")
             assert refusal.value.status == 502
@@ -381,6 +381,19 @@ async def relay_scenario(data: Path) -> None:
         status, _, _ = await call("GET", "/api/v1/auth", client=B)
         assert status == 200
         assert last_identity(fake) is not None
+
+        # A busy controller ends nothing: the session stays.
+        fake.mode = "busy"
+        assert await relay.handshake() == "ready"
+        assert relay.body_key is not None
+        fake.ui = False
+        fake.mode = "ok"
+        assert await relay.handshake() == "disabled"
+        fake.mode = "busy"
+        assert await relay.handshake() == "disabled", "the switch stays known"
+        fake.ui = True
+        fake.mode = "ok"
+        assert await relay.handshake() == "ready"
 
         # A session lost after a success renews at once, whatever failed before.
         relay.key, relay.body_key = None, None

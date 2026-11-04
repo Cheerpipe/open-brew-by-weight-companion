@@ -122,8 +122,15 @@ class Relay:
             await self.http.close()
 
     def reset(self, link: bool | None = None) -> None:
-        self.key, self.body_key, self.counter, self.mode = None, None, 0, "passthrough"
+        self.key, self.body_key, self.counter = None, None, 0
+        self._set_mode("passthrough")
         self._set_link(link)
+
+    def _set_mode(self, mode: Mode) -> None:
+        left = self.mode == "ready" and mode != "ready"
+        self.mode = mode
+        if left:
+            self.companion.screens.mux.relay_ended()
 
     def _set_link(self, link: bool | None) -> None:
         if link != self.link:
@@ -152,6 +159,10 @@ class Relay:
                     )
         return self.mode
 
+    def _busy(self, status: int) -> bool:
+        """A 5xx ends nothing the relay has learned; the controller could not answer now."""
+        return status >= 500 and self.mode != "passthrough"
+
     async def paired(self) -> bool:
         return await offload(self.companion.store.pairing) is not None
 
@@ -174,8 +185,8 @@ class Relay:
             return
         url = companion.base_url() + PATH
         status, reply = await companion.controller_request("GET", url)
-        if status is None:
-            return  # Unreachable: keep what we have and try again when it announces itself.
+        if status is None or self._busy(status):
+            return  # Unreachable or busy: keep what we have and try again when it announces itself.
         if status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED":
             await self._prove(
                 url, pairing["secret"], bytes(16)
@@ -196,7 +207,7 @@ class Relay:
         status, reply = await companion.controller_request(
             "POST", url, {"id": companion.id, "nonce": crypto.b64(nonce), "mac": crypto.b64(proof)}
         )
-        if status is None:
+        if status is None or self._busy(status):
             return
         if status == 200:
             if not hmac.compare_digest(
@@ -211,7 +222,7 @@ class Relay:
             key = crypto.relay_key(secret, challenge, nonce)
             self.key, self.body_key, self.counter = key, crypto.relay_body_key(key), 0
             self.renew_at = float("-inf")
-            self.mode = "disabled" if reply.get("ui") is False else "ready"
+            self._set_mode("disabled" if reply.get("ui") is False else "ready")
             self._set_link(reply.get("link") is True)
             await companion.recognized()
             # The controller just proved itself again: a dead link socket is found now.

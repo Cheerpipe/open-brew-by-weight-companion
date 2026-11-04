@@ -1145,6 +1145,13 @@ class Mux:
             if screen.id == client:
                 screen.close(4001)
 
+    def relay_ended(self) -> None:
+        """The relay session ended (a Forget, an erase, the Web UI turned off): no screen stays."""
+        self.claimed.clear()
+        for screen in list(self.screens):
+            screen.close(4001)
+        self.upstream.close()
+
     def takeover(self) -> None:
         """A relayed call answered UI_TAKEN_OVER: a direct browser holds the Web UI."""
         self.claimed.clear()
