@@ -238,6 +238,14 @@ search for a key of its own that shows matching codes.
    Nothing secret crosses the network. The service keeps it in
    `secrets/pairing.json`.
 
+### What API answers may carry
+
+Everything under `/api/` reaches a browser under the companion's trusted origin,
+so only what the controller's API really sends passes: JSON, plain text, CSV and
+binary downloads, with the headers those answers use. Anything else, HTML above
+all, is refused and logged. An answer that is not a download also carries
+`Content-Security-Policy: sandbox`, so it can never become a working page.
+
 ### The link
 
 The service opens `ws://<controller>/api/v1/companion/link`; the controller

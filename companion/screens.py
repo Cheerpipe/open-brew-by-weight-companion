@@ -19,7 +19,7 @@ from multidict import CIMultiDict
 
 from . import log
 from .mux import Mux
-from .relay import CLIENT_ID, address, response_headers
+from .relay import API_TYPES, CLIENT_ID, address, response_headers
 from .upstream import MAX_FRAME, REQUEST_BYTES
 from .upstream import PATH as STREAM
 
@@ -239,6 +239,9 @@ class Screens:
                 if changes:
                     archive.invalidate(changes, done=True)
             try:
+                if reply.content_type not in API_TYPES:
+                    log(f"refused a {reply.content_type} answer to {path[:64]}")
+                    return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
                 request_id = self._observe(path, screen, rewrite, reply)
                 if reply.data is not None:
                     response: web.StreamResponse = web.Response(
