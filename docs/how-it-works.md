@@ -479,7 +479,8 @@ without the companion. A paired companion never is: without a relay session
 because a fallback would let anyone who breaks the handshake turn the sealing
 off. The link stays on as before. A request starts a new handshake at most every
 10 seconds after a failed one; an announcement, a `cfg` frame or an Admin action
-starts one at once. While the controller has
+starts one at once. While the Web UI through the companion is off, a page load
+also asks the controller again, at most once a minute. While the controller has
 the Web UI through the companion turned off, `/api/` answers
 `409 COMPANION_UI_OFF` and pages show the notice. The link itself opens
 only while the controller's relay answer says a feature needs it, such as

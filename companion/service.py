@@ -56,6 +56,7 @@ LOG_CATEGORY_MAX, LOG_MESSAGE_MAX = 24, 1024
 LOG_ACCESS_RECHECK_S = (
     300  # How often a session's right to read the history is asked of the controller.
 )
+GATE_HANDSHAKE_S = 60  # While the Web UI is off, how often a page load asks the controller again.
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
 STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
@@ -1106,13 +1107,25 @@ def web_app(companion: Companion) -> web.Application:
     notice = notice_page(companion.name)
     no_store = {"Cache-Control": "no-store"}
 
+    gate_asked = float("-inf")
+
     async def show(_request: web.Request) -> web.Response:
         return web.Response(text=page, content_type="text/html", headers=no_store)
 
     async def gate(request: web.Request) -> web.Response:
         """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens
         directly."""
+        nonlocal gate_asked
         page = request.headers.get("X-Original-URI", "").partition("?")[0]
+        now = asyncio.get_running_loop().time()
+        # Turned back on at the controller's own address, with no link open to say so.
+        if (
+            companion.relay.mode == "disabled"
+            and page != "/sw.js"
+            and now - gate_asked >= GATE_HANDSHAKE_S
+        ):
+            gate_asked = now
+            await companion.relay.handshake()
         allowed = companion.relay.mode != "disabled" or page == "/sw.js"
         return web.Response(status=204 if allowed else 403)
 

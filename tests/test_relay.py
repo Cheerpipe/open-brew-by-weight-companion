@@ -17,6 +17,7 @@ from cryptography.exceptions import InvalidTag
 import fake_controller
 from companion import crypto
 from companion import relay as relay_module
+from companion import service as service_module
 from companion.service import Companion, web_app
 from companion.store import Store
 
@@ -330,7 +331,17 @@ async def relay_scenario(data: Path) -> None:
             assert f"http://127.0.0.1:{server.port}/" in page
             assert "@STYLE@" not in page
         fake.ui = True
-        assert await relay.handshake() == "ready"
+        async with browser.get(
+            base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
+        ) as reply:
+            assert reply.status == 403, "a page load asks again only once a minute"
+        service_module.GATE_HANDSHAKE_S = 0
+        async with browser.get(
+            base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
+        ) as reply:
+            assert reply.status == 204, "turned back on at the controller's own address"
+        service_module.GATE_HANDSHAKE_S = 60
+        assert (await companion.status())["relay"] == "ready"
         async with browser.get(
             base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
         ) as reply:
