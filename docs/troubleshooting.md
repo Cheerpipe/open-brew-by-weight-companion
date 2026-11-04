@@ -285,6 +285,16 @@ page:
   through the companion, on the screen you delete from; each screen has its
   own unlock. The companion's own page cannot delete anything.
 
+## The controller got a new address and the companion ignores it
+
+The log says `it announces itself as the controller but does not prove the
+pairing secret`. A paired companion follows a new address only when the device
+there proves the pairing, so a device on your network cannot pose as the
+controller. This also stops it following a controller that was factory reset
+and got a new address at the same time, since it no longer knows the pairing.
+Give the controller its old address back, or set `OBBW_CONTROLLER_URL` to the
+new one and restart the companion; it then offers **Pair again**.
+
 ## Start the pairing over
 
 Choose **Forget** in Admin → Companion first. The next time the companion

@@ -35,7 +35,7 @@ from .push import MAX_EVENT_BYTES as PUSH_MAX_EVENT_BYTES
 from .push import MAX_KEY as PUSH_MAX_KEY
 from .push import MAX_TEST_DELAY_S as PUSH_MAX_TEST_DELAY_S
 from .push import Push, device_id, parse_subscription, parse_topics
-from .relay import CLIENT_ID, Relay, address
+from .relay import CLIENT_ID, Relay, address, read_capped
 from .screens import Screens
 from .store import Store, offload
 
@@ -61,6 +61,10 @@ LOG_ACCESS_RECHECK_S = (
     300  # How often a session's right to read the history is asked of the controller.
 )
 GATE_HANDSHAKE_S = 60  # While the Web UI is off, how often a page load asks the controller again.
+PROVE_RETRY_S = (0, 3, 10, 30)  # Waits before each try to prove a new address.
+# The one grant while the Web UI's login is off, for every browser; it ends with the login. The
+# hash of no session, so a grant stored by an earlier version counts as this one.
+OPEN_ACCESS = hashlib.sha256(b"").hexdigest()
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
 STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
@@ -152,7 +156,6 @@ class Companion:
         self.name, self.http = name, http
         self.store = Store(data)
         self.id, self.key = self.store.identity()
-        self.public = crypto.public_point(self.key)
         self.controller: Target | None = None  # From the supervisor.
         self.device_name: str | None = None  # The controller's own name, from its `dev` frame.
         # Its stable id (the webhook's deviceId), the log store's key, kept there.
@@ -224,9 +227,24 @@ class Companion:
             raise RuntimeError("no controller yet")
         return self.controller
 
-    def base_url(self, scheme: str = "http") -> str:
-        ip, port = self._target()[1]
+    def base_url(self, scheme: str = "http", at: tuple[str, int] | None = None) -> str:
+        ip, port = at or self._target()[1]
         return f"{scheme}://{ip}" + ("" if port == 80 else f":{port}")
+
+    async def prove(self, target: Target, done: Callable[[bool], object]) -> None:
+        """Paired, a device announcing itself as the controller at a new address counts only once
+        it proves the pairing secret; `done` receives the answer. A controller still starting up
+        gets a few tries."""
+        for wait in PROVE_RETRY_S:
+            await asyncio.sleep(wait)
+            if await self.relay.proves(self.base_url(at=target[1])):
+                done(True)
+                return
+        log(
+            f"ignoring {target[1][0]}:{target[1][1]}: it announces itself as the controller "
+            "but does not prove the pairing secret"
+        )
+        done(False)
 
     def set_controller(self, target: Target | None) -> None:
         """The controller in use, on start and on each of its mDNS announcements."""
@@ -234,6 +252,8 @@ class Companion:
             return
         moved = self.controller is not None and target[1] != self.controller[1]
         self.controller = target
+        if moved:  # The session's keys belong to the old address.
+            self.relay.forget(self.relay.body_key)
         if moved and self.ws is not None:
             log("the controller has a new address; reopening the link")
             _ = self.spawn(self.ws.close())
@@ -253,8 +273,8 @@ class Companion:
                 method, url, json=body, timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)
             ) as reply:
                 try:
-                    data = await reply.json(content_type=None)
-                except ValueError:
+                    data = json.loads(await read_capped(reply))
+                except ValueError, RecursionError:
                     data = None
                 return reply.status, data if isinstance(data, dict) else {}
         except aiohttp.ClientError, TimeoutError, OSError:
@@ -744,7 +764,7 @@ class Companion:
 
     async def ui_access(
         self, headers: Mapping[str, str], live: bool = False
-    ) -> bool | tuple[bool, bool] | None:
+    ) -> bool | tuple[bool, bool, bool] | None:
         """Whether this browser may read the stored log and archive: exactly when
         the controller lets it open the Web UI (`GET /api/v1/auth` through the
         relay). Each session's answer is kept for LOG_ACCESS_RECHECK_S, and an
@@ -752,10 +772,13 @@ class Companion:
         controller is off; a controller that did not answer is not asked again
         for LOG_UNREACHABLE_S, so a page never waits on it twice in a row.
         `live` (changing the archive or the log) needs the controller's answer
-        now: (signed in, Admin unlocked for this screen), or None when it
-        cannot give one."""
+        now: (signed in, Admin unlocked for this screen, login off), or None when
+        it cannot give one."""
         session = hashlib.sha256(headers.get("X-WebUI-Session", "").encode()).hexdigest()
         now = time.time()
+        opened = self.log_grants.get(OPEN_ACCESS)
+        if not live and opened is not None and now - opened < LOG_ACCESS_RECHECK_S:
+            return True
         for answers, verdict in ((self.log_grants, True), (self.log_denials, False)):
             if not live and session in answers and now - answers[session] < LOG_ACCESS_RECHECK_S:
                 return verdict
@@ -768,11 +791,16 @@ class Companion:
         if allowed is None:
             if live:
                 return None
-            if session in self.log_grants:
-                self.log_grants[session] = (
-                    now  # What the controller said last stands until it can answer.
-                )
-            return session in self.log_grants
+            for known in (session, OPEN_ACCESS):
+                if known in self.log_grants:
+                    # What the controller said last stands until it can answer.
+                    self.log_grants[known] = now
+                    return True
+            return False
+        if answer is not None and answer[2]:
+            session = OPEN_ACCESS
+        elif session != OPEN_ACCESS:
+            await self.forget_open_access()
         answers, other = (
             (self.log_grants, self.log_denials) if allowed else (self.log_denials, self.log_grants)
         )
@@ -788,12 +816,20 @@ class Companion:
             log(f"the log store could not keep a Web UI session's access ({error})")
         return answer if live else allowed
 
-    async def _web_ui_allows(self, headers: Mapping[str, str]) -> tuple[bool, bool] | None:
-        """The controller's answer for this browser: (signed in, Admin unlocked for this screen),
-        or None when it cannot answer. It asks through the relay as the screen itself (its own
-        X-WebUI-Client, signed), so the unlock it reads is that screen's, never the companion's
-        shared client's; without a relay session, or without the screen's id, nothing counts as
-        unlocked."""
+    async def forget_open_access(self) -> None:
+        """The login is on now: what a browser could read without it ends here."""
+        if self.log_grants.pop(OPEN_ACCESS, None) is not None:
+            try:
+                await self.logs.grant(OPEN_ACCESS, False)
+            except sqlite3.Error as error:
+                log(f"the log store could not keep a Web UI session's access ({error})")
+
+    async def _web_ui_allows(self, headers: Mapping[str, str]) -> tuple[bool, bool, bool] | None:
+        """The controller's answer for this browser: (signed in, Admin unlocked for this screen,
+        login off), or None when it cannot answer. It asks through the relay as the screen itself
+        (its own X-WebUI-Client, signed), so the unlock it reads is that screen's, never the
+        companion's shared client's; without a relay session, or without the screen's id, nothing
+        counts as unlocked."""
         if self.controller is None:
             return None
         client = headers.get("X-WebUI-Client", "")
@@ -828,6 +864,7 @@ class Companion:
         return (
             answer.get("loginRequired") is False or answer.get("signedIn") is True,
             relayed and screen is not None and answer.get("adminUnlocked") is True,
+            answer.get("loginRequired") is False,
         )
 
     # --- La Marzocco account ---------------------------------------------------
@@ -1122,11 +1159,16 @@ def web_app(companion: Companion) -> web.Application:
     page = render_page()
     notice = notice_page(companion.name)
     no_store = {"Cache-Control": "no-store"}
+    page_headers = {
+        **no_store,
+        "Content-Security-Policy": "frame-ancestors 'none'",
+        "X-Frame-Options": "DENY",
+    }
 
     gate_asked = float("-inf")
 
     async def show(_request: web.Request) -> web.Response:
-        return web.Response(text=page, content_type="text/html", headers=no_store)
+        return web.Response(text=page, content_type="text/html", headers=page_headers)
 
     async def gate(request: web.Request) -> web.Response:
         """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens
@@ -1148,7 +1190,9 @@ def web_app(companion: Companion) -> web.Application:
     async def ui_off(_request: web.Request) -> web.Response:
         address = html.escape(companion.base_url()) if companion.controller else ""
         return web.Response(
-            text=notice.replace("@ADDRESS@", address), content_type="text/html", headers=no_store
+            text=notice.replace("@ADDRESS@", address),
+            content_type="text/html",
+            headers=page_headers,
         )
 
     async def status(_request: web.Request) -> web.Response:
@@ -1159,6 +1203,8 @@ def web_app(companion: Companion) -> web.Application:
             request.content_type != "application/json"
         ):  # A web page elsewhere cannot send this without asking.
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+        if companion.pairing.state == "paired":
+            return web.json_response({"error": "ALREADY_PAIRED"}, status=409)
         if companion.controller is None:
             return web.json_response(
                 {"error": "NO_CONTROLLER", "message": "No controller found yet"}, status=409
@@ -1758,6 +1804,11 @@ class Handle:
     def controller(self, target: Target | None) -> None:
         if self.loop and self.companion:
             self.loop.call_soon_threadsafe(self.companion.set_controller, target)
+
+    def prove(self, target: Target, done: Callable[[bool], object]) -> None:
+        """Ask whether `target` may replace the controller; `done` runs on the service's thread."""
+        if self.loop and self.companion:
+            asyncio.run_coroutine_threadsafe(self.companion.prove(target, done), self.loop)
 
     def stop(self) -> None:
         if self.loop and self.stopping:

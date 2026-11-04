@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .service import Companion
 
 CLAIM, LOGIN, COMPANION_ADMIN = "/api/v1/ui/claim", "/api/v1/auth/login", "/api/v1/companion/admin"
-LOGOUT = "/api/v1/auth/logout"
+LOGOUT, ACCESS = "/api/v1/auth/logout", "/api/v1/auth/access"
 CONTROL, TIME_SYNC = "/api/v1/control/", "/api/v1/time/sync"
 TRACE = "/api/v1/diagnostic/shot-trace"
 # Changes a screen makes to the controller's records: the replica's store is not current from the
@@ -293,6 +293,8 @@ class Screens:
             self.mux.signed_out(screen)
         elif rewrite and reply.status == 409 and data.get("error") == "UI_TAKEN_OVER":
             self.mux.takeover()
+        elif path == ACCESS and reply.status == 200:
+            _ = self.companion.spawn(self.companion.forget_open_access())
         elif path == COMPANION_ADMIN and reply.status == 200:
             # Its switches may have changed what it wants.
             _ = self.companion.spawn(self.relay.handshake())

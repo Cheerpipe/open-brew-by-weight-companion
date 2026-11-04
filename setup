@@ -44,7 +44,9 @@ env_get() { [[ ! -f ${2:-.env} ]] || sed -n "s/^$1=//p" "${2:-.env}" | tail -n 1
 env_set() { # env_set KEY VALUE: set, uncomment or append the line in .env
 	local tmp
 	tmp=$(mktemp)
-	awk -v k="$1" -v v="$2" '$0 ~ "^# ?" k "=|^" k "=" && !done { print k "=" v; done = 1; next }
+	# ENVIRON keeps the value as it is: awk -v would turn a \n in a device name into a line.
+	K="$1" V="$2" awk 'BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"] }
+		$0 ~ "^# ?" k "=|^" k "=" && !done { print k "=" v; done = 1; next }
 		{ print } END { if (!done) print k "=" v }' .env >"$tmp"
 	mv "$tmp" .env
 }

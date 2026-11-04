@@ -21,6 +21,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+import fake_controller
 from companion import VERSION, crypto, dashboard, service
 from companion.link import FrameCodec
 from companion.service import Companion, web_app
@@ -140,6 +141,7 @@ class Controller:
         self.sessions: asyncio.Queue[Session] = asyncio.Queue()
         self.transports: list[asyncio.Transport] = []
         self.relay = False  # The relay answers only once the link block asks for it.
+        self.relay_body, self.relay_answers = bytes(32), 0
         # GET /api/v1/auth: password on; the controller answers.
         self.login, self.auth_up = True, True
         # The screen holding the Admin unlock, as the relay signs screens.
@@ -191,6 +193,7 @@ class Controller:
         assert crypto.unb64(body["mac"]) == crypto.mac(SECRET, b"R", self.RELAY_CHALLENGE, nc), (
             "the companion proves the pairing secret"
         )
+        self.relay_body = crypto.relay_body_key(crypto.relay_key(SECRET, self.RELAY_CHALLENGE, nc))
         return web.json_response(
             {
                 "mac": crypto.b64(crypto.mac(SECRET, b"Q", self.RELAY_CHALLENGE, nc)),
@@ -205,12 +208,22 @@ class Controller:
         if not self.auth_up:
             return web.json_response({"error": "UNAVAILABLE"}, status=503)
         relay = request.headers.get("X-OBBW-Relay", "").split()
-        return web.json_response(
-            {
-                "loginRequired": self.login,
-                "signedIn": bool(request.headers.get("X-WebUI-Session")),
-                "adminUnlocked": len(relay) == 5 and relay[3] == self.admin_screen,
-            }
+        answer = {
+            "loginRequired": self.login,
+            "signedIn": bool(request.headers.get("X-WebUI-Session")),
+            "adminUnlocked": len(relay) == 5 and relay[3] == self.admin_screen,
+        }
+        if not relay:
+            return web.json_response(answer)
+        self.relay_answers += 1  # Every whole JSON answer to a relayed request is sealed.
+        return web.Response(
+            content_type="application/json",
+            headers={"X-OBBW-Enc": str(self.relay_answers)},
+            body=AESGCM(self.relay_body).encrypt(
+                fake_controller.nonce(b"f", 3, self.relay_answers),
+                json.dumps(answer).encode(),
+                None,
+            ),
         )
 
     async def link(self, request: web.Request) -> web.StreamResponse:
@@ -374,6 +387,10 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
                 assert (await reply.json())["error"] == "NO_CONTROLLER"
 
             # --- Pairing (entry point a): commit, then reveal, polled while pending --
+            # The shared vectors' key, as this attempt's own (each makes one: test_hardening).
+            monkeypatch.setattr(
+                crypto, "new_key", lambda: crypto.load_key(bytes.fromhex(V["companionPrivate"]))
+            )
             _ = companion.spawn(companion.run_link())
             companion.set_controller(target)
             await eventually(
@@ -921,6 +938,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             await restarted.relay.close()
             # With the password off, any browser reads it; the answer is asked again.
             fake.auth_up, fake.login = True, False
+            await companion.relay.handshake()  # The fake keeps one session: the restart took it.
             async with http.get(page_url + "/log?limit=1") as reply:
                 assert reply.status == 200
             fake.login = True

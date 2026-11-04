@@ -41,6 +41,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from cryptography.x509.verification import PolicyBuilder, Store, VerificationError
+from zeroconf import Error as ZeroconfError
 from zeroconf import (
     IPVersion,
     RecordUpdate,
@@ -95,6 +96,7 @@ RETRY_S = (30, 60, 120, 300, 600)  # Fresh mDNS queries only while no controller
 CONTROLLER_FILE = "controller.json"
 # Network search, when mDNS finds no controller: the controller's unauthenticated identity route.
 SCAN_PATH = "/api/v1/integration/info"
+DISCOVERY_MAX = 256  # Devices remembered from discovery; announcements are unauthenticated.
 SCAN_TIMEOUT_S = 1
 SCAN_WORKERS = 32
 SCAN_MAX_PREFIX = 22  # At most 1022 hosts, about 33 s.
@@ -180,6 +182,7 @@ type Event = (
     | tuple[Literal["found"], Target]
     | tuple[Literal["skip"], str, bool, str]
     | tuple[Literal["scanned"], list[Found]]
+    | tuple[Literal["proved"], bool, tuple[str, int], Event]
 )
 
 
@@ -262,6 +265,14 @@ def wanted(cfg: Config, *names: str) -> bool:
     return not want or want in {name.lower().replace(" ", "-") for name in names}
 
 
+def on_link(cfg: Config, address: str) -> bool:
+    """Whether an mDNS answer's address can be a controller: not this host, nor another network."""
+    ip, network = ipaddress.ip_address(address), lan_network(cfg["ip"])
+    return not (ip.is_loopback or ip.is_unspecified or ip.is_multicast) and (
+        network is None or ip in network
+    )
+
+
 def match_controller(
     cfg: Config,
     instance: str,
@@ -272,7 +283,7 @@ def match_controller(
 ) -> tuple[Target, None] | tuple[None, str]:
     """Map one `_http._tcp` service to ((label, (ip, port)), None), or (None, why it is skipped)."""
     host = server.rstrip(".").lower()
-    ipv4 = [a for a in addresses if ":" not in a]
+    ipv4 = [a for a in addresses if ":" not in a and on_link(cfg, a)]
     if cfg["controller"]:
         if host != cfg["controller"][0]:
             return None, f"not {cfg['controller'][0]}"
@@ -485,16 +496,27 @@ def certificate(
 def save(
     key: ec.EllipticCurvePrivateKey, key_path: Path, cert: x509.Certificate, path: Path
 ) -> None:
-    """Write a key (PKCS #8, unencrypted, owner-only) and its certificate as PEM."""
-    key_path.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
-    )
-    key_path.chmod(0o600)
-    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    """Write a key (PKCS #8, unencrypted, owner-only) and its certificate as PEM, each whole or
+    not at all, so a kill or a full disk never leaves half a file."""
+    for target, body, mode in (
+        (
+            key_path,
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ),
+            0o600,
+        ),
+        (path, cert.public_bytes(serialization.Encoding.PEM), 0o644),
+    ):
+        temporary = target.with_name(target.name + ".tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(body)
+            file.flush()
+            os.fsync(file.fileno())
+        temporary.replace(target)
 
 
 def covers(ca: x509.Certificate, host: str) -> bool:
@@ -519,13 +541,39 @@ def leaf_current(ca: x509.Certificate, leaf: Path, host: str) -> bool:
     return cert.not_valid_after_utc > renew_at
 
 
+def leaf_matches(leaf: Path, key: Path) -> bool:
+    """Whether the server key belongs to the server certificate: a kill between writing the two
+    leaves a pair nginx refuses."""
+    try:
+        cert = x509.load_pem_x509_certificate(leaf.read_bytes())
+        private = serialization.load_pem_private_key(key.read_bytes(), None)
+    except OSError, ValueError, TypeError:
+        return False
+    return private.public_key() == cert.public_key()
+
+
+def read_ca(path: Path) -> x509.Certificate | None:
+    """The CA certificate, or None when there is none or it cannot be read: a new CA costs setting
+    the devices up again, a crash loop costs the setup page that does it."""
+    if not path.exists():
+        return None
+    try:
+        return x509.load_pem_x509_certificate(path.read_bytes())
+    except ValueError:
+        log(
+            "the CA certificate cannot be read; creating a new one, "
+            "so every device must be set up again"
+        )
+        return None
+
+
 def ensure_certificates(cfg: Config, data: Path) -> bool:
     """Create or renew the CA and server certificate; return True when files changed."""
     host, ca_path, ca_key_path = cfg["hostname"], data / f"{CA_NAME}.crt", data / f"{CA_NAME}.key"
     leaf, leaf_key = data / "server.crt", data / "server.key"
     data.mkdir(parents=True, exist_ok=True)
     changed = False
-    ca = x509.load_pem_x509_certificate(ca_path.read_bytes()) if ca_path.exists() else None
+    ca = read_ca(ca_path)
     if ca is None or not covers(ca, host):
         if ca is not None:
             log(
@@ -558,7 +606,7 @@ def ensure_certificates(cfg: Config, data: Path) -> bool:
         )
         save(ca_key, ca_key_path, ca, ca_path)
         changed = True
-    if changed or not leaf_current(ca, leaf, host):
+    if changed or not leaf_current(ca, leaf, host) or not leaf_matches(leaf, leaf_key):
         signer = serialization.load_pem_private_key(ca_key_path.read_bytes(), None)
         if not isinstance(signer, ec.EllipticCurvePrivateKey):
             raise TypeError(f"{ca_key_path} does not hold the CA's elliptic-curve key")
@@ -993,7 +1041,9 @@ def main() -> None:
             self, zc: Zeroconf, now: float, records: list[RecordUpdate]
         ) -> None:
             with heard_lock:
-                heard.update(r.new.name for r in records if isinstance(r.new, DNSAddress))
+                for record in records:
+                    if isinstance(record.new, DNSAddress) and len(heard) < DISCOVERY_MAX:
+                        heard.add(record.new.name)
 
     zc.add_listener(Heard(), None)
     if cfg["mdns_publish"]:
@@ -1016,7 +1066,11 @@ def main() -> None:
         if state_change is ServiceStateChange.Removed:
             return  # Keep the last address; a restarting controller announces itself again.
         instance = name.removesuffix("." + service_type)
-        info = zeroconf.get_service_info(service_type, name, timeout=INFO_TIMEOUT_MS)
+        try:
+            info = zeroconf.get_service_info(service_type, name, timeout=INFO_TIMEOUT_MS)
+        except ZeroconfError as error:  # One malformed packet must not end the browser's thread.
+            events.put(("skip", instance, False, f"unreadable announcement ({error})"))
+            return
         matched = (
             match_controller(
                 cfg,
@@ -1037,7 +1091,9 @@ def main() -> None:
 
     def note(instance: str, is_controller: bool, reason: str) -> bool:
         """Record what discovery made of a device; return True when that changed."""
-        if seen.get(instance) == {"controller": is_controller, "note": reason}:
+        if seen.get(instance) == {"controller": is_controller, "note": reason} or (
+            instance not in seen and len(seen) >= DISCOVERY_MAX
+        ):
             return False
         seen[instance] = {"controller": is_controller, "note": reason}
         return True
@@ -1060,6 +1116,26 @@ def main() -> None:
     retries = iter(RETRY_S)
     status = 0
     unhandled = 0
+    proving: set[tuple[str, int]] = set()
+
+    def new_address(event: Event) -> Target | None:
+        """The controller this event would move to, when it names a new address."""
+        moved = (
+            event[1]
+            if event[0] == "found"
+            else scan_target(event[1][0])
+            if event[0] == "scanned" and source != "mdns"
+            else None
+        )
+        return moved if moved and (target is None or moved[1] != target[1]) else None
+
+    def ask_proof(moved: Target, asked: Event) -> None:
+        def answered(ok: bool) -> None:
+            events.put(("proved", ok, moved[1], asked))
+
+        proving.add(moved[1])
+        companion.prove(moved, answered)
+
     try:
         while True:
             searching = browser and source != "mdns"
@@ -1070,6 +1146,12 @@ def main() -> None:
             except queue.Empty:
                 event = ("tick",)
             try:
+                proved = None
+                if event[0] == "proved":
+                    proving.discard(event[2])
+                    if not event[1]:
+                        continue
+                    proved, event = event[2], event[3]
                 if event[0] == "tick" and searching and browser:
                     with heard_lock:
                         others = sorted(
@@ -1106,6 +1188,10 @@ def main() -> None:
                     if note(event[1][0], True, reason):
                         log(f"ignoring {event[1][0]}: {reason}")
                         status_changed = True
+                elif (moved := new_address(event)) and moved[1] != proved:
+                    # Discovery is unauthenticated: paired, a new address must prove the pairing.
+                    if moved[1] not in proving:
+                        ask_proof(moved, event)
                 elif event[0] == "found" and (event[1], "mdns") != (target, source):
                     target, source = event[1], "mdns"
                     note(target[0], True, "in use")
