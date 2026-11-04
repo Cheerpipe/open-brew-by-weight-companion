@@ -112,6 +112,8 @@ def relay_body_key(key: bytes) -> bytes:
 
 def relay_nonce(direction: bytes, context: int, counter: int) -> bytes:
     """12 bytes: the direction, the context, two zeros, the counter little-endian."""
+    if not 0 <= counter < 1 << 64:  # A response header says which, and anyone can forge one.
+        raise ValueError("a counter outside the nonce")
     return direction + bytes((context, 0, 0)) + counter.to_bytes(8, "little")
 
 

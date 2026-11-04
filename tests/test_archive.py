@@ -982,8 +982,8 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             verdict["value"], admin["value"] = True, True
             companion.log_unreachable = 0  # The controller answers again.
 
-            # Without a relay session the controller is asked as nobody: nothing counts as unlocked,
-            # whatever it answers.
+            # Without a relay session the controller is asked as nobody: an answer in clear opens
+            # nothing, whatever it says, and only ends what the login no longer allows.
             class Reply:
                 status = 200
                 data = json.dumps(
@@ -1000,9 +1000,10 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
                 patch.setattr(companion.relay, "mode", "disabled")
                 patch.setattr(companion.relay, "passthrough", passthrough)
                 patch.setattr(companion, "controller", ("Kitchen", ("127.0.0.1", 9)))
-                assert await Companion._web_ui_allows(
-                    companion, {"X-WebUI-Client": "0123456789abcdef"}
-                ) == (True, False, True)
+                headers = {"X-WebUI-Client": "0123456789abcdef"}
+                assert await Companion._web_ui_allows(companion, headers) is None
+                Reply.data = json.dumps({"loginRequired": True, "signedIn": True}).encode()
+                assert await Companion._web_ui_allows(companion, headers) == (False, False, False)
             assert 30 in await ids(companion, "shots")
 
             # --- Access: reads keep a remembered grant; changes need the controller now --

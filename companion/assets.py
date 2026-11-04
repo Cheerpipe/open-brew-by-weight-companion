@@ -24,7 +24,7 @@ from cryptography.exceptions import InvalidTag
 from multidict import CIMultiDict
 from yarl import URL
 
-from . import log
+from . import clip, log
 from .relay import NO_ADDRESS, read_capped
 
 if TYPE_CHECKING:
@@ -37,7 +37,8 @@ LIST_VERSION = 1
 PAIRING_PAGE = "/__companion/?pair=1"
 MAX_PLAIN_BYTES = 1 << 20  # Far above any file the controller serves; only unverified ones read it.
 FETCHES = 2  # At once, for every screen: the controller's sockets are few.
-FETCH_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=5)
+FETCH_S = 30
+FETCH_TIMEOUT = aiohttp.ClientTimeout(total=FETCH_S, connect=5)
 SHELL_CONTROL = "public, max-age=86400, stale-if-error=604800"
 IMMUTABLE_CONTROL = "public, max-age=31536000, immutable"
 # A worker's update fetch bypasses the worker itself, so this reaches any worker left behind.
@@ -185,9 +186,10 @@ class Assets:
             if self.listing is not None and key is not None and self.listed_under is key:
                 return self.listing
             try:
-                reply = await self.relay.request(
-                    "GET", LIST_PATH, {}, b"", NO_ADDRESS, self.relay.client_id, False
-                )
+                async with asyncio.timeout(FETCH_S):  # Every screen's next file waits on this.
+                    reply = await self.relay.request(
+                        "GET", LIST_PATH, {}, b"", NO_ADDRESS, self.relay.client_id, False
+                    )
                 if reply is None:
                     return self.listing
                 try:
@@ -247,9 +249,10 @@ class Assets:
             raise web.HTTPFound(PAIRING_PAGE, headers={"Cache-Control": "no-store"})
         if self.relay.mode == "disabled":
             return self._unavailable()
-        if self.relay.features is None:
+        if self.relay.key is None:
             await self.relay.renew()
-        if self.relay.features == 0:
+        # Without a session the firmware may have been updated: only one saying it is older counts.
+        if self.relay.key is not None and self.relay.features == 0:
             return await self._plain(request)
         listing = await self._current()
         return self._unavailable() if listing is None else await self._verified(request, listing)
@@ -292,8 +295,8 @@ class Assets:
 
     def _refuse(self, path: str) -> web.Response:
         self.refused += 1
-        self.last_refused = path
-        log(f"refused {path}: it does not match the controller's list of Web UI files")
+        self.last_refused = clip(path, 64)  # A prefix row lets a browser choose the rest.
+        log(f"refused {self.last_refused}: it does not match the controller's list of Web UI files")
         return web.Response(status=502, text=NOT_VERIFIED, headers={"Cache-Control": "no-store"})
 
     @staticmethod
@@ -325,7 +328,8 @@ class Assets:
         return headers
 
     async def _plain(self, request: web.Request) -> web.StreamResponse:
-        """A paired controller from before the list: only known headers pass."""
+        """A paired controller from before the list: only known headers pass, and nginx keeps
+        nothing, so what a device on the network changed cannot outlive the update that verifies."""
         if not self.warned:
             self.warned = True
             log("the Web UI's files are not verified: update the controller's firmware")
@@ -356,6 +360,5 @@ class Assets:
             return self._unavailable()
         if location.startswith("/") and not location.startswith("//"):
             kept["Location"] = location
-        if kept.get("Content-Type", "").startswith("text/html") or request.path == "/sw.js":
-            kept["X-Accel-Expires"] = "1"
+        kept["X-Accel-Expires"] = "0"
         return web.Response(status=status, body=body, headers=kept)

@@ -16,7 +16,7 @@ import aiohttp
 from aiohttp import web
 from multidict import CIMultiDict
 
-from . import log
+from . import clip, log
 from .mux import Mux
 from .relay import API_TYPES, CLIENT_ID, address, response_headers
 from .upstream import PATH as STREAM
@@ -183,7 +183,7 @@ class Screens:
                     archive.invalidate(changes, done=True)
             try:
                 if reply.content_type not in API_TYPES:
-                    log(f"refused a {reply.content_type} answer to {path[:64]}")
+                    log(f"refused a {reply.content_type} answer to {clip(path, 64)}")
                     return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
                 request_id = self._observe(path, screen, rewrite, reply)
                 if reply.data is not None:
@@ -229,7 +229,8 @@ class Screens:
             screen
             and rewrite
             and reply.status == 200
-            and (path == CLAIM or (path == LOGIN and data.get("active") is True))
+            and path in (CLAIM, LOGIN)
+            and data.get("active") is True
         ):
             self.mux.claimed.add(screen)
         elif screen and (

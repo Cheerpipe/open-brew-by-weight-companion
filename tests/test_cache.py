@@ -138,6 +138,7 @@ class StubRelay:
     client_id = "abcdefabcdefabcd"
 
     def __init__(self) -> None:
+        self.key: bytes | None = b"session 1"
         self.body_key: bytes | None = b"session 1"
         self.mode, self.features, self.is_paired, self.answers = "ready", 1, True, True
         self.http: aiohttp.ClientSession | None = None
@@ -487,6 +488,11 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
             status, headers, body = get("/stats?legacy=1")
             assert (status, gzip.decompress(body)[:5]) == (200, b"<html")
             assert "service-worker-allowed" not in headers
+            shells = len(upstream("/stats?legacy=1"))
+            for path in ("/stats?legacy=1", "/stats?legacy=1", f"/app.js?v={TAG}new"):
+                status, headers, _ = get(path)
+                assert (status, headers["x-gateway-cache"]) == (200, "MISS"), path
+            assert len(upstream("/stats?legacy=1")) == shells + 2, "nginx keeps nothing unverified"
             relay.features = 1
 
             # Before pairing every page leads to the companion's, even one nginx holds in its

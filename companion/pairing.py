@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 PATH = "/api/v1/companion/pair"
 POLL_S = 1
 REQUEST_S = 600  # How long a request stays open, as the controller allows at most.
+IN_USE = ("paired", "requesting", "pending")  # Nothing about these needs asking again.
 REFUSALS = {
     "COMPANION_IGNORED": "ignored",
     "ALREADY_PAIRED": "already_paired",

@@ -181,7 +181,8 @@ where a device on your network could change them. So each file is checked first:
   remove it, so one planted earlier cannot stay.
 
 A controller from before the list keeps working unverified, and Diagnostic says
-so.
+so. nginx keeps none of its files, so nothing unverified outlives the firmware
+update that verifies them.
 
 This protects what the browser runs. It does not cover answers streamed in chunks
 (the Wi-Fi scan, time zones, downloads), which are data, nor the controller's own
@@ -330,7 +331,9 @@ counted, and the page asks you to update the companion.
   installation key but keeps the log history and the archive (a factory
   reset keeps the archive, and pairing the same controller again reattaches
   to both; only Forget erases them). The account stays on the companion
-  until one of them is chosen.
+  until one of them is chosen. Each first asks the controller again, and a
+  controller that proves the pairing, then or later, brings it back: an attempt
+  to pair again that failed changed nothing.
 
 ### La Marzocco
 
@@ -542,10 +545,14 @@ back: without a relay session `/api/` and the ui-stream answer `502` and name th
 controller's own address, because a fallback would let anyone who breaks the handshake
 turn the sealing off. The link stays on as before. A request starts a new handshake at most every
 10 seconds after a failed one; an announcement, a `cfg` frame or an Admin action
-starts one at once. While the Web UI through the companion is off, a page load
-also asks the controller again, at most once a minute. While the controller has
+starts one at once. While the Web UI through the companion is off, or the controller
+seems to have forgotten this companion, a page load also asks the controller again, at
+most once a minute. While the controller has
 the Web UI through the companion turned off, `/api/` answers
-`409 COMPANION_UI_OFF` and pages show the notice. The link itself opens
+`409 COMPANION_UI_OFF` and pages show the notice. The controller then answers only in
+clear, and the handshake's `ui` is unsigned too, so with it off no browser gains access to
+the stored log or archive: a grant from before stands until the controller says its login
+is on. The link itself opens
 only while the controller's relay answer says a feature needs it, such as
 La Marzocco.
 
