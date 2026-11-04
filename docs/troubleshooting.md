@@ -285,6 +285,18 @@ page:
   through the companion, on the screen you delete from; each screen has its
   own unlock. The companion's own page cannot delete anything.
 
+## The Web UI says its files could not be verified
+
+The companion compared a file from the controller with the list the controller
+sealed, and they did not match, so it did not open it. **Diagnostic → This screen**
+counts these and names the last file. Once in a while right after a firmware
+update, this goes away on a reload. If it keeps happening, something on your
+network may be changing what the controller sends: don't sign in, and check the
+devices on your network.
+
+**Web UI files: Not verified** means the controller's firmware is older than this
+check; update it.
+
 ## The controller got a new address and the companion ignores it
 
 The log says `it announces itself as the controller but does not prove the

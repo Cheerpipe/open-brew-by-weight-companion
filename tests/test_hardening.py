@@ -4,6 +4,7 @@ for the controller, read past a size limit, end a background task, or leave half
 import asyncio
 import base64
 import ipaddress
+import json
 import os
 import shutil
 import signal
@@ -29,6 +30,7 @@ import fake_controller
 import gateway
 from companion import crypto, lamarzocco, service
 from companion import relay as relay_module
+from companion.assets import UNREGISTER, parse_listing
 from companion.lamarzocco import Installation, LaMarzocco, stomp_frame
 from companion.service import OPEN_ACCESS, Companion, web_app
 from companion.store import Store
@@ -537,7 +539,7 @@ def test_the_supervisor_moves_only_to_a_proved_address(
         time.sleep(0.2)
 
     def upstream() -> str:
-        return (run / "nginx.conf").read_text()
+        return (run / "status.json").read_text()
 
     def drive() -> None:
         while not handlers:
@@ -746,3 +748,136 @@ def test_bound_answer_vectors() -> None:
         crypto.relay_open(body_key, counter, sealed, crypto.relay_answer_aad(int(q), 200))
     with pytest.raises(InvalidTag):
         crypto.relay_open(body_key, counter, sealed)
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        b"[]",
+        b"{}",
+        json.dumps(
+            {
+                "v": 2,
+                "tag": "t",
+                "etag": "e",
+                "csp": "c",
+                "shell": ["", 0],
+                "shellPaths": [],
+                "assets": [],
+            }
+        ).encode(),
+        json.dumps(
+            {
+                "v": 1,
+                "tag": "t",
+                "etag": "e",
+                "csp": "c",
+                "shell": ["AAAA", 1],
+                "shellPaths": ["/"],
+                "assets": [],
+            }
+        ).encode(),
+    ],
+)
+def test_a_list_of_the_wrong_shape_is_refused(broken: bytes) -> None:
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        parse_listing(broken)
+
+
+def test_files_are_verified_against_the_sealed_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-02: through the real relay, a file is served only as the list names it, with its headers
+    from the list; an answer swapped in for the list is never believed."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            fake, assets = rig.fake, rig.companion.assets
+            url = f"/app.js?v={fake.tag}"
+            reply = await rig.client.get(url)
+            assert (reply.status, await reply.read()) == (200, b"app")
+            assert reply.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+            assert assets.facts() == {
+                "verified": 1,
+                "refused": 0,
+                "lastPath": None,
+                "legacy": False,
+            }
+            reply = await rig.client.get("/stats")
+            assert (reply.status, await reply.read()) == (200, b"shell")
+            assert reply.headers["Content-Security-Policy"] == "default-src 'self'"
+            etag = reply.headers["ETag"]
+            fetched = len(fake.requests)
+            reply = await rig.client.get("/stats", headers={"If-None-Match": etag})
+            assert reply.status == 304
+            assert len(fake.requests) == fetched, "an unchanged shell costs the controller nothing"
+
+            reply = await rig.client.get("/other", allow_redirects=False)
+            assert (reply.status, reply.headers["Location"]) == (302, "/")
+            assert (await rig.client.get("/__companion/none")).status == 404
+            assert (await rig.client.post("/app.js")).status == 405
+
+            fake.served["/app.js"] = b"steal"
+            reply = await rig.client.get(url)
+            assert reply.status == 502
+            assert b"steal" not in await reply.read()
+            assert assets.facts()["lastPath"] == "/app.js"
+            assert assets.facts()["refused"] == 1
+            fake.served["/app.js"] = b"app" + b"longer than the list says"
+            assert (await rig.client.get(url)).status == 502
+            del fake.served["/app.js"]
+
+            # An update: the file that changed sends the companion for a new list, once.
+            fake.files["/app.js"] = b"new app"
+            assert await (await rig.client.get(url)).read() == b"new app"
+
+            # Someone in the middle swaps another sealed answer in for the list.
+            sealed = fake.answer
+
+            def swapped(
+                identity: fake_controller.Identity | None, payload: object, status: int = 200
+            ) -> web.Response:
+                told = (
+                    {"ok": True} if isinstance(payload, dict) and "assets" in payload else payload
+                )
+                return sealed(identity, told, status)
+
+            monkeypatch.setattr(fake, "answer", swapped)
+            assets.listing, assets.listed_under = None, None
+            assert (await rig.client.get(url)).status == 503
+
+    asyncio.run(scenario())
+
+
+def test_stray_workers_and_the_unpaired_origin(tmp_path: Path) -> None:
+    """A worker planted before pairing is told to go once paired, and none can register before."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            worker = {"Service-Worker": "script"}
+            reply = await rig.client.get("/evil.js", headers=worker)
+            assert await reply.read() == UNREGISTER
+            assert reply.headers["Service-Worker-Allowed"] == "/"
+            assert await (await rig.client.get("/sw.js", headers=worker)).read() == b"worker"
+
+            rig.companion.store.erase_pairing()
+            assert (await rig.client.get("/evil.js", headers=worker)).status == 403
+            assert (await rig.client.get("/sw.js", headers=worker)).status == 403
+            reply = await rig.client.get("/app.js")
+            assert (reply.status, await reply.read()) == (200, b"app")
+            assert reply.headers["Cache-Control"] == "no-store"
+
+    asyncio.run(scenario())
+
+
+def test_diagnostic_says_an_older_controller_is_not_verified(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            rig.fake.features = 0
+            await rig.companion.relay.handshake()
+            reply = await rig.client.get("/app.js")
+            assert (reply.status, await reply.read()) == (200, b"app")
+            facts = await (await rig.client.get("/__companion/status")).json()
+            assert facts["assets"]["legacy"] is True
+
+    asyncio.run(scenario())
