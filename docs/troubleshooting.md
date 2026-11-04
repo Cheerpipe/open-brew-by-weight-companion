@@ -285,6 +285,15 @@ page:
   through the companion, on the screen you delete from; each screen has its
   own unlock. The companion's own page cannot delete anything.
 
+## The secure address opens the companion's page, not the Web UI
+
+The companion is not paired yet, or the controller no longer recognizes it, for
+example after **Forget** or a factory reset. The page shows a code: choose
+**Open the controller's Admin**, type it in **Admin → Companion** and choose
+**Approve**. If that link doesn't open on this device, do it from another device
+on your network. If it says the firmware cannot pair, update the controller at its
+own address first.
+
 ## The Web UI says its files could not be verified
 
 The companion compared a file from the controller with the list the controller

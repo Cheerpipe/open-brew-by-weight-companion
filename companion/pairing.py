@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 PATH = "/api/v1/companion/pair"
 POLL_S = 1
 REQUEST_S = 600  # How long a request stays open, as the controller allows at most.
+IN_USE = ("paired", "requesting", "pending")  # Nothing about these needs asking again.
 REFUSALS = {
     "COMPANION_IGNORED": "ignored",
     "ALREADY_PAIRED": "already_paired",
@@ -144,7 +145,9 @@ class Pairing:
     def _refused(self, status: int | None, reply: dict[str, object]) -> None:
         error = reply.get("error")
         refusal = REFUSALS.get(error, "error") if isinstance(error, str) else "error"
-        self.state = "unreachable" if status is None else refusal
+        self.state = (
+            "unreachable" if status is None else "unsupported" if status == 404 else refusal
+        )
         log(
             "the controller did not answer the pairing request"
             if status is None

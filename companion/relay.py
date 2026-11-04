@@ -3,12 +3,11 @@
 A relay session needs no clock and nothing stored: a GET returns the
 controller's challenge, a POST proves the pairing secret and both sides derive
 Kr (signing) and Kb (sealing) from it. Each request then carries
-`X-OBBW-Relay: 2 <q> <addr> <screen> <mac>`, its body and credential headers
-sealed with AES-256-GCM under Kb (protocol 2): no password, session token or
-sign-in body crosses the hop in the clear. Before pairing the companion
-forwards as a plain proxy (passthrough). Paired, it never does: without a relay
-session, or with the Web UI through the companion turned off (disabled), it
-refuses.
+`X-OBBW-Relay: <version> <q> <addr> <screen> <mac>`, its body and credential
+headers sealed with AES-256-GCM under Kb: no password, session token or sign-in
+body crosses the hop in the clear. Without a relay session, or with the
+Web UI through the companion turned off (disabled), it refuses, and before
+pairing nothing is relayed at all.
 """
 
 import asyncio
@@ -82,6 +81,7 @@ ANSWER_WINDOW = 256
 # reach the two WebSockets: aiohttp drops the timer on upgrade, by design.
 TIMEOUT = aiohttp.ClientTimeout(total=300, connect=5, sock_read=180)
 RENEW_S = 10
+HANDSHAKE_S = 10  # The handshake holds the lock every other caller waits on.
 
 
 def address(text: str | None) -> str:
@@ -277,23 +277,27 @@ class Relay:
                 return
             key = crypto.relay_key(secret, challenge, nonce)
             body_key = crypto.relay_body_key(key)
-            self.answers, self.answers_floor, self.counter = set(), 0, 0
-            self.features = None
+            # The old keys keep signing during the read, so nothing of this session shows until
+            # it is whole: a counter started over would repeat a nonce under them.
+            features, first = None, None
             if reply.get("ui") is not False:
-                self.features = await self._read_features(key, body_key)
-                if self.features is None:
+                offered = await self._read_features(key, body_key)
+                if offered is None:
                     self.reset(True)
                     self._note(
                         "the controller did not say what it offers; "
                         "the Web UI through the companion waits for a secure session"
                     )
                     return
-                if self.features < BOUND_ANSWERS:
+                features, first = offered
+                if features < BOUND_ANSWERS:
                     self._note(
                         "the controller's firmware cannot tie answers to their requests; "
                         "update it to protect sign-ins from a device on this network"
                     )
-            self.version = 3 if (self.features or 0) >= BOUND_ANSWERS else 2
+            self.answers, self.answers_floor = set() if first is None else {first}, 0
+            self.counter = 0 if first is None else 1
+            self.features, self.version = features, 3 if (features or 0) >= BOUND_ANSWERS else 2
             self.key, self.body_key = key, body_key
             self.renew_at = float("-inf")
             self._set_mode("disabled" if reply.get("ui") is False else "ready")
@@ -323,23 +327,23 @@ class Relay:
                 f"HTTP {status} {reply.get('error') or ''}".strip()
             )
 
-    async def _read_features(self, key: bytes, body_key: bytes) -> int | None:
-        """What this controller offers, read before anything else under a new session and always
-        as version 2, which every controller takes: its answer cannot change within a boot, so it
-        needs no binding. None without a sealed answer of exactly the right shape: nothing else
-        may lower what the session uses."""
-        self.counter = 1
+    async def _read_features(self, key: bytes, body_key: bytes) -> tuple[int, int] | None:
+        """What this controller offers and the counter of its answer, read as the new session's
+        first request (q 1) and always as version 2, which every controller takes: its answer cannot
+        change within a boot, so it needs no binding. None without a sealed answer of exactly the
+        right shape: nothing else may lower what the session uses."""
         tag = crypto.relay_tag(key, "GET", INFO, 1, NO_ADDRESS, self.client_id, "")
         try:
-            reply = await self._send(
-                "GET",
-                INFO,
-                {
-                    "X-WebUI-Client": self.client_id,
-                    "X-OBBW-Relay": f"2 1 {NO_ADDRESS} {self.client_id} {tag}",
-                },
-                b"",
-            )
+            async with asyncio.timeout(HANDSHAKE_S):
+                reply = await self._send(
+                    "GET",
+                    INFO,
+                    {
+                        "X-WebUI-Client": self.client_id,
+                        "X-OBBW-Relay": f"2 1 {NO_ADDRESS} {self.client_id} {tag}",
+                    },
+                    b"",
+                )
             try:
                 counter = int(reply.headers.get(SEALED_RESPONSE_HEADER, ""))
                 if reply.status != 200 or reply.data is None:
@@ -349,14 +353,13 @@ class Relay:
                 reply.release()
         except aiohttp.ClientError, TimeoutError, OSError, ValueError, InvalidTag:
             return None
-        self.answers.add(counter)
         if not isinstance(info, dict):
             return None
         features = info.get("relayFeatures")
         if set(info) == LEGACY_INFO:
-            return 0
+            return 0, counter
         return (
-            features
+            (features, counter)
             if type(features) is int
             and features >= 1
             and set(info) == {*LEGACY_INFO, "relayFeatures"}
@@ -502,17 +505,11 @@ class Relay:
         counter = reply.headers.get(SEALED_RESPONSE_HEADER)
         if counter is None and (reply.data is None or reply.status >= 400):
             return
-        sealed = (
-            reply.data
-            if reply.data is not None
-            else (await read_capped(reply) if reply.content_length is not None else None)
-        )
-        reply.release()
         try:
             if counter is None:
                 raise ValueError("a successful answer without a seal")
-            if sealed is None:  # Too large to read whole, so it cannot open either.
-                raise ValueError("the sealed answer is too large")
+            # Too large to read whole, so it cannot open either.
+            sealed = reply.data if reply.data is not None else await read_capped(reply)
             number = int(counter)
             reply.data = crypto.relay_open(
                 body_key, number, sealed, additional if version >= 3 else None
@@ -520,16 +517,18 @@ class Relay:
             if not self._fresh(body_key, number):
                 raise ValueError("a sealed answer seen before")
         except (InvalidTag, ValueError, TypeError) as error:
+            reply.release()
             log("the controller's sealed answer did not open; starting a new relay session")
             self.forget(body_key)  # The next request makes a new session.
             raise aiohttp.ClientResponseError(
                 reply.request_info, (), status=502, message="the sealed answer did not open"
             ) from error
+        reply.release()
 
     async def passthrough(
         self, method: str, uri: str, incoming: Mapping[str, str], body: bytes
     ) -> Reply:
-        """Today's transparent proxy: the browser's own id, nothing signed."""
+        """A question with no session to sign it, while the Web UI through the companion is off."""
         return await self._send(method, uri, self.forwarded(incoming), body)
 
     async def _send(self, method: str, uri: str, headers: dict[str, str], body: bytes) -> Reply:

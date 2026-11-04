@@ -3,6 +3,7 @@ for the controller, read past a size limit, end a background task, or leave half
 
 import asyncio
 import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -849,8 +850,9 @@ def test_files_are_verified_against_the_sealed_list(
     asyncio.run(scenario())
 
 
-def test_stray_workers_and_the_unpaired_origin(tmp_path: Path) -> None:
-    """A worker planted before pairing is told to go once paired, and none can register before."""
+def test_nothing_passes_before_pairing(tmp_path: Path) -> None:
+    """Every page leads to the pairing page, nothing reaches the controller, a stored grant opens
+    nothing, and a worker from an earlier pairing removes itself. The page still answers."""
 
     async def scenario() -> None:
         async with Rig(tmp_path) as rig:
@@ -860,12 +862,76 @@ def test_stray_workers_and_the_unpaired_origin(tmp_path: Path) -> None:
             assert reply.headers["Service-Worker-Allowed"] == "/"
             assert await (await rig.client.get("/sw.js", headers=worker)).read() == b"worker"
 
-            rig.companion.store.erase_pairing()
-            assert (await rig.client.get("/evil.js", headers=worker)).status == 403
-            assert (await rig.client.get("/sw.js", headers=worker)).status == 403
-            reply = await rig.client.get("/app.js")
-            assert (reply.status, await reply.read()) == (200, b"app")
-            assert reply.headers["Cache-Control"] == "no-store"
+            session = {"X-WebUI-Session": "kept"}
+            digest = hashlib.sha256(session["X-WebUI-Session"].encode()).hexdigest()
+            rig.companion.log_grants[digest] = time.time()
+            rig.companion.device_id = "device"
+            assert (await rig.client.get("/__companion/log/boots", headers=session)).status == 200
+
+            await rig.companion.erase("a test", history=False)
+            assert rig.companion.pairing_required()
+            seen = len(rig.fake.requests)
+            for path in ("/", "/stats", "/app.js", "/evil.js"):
+                reply = await rig.client.get(path, allow_redirects=False)
+                assert (reply.status, reply.headers["Location"]) == (302, "/__companion/?pair=1")
+                assert reply.headers["Cache-Control"] == "no-store"
+            for path in ("/sw.js", "/evil.js"):
+                assert await (await rig.client.get(path, headers=worker)).read() == UNREGISTER
+            reply = await rig.client.post("/api/v1/auth/login", json={}, headers=CLIENT)
+            assert (reply.status, (await reply.json())["error"]) == (409, "COMPANION_NOT_PAIRED")
+            assert len(rig.fake.requests) == seen
+            with pytest.raises(aiohttp.WSServerHandshakeError):
+                await rig.client.ws_connect("/api/v1/ui/ui-stream")
+            assert (await rig.client.get("/__companion/log/boots", headers=session)).status == 401
+            reply = await rig.client.get("/__companion/ui-gate", headers={"X-Original-URI": "/"})
+            assert reply.status == 401
+            reply = await rig.client.get(
+                "/__companion/ui-gate", headers={"X-Original-URI": "/sw.js"}
+            )
+            assert reply.status == 204
+
+            page = await (await rig.client.get("/__companion/?pair=1")).text()
+            assert "Open the controller's Admin" in page
+            facts = await (await rig.client.get("/__companion/status")).json()
+            assert facts["pairingRequired"] is True, "an open tab reads this to come here"
+
+            # A controller that forgot this companion is the same case.
+            rig.companion.pairing.state = "not_recognized"
+            assert rig.companion.pairing_required()
+
+    asyncio.run(scenario())
+
+
+def test_a_page_load_asks_a_controller_that_seemed_to_forget(tmp_path: Path) -> None:
+    """An unsigned answer can only claim the controller forgot this companion, so opening the Web
+    UI asks again: a controller that proves the secret brings it back."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            rig.companion.pairing.state = "not_recognized"
+            reply = await rig.client.get("/__companion/ui-gate", headers={"X-Original-URI": "/"})
+            assert reply.status == 204
+            assert rig.companion.pairing.state == "paired"
+
+    asyncio.run(scenario())
+
+
+def test_firmware_without_pairing_says_to_update(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = web.Application()
+        server = TestServer(app, host="127.0.0.1")
+        await server.start_server()
+        Store(tmp_path).write("identity", {"id": ID, "key": "11" * 32})
+        async with aiohttp.ClientSession() as http:
+            companion = Companion("Kitchen server", tmp_path, http, Idle)
+            companion.controller = target_of(server)
+            assert companion.pairing.start(manual=True)
+            task = companion.pairing.task
+            assert task is not None
+            await task
+            assert companion.pairing.state == "unsupported"
+            await companion.relay.close()
+        await server.close()
 
     asyncio.run(scenario())
 
@@ -883,39 +949,298 @@ def test_diagnostic_says_an_older_controller_is_not_verified(tmp_path: Path) -> 
     asyncio.run(scenario())
 
 
-def test_pairing_tells_a_proxied_window_it_keeps_control(tmp_path: Path) -> None:
-    """A window using the companion before pairing is not told another one took over."""
+def test_a_new_session_never_repeats_a_counter_under_the_old_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While a handshake reads what the controller offers, the old keys still sign: a counter
+    started over would seal a second plaintext under a nonce they already used."""
 
     async def scenario() -> None:
-        async def stream(request: web.Request) -> web.WebSocketResponse:
-            ws = web.WebSocketResponse()
-            await ws.prepare(request)
-            await ws.receive()
-            return ws
+        async with Rig(tmp_path) as rig:
+            relay = rig.companion.relay
+            used = relay.admit("GET", "/x", relay_module.NO_ADDRESS, relay.client_id)[1]
+            old, during, send = relay.body_key, list[int](), relay._send
+
+            async def spying(method: str, uri: str, headers: dict[str, str], body: bytes) -> Any:
+                if uri == relay_module.INFO and relay.body_key is old:
+                    q = relay.admit("GET", "/x", relay_module.NO_ADDRESS, relay.client_id)[1]
+                    during.append(q)
+                return await send(method, uri, headers, body)
+
+            monkeypatch.setattr(relay, "_send", spying)
+            await relay.handshake()
+            assert during, "the old keys were in use during the read"
+            assert during[0] > used
+            assert relay.body_key is not old
+            assert relay.counter == 1, "the new session counts from the read that opened it"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("counter", ["-1", str(1 << 64)])
+def test_a_counter_out_of_range_ends_only_the_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, counter: str
+) -> None:
+    """Forged by anyone in the middle; raising past the handshake would leave the live updates
+    waiting for good."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            relay, sealed = rig.companion.relay, rig.fake.answer
+
+            def forged(
+                identity: fake_controller.Identity | None, payload: object, status: int = 200
+            ) -> web.Response:
+                answer = sealed(identity, payload, status)
+                return web.Response(
+                    status=status,
+                    content_type="application/json",
+                    body=answer.body,
+                    headers={"X-OBBW-Enc": counter},
+                )
+
+            monkeypatch.setattr(rig.fake, "answer", forged)
+            reply = await rig.client.get("/api/v1/status", headers=CLIENT)
+            assert reply.status == 502
+            await relay.handshake()
+            assert relay.key is None
+
+    asyncio.run(scenario())
+
+
+def test_a_sealed_answer_too_large_to_read_is_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            monkeypatch.setattr(
+                rig.fake,
+                "answer",
+                lambda *_, **__: web.Response(
+                    content_type="application/json",
+                    body=bytes(relay_module.READ_LIMIT + 1),
+                    headers={"X-OBBW-Enc": "9"},
+                ),
+            )
+            assert (await rig.client.get("/api/v1/status", headers=CLIENT)).status == 502
+
+    asyncio.run(scenario())
+
+
+def test_a_controller_that_hangs_does_not_hold_the_handshake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(relay_module, "HANDSHAKE_S", 0.05, raising=False)
+        async with Rig(tmp_path) as rig:
+            relay, send = rig.companion.relay, rig.companion.relay._send
+
+            async def hanging(method: str, uri: str, headers: dict[str, str], body: bytes) -> Any:
+                if uri == relay_module.INFO:
+                    await asyncio.sleep(60)
+                return await send(method, uri, headers, body)
+
+            monkeypatch.setattr(relay, "_send", hanging)
+            await asyncio.wait_for(relay.handshake(), 2)
+            assert relay.key is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "failed", ["already_paired", "expired", "denied", "unreachable", "busy", "error"]
+)
+def test_a_failed_attempt_does_not_hide_a_working_pairing(tmp_path: Path, failed: str) -> None:
+    """An unsigned answer sends the owner to Pair; when that attempt fails, the pairing it left in
+    place proves itself again and the Web UI comes back."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            companion = rig.companion
+            companion.pairing.state = failed
+            reply = await rig.client.get("/__companion/ui-gate", headers={"X-Original-URI": "/"})
+            assert reply.status == 204
+            assert companion.pairing.state == "paired"
+            assert not companion.pairing_required()
+
+    asyncio.run(scenario())
+
+
+def test_what_a_blip_made_seem_forgotten_is_not_paired_again_or_erased(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            companion = rig.companion
+            companion.pairing.state = "not_recognized"
+            reply = await rig.client.post("/__companion/pair", json={})
+            started = companion.pairing.task
+            assert reply.status == 409
+            assert started is None, "no new attempt"
+            assert companion.pairing.state == "paired"
+
+            companion.pairing.state = "not_recognized"
+            reply = await rig.client.post("/__companion/erase", json={})
+            assert reply.status == 409
+            assert companion.store.pairing() is not None
+
+            # One the controller really forgot, unsigned, still may start over.
+            rig.fake.mode = "unknown"
+            await companion.relay.handshake()
+            assert companion.pairing.state == "not_recognized"
+            reply = await rig.client.post("/__companion/pair", json={})
+            assert reply.status == 202
+            assert companion.pairing.task is not None
+            await companion.pairing.task
+
+    asyncio.run(scenario())
+
+
+def test_a_clear_answer_ends_access_but_never_grants_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While the Web UI through the companion is off, which the handshake says unsigned, the
+    controller answers only in clear: someone in the middle must not open the stored log."""
+
+    class Clear:
+        status = 200
+        data = b""
+
+        def release(self) -> None:
+            pass
+
+    async def passthrough(*_: object) -> Clear:
+        return Clear()
+
+    async def scenario() -> None:
+        monkeypatch.setattr(service, "LOG_ACCESS_RECHECK_S", 0)
+        async with Rig(tmp_path) as rig:
+            companion = rig.companion
+            companion.device_id = "device"
+            monkeypatch.setattr(companion.relay, "mode", "disabled")
+            monkeypatch.setattr(companion.relay, "passthrough", passthrough)
+            for forged in (
+                {"loginRequired": False},
+                {"loginRequired": True, "signedIn": True},
+                {"loginRequired": False, "signedIn": True, "adminUnlocked": True},
+            ):
+                Clear.data = json.dumps(forged).encode()
+                companion.log_unreachable = 0
+                reply = await rig.client.get("/__companion/log/boots", headers=CLIENT)
+                assert reply.status == 401, forged
+                assert not await companion.logs.grants()
+
+            await companion.logs.grant(OPEN_ACCESS, True)
+            companion.log_grants[OPEN_ACCESS] = 0
+            Clear.data = json.dumps({"loginRequired": True}).encode()
+            companion.log_unreachable = 0
+            reply = await rig.client.get("/__companion/log/boots", headers=CLIENT)
+            assert reply.status == 401
+            assert not await companion.logs.grants(), "the login is on: what it allowed ends"
+
+    asyncio.run(scenario())
+
+
+def test_nothing_unverified_enters_the_cache(tmp_path: Path) -> None:
+    """An older controller's files are not verified, so nginx must not keep them: a kept copy, and
+    an ETag or a `?v=` someone in the middle chose, would outlive the update that verifies files."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            rig.fake.features = 0
+            await rig.companion.relay.handshake()
+            for path in ("/", "/app.js?v=abcd1234", "/sw.js"):
+                reply = await rig.client.get(path)
+                assert reply.headers["X-Accel-Expires"] == "0", path
+
+    asyncio.run(scenario())
+
+
+def test_an_older_controller_stays_older_only_while_it_can_say_so(tmp_path: Path) -> None:
+    """Without a session the firmware may have been updated: no file goes unverified then."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            relay = rig.companion.relay
+            rig.fake.features = 0
+            await relay.handshake()
+            assert (await rig.client.get("/app.js")).status == 200
+            rig.fake.mode = "bad_proof"
+            relay.forget(relay.body_key)
+            assert (await rig.client.get("/app.js")).status == 503
+
+    asyncio.run(scenario())
+
+
+def test_a_proof_always_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The supervisor keeps an address as being proved until it hears back, and asks no more."""
+
+    async def scenario() -> None:
+        monkeypatch.setattr(service, "PROVE_RETRY_S", (0,))
+        async with Rig(tmp_path) as rig:
+            answers = list[bool]()
+
+            async def failing(_base: str) -> bool:
+                raise OSError("the disk is full")
+
+            monkeypatch.setattr(rig.companion.relay, "proves", failing)
+            with pytest.raises(OSError, match="disk"):
+                await rig.companion.prove(target_of(rig.server), answers.append)
+            assert answers == [False]
+
+    asyncio.run(scenario())
+    answers = list[bool]()
+    service.Handle().prove(("Cafe Bar", ("127.0.0.1", 9)), answers.append)
+    assert answers == [False], "the service has not started: no answer is coming"
+
+
+def test_the_controller_requests_follow_no_redirect(tmp_path: Path) -> None:
+    """A device in the middle must not send the companion to other addresses on its network."""
+
+    async def scenario() -> None:
+        hits = list[str]()
+
+        async def redirect(_request: web.Request) -> web.Response:
+            raise web.HTTPFound("/other")
+
+        async def other(_request: web.Request) -> web.Response:
+            hits.append("other")
+            return web.json_response({})
 
         app = web.Application()
-        app.router.add_get("/api/v1/ui/ui-stream", stream)
+        app.router.add_get("/start", redirect)
+        app.router.add_get("/other", other)
         server = TestServer(app, host="127.0.0.1")
         await server.start_server()
-        Store(tmp_path).write("identity", {"id": ID, "key": "11" * 32})
-        async with aiohttp.ClientSession() as http:
-            companion = Companion("Kitchen server", tmp_path, http, Idle)
-            companion.pairing.auto = False
-            companion.set_controller(target_of(server))
-            client = TestClient(TestServer(web_app(companion)))
-            await client.start_server()
-            ws = await client.ws_connect("/api/v1/ui/ui-stream")
-            for _ in range(100):
-                if companion.screens.plain:
-                    break
-                await asyncio.sleep(0.01)
-            companion.screens.end_plain_streams()
-            closing = await ws.receive(timeout=3)
-            assert closing.type is aiohttp.WSMsgType.CLOSE
-            assert (closing.data, closing.extra) == (4001, "paired")
-            await ws.close()
-            await client.close()
-            await companion.relay.close()
+        async with Rig(tmp_path) as rig:
+            url = str(server.make_url("/start"))
+            status, _ = await rig.companion.controller_request("GET", url)
+            assert status == 302
+            assert not hits
         await server.close()
+
+    asyncio.run(scenario())
+
+
+def test_only_a_sealed_claim_counts(tmp_path: Path) -> None:
+    """A claim's answer streamed in clear says nothing: only the sealed one makes a screen act under
+    the identity every screen shares."""
+
+    class Streamed:
+        status, data = 200, None
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            screens = rig.companion.screens
+            screens._observe("/api/v1/ui/claim", "abcdefabcdefabcd", True, cast("Any", Streamed()))
+            assert not screens.mux.claimed
+
+    asyncio.run(scenario())
+
+
+def test_a_path_cannot_write_a_log_line_of_its_own(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            assets = rig.companion.assets
+            assets._refuse("/apple-touch-icon\n2026-11-04 the pairing is fine")
+            assert "\n" not in (assets.last_refused or "")
 
     asyncio.run(scenario())

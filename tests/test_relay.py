@@ -158,26 +158,23 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             ) as reply:
                 return reply.status, dict(reply.headers), await reply.read()
 
-        # --- No controller yet -------------------------------------------------------
+        # --- Not paired: nothing reaches the controller, with or without one known -----------
         status, _, body = await call("GET", "/api/v1/status/admin")
-        assert status == 503
-        assert json.loads(body)["error"] == "NO_CONTROLLER"
-
-        # --- Not paired: the plain proxy it always was -----------------------------------
+        assert status == 409
+        assert json.loads(body)["error"] == "COMPANION_NOT_PAIRED"
         companion.pairing.auto = False
         companion.set_controller(target)
         await asyncio.sleep(0.1)
         assert relay.mode == "passthrough"
         assert (await companion.status())["relay"] == "passthrough"
         fake.active = A
-        status, _, body = await call("GET", "/api/v1/status/admin", headers={"Cookie": "x=1"})
-        _, _, headers, _, identity = fake.requests[-1]
-        assert status == 200
-        assert identity is None
-        assert headers["X-WebUI-Client"] == A
-        assert "Cookie" not in headers
-        assert "X-Real-IP" not in headers
-        assert "X-OBBW-Relay" not in headers
+        status, _, body = await call("POST", "/api/v1/auth/login", json={"password": "secret"})
+        assert status == 409
+        assert json.loads(body)["error"] == "COMPANION_NOT_PAIRED"
+        assert fake.requests == [], "no password crosses an unpaired companion"
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused_stream:
+            await browser.ws_connect(base + "/api/v1/ui/ui-stream")
+        assert refused_stream.value.status == 409
 
         # --- Paired: one relay session, every call signed and sealed --------------------------
         companion.store.save_pairing(SECRET, "Cafe Bar")
@@ -428,14 +425,9 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             assert len(fake.requests) == seen, "an answer in clear could be forged"
 
         await refused(B)
-        for mode in ("bad_proof", "unknown"):  # A forged answer, an unsigned refusal.
-            fake.mode = mode
-            await relay.handshake()
-            await refused(B)
-        assert companion.pairing.state == "not_recognized", "unsigned: nothing erased"
-        assert companion.store.pairing(), "unsigned: nothing erased"
-        async with browser.get(base + "/__companion/status") as reply:
-            assert (await reply.json())["relay"] == "passthrough"
+        fake.mode = "bad_proof"  # A forged answer.
+        await relay.handshake()
+        await refused(B)
 
         # A lasting failure costs one handshake every RENEW_S, however many requests ask.
         relay.renew_at = float("-inf")
@@ -443,6 +435,17 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         for _ in range(3):
             await call("GET", "/api/v1/status/admin", client=B)
         assert fake.relay_gets == asked + 1
+
+        fake.mode = "unknown"  # An unsigned refusal: no secret in common, as far as anyone knows.
+        await relay.handshake()
+        assert companion.pairing.state == "not_recognized", "unsigned: nothing erased"
+        assert companion.store.pairing(), "unsigned: nothing erased"
+        status, _, body = await call("GET", "/api/v1/status/admin", client=B)
+        assert status == 409
+        assert json.loads(body)["error"] == "COMPANION_NOT_PAIRED"
+        assert len(fake.requests) == seen, "nothing crossed in clear"
+        async with browser.get(base + "/__companion/status") as reply:
+            assert (await reply.json())["relay"] == "passthrough"
         # An answer from the controller needs no wait: a handshake the announcement starts
         # brings the session back, and the requests with it.
         fake.mode = "ok"
@@ -476,31 +479,22 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         assert status == 200
         assert (relay.mode, last_identity(fake) is not None) == ("ready", True)
 
-        # --- Only an erased pairing is a plain proxy again ---------------------------------------
+        # --- An erased pairing relays nothing again ----------------------------------------------
         fake.mode = "bad_erase"
         await relay.handshake()
         assert companion.store.pairing()
         assert relay.mode == "passthrough"
         fake.mode = "forgotten"
         relay.renew_at = float("-inf")
-        status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
-        assert status == 200, "the request that learned of the erase goes as a plain proxy"
+        seen = len(fake.requests)
+        assert await relay.handshake() == "passthrough", "a signed erase, this time"
+        status, _, body = await call("GET", "/api/v1/status/admin", client=B)
+        assert status == 409, "nothing is relayed after the erase"
+        assert json.loads(body)["error"] == "COMPANION_NOT_PAIRED"
+        assert len(fake.requests) == seen
         assert companion.store.pairing() is None
         assert companion.pairing.state == "unpaired"
         assert (relay.mode, relay.link) == ("passthrough", None)
-        assert last_identity(fake) is None
-        assert fake.requests[-1][2]["X-WebUI-Client"] == B
-        fake.mode = "none"
-        fake.require_relay_stream = False
-        async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
-            await ws.send_str(json.dumps({"op": "bind", "client": B}))
-            assert json.loads((await ws.receive()).data)["type"] == "home"
-            assert fake.streams[-1].identity is None, "the browser's own session, unsigned"
-        async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
-            await ws.send_str(json.dumps({"op": "bind", "client": A}))
-            message = await ws.receive()
-            assert message.type is aiohttp.WSMsgType.CLOSE, "close codes pass through"
-            assert message.data == 4001, "close codes pass through"
 
         async with browser.get(base + "/__companion/status") as reply:
             facts = await reply.json()
@@ -515,12 +509,6 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             "history",
             "stats",
         }
-
-        # A page proxied before pairing stops being in clear the moment the pairing is saved.
-        async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
-            await companion.paired(SECRET)
-            assert (await ws.receive()).type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED)
-        await relay.handshake()  # After the one the pairing started: none outlives this scenario.
 
         await pages.close()
         await relay.close()

@@ -328,7 +328,10 @@ async def replica_rules(
     asked = len(serving.requests)
     reply = await companion.screens.api(
         make_mocked_request(
-            "POST", "/api/v1/stats/rate", headers={}, transport=mock.Mock(is_closing=lambda: False)
+            "POST",
+            "/api/v1/stats/rate",
+            headers={"X-WebUI-Client": "abcdefabcdefabcd"},
+            transport=mock.Mock(is_closing=lambda: False),
         )
     )
     assert reply.status in (502, 503), reply.status
@@ -420,6 +423,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
     with tempfile.TemporaryDirectory(prefix="openbrewbyweight-vectors-") as temporary:
         async with aiohttp.ClientSession() as http:
             companion = Companion("Kitchen server", Path(temporary), http, Upstream)
+            companion.pairing.state = "paired"
             await companion.open_log()
             # Shots 3 to 12 already hold their trace, so this pass asks the two the vectors answer.
             await offload(

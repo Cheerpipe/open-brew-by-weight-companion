@@ -42,16 +42,23 @@ The companion does the fiddly parts for you:
 
 ## Pair it with the controller
 
-Pairing is what lets the controller hand work to the companion and share its
-Web UI between your screens. It takes a minute and you do it once:
+The companion opens the Web UI only once it is paired with the controller:
+pairing is what protects your password and sign-in on your network, and what
+lets the controller hand work to the companion and share its Web UI between
+your screens. It takes a minute and you do it once:
 
 1. Start the companion (see below). It finds the controller and asks to pair
    on its own.
-2. The Web UI's Home shows that **Open Brew by Weight Companion** wants to
-   connect, with the companion's name. Open **Admin → Companion**.
-3. On any device, open the companion's page,
-   **`http://openbrewbyweight-secure.local/__companion/`**. It shows a
-   six-digit code. Type it in **Admin → Companion** and choose **Approve**.
+2. Open **`https://openbrewbyweight-secure.local`**. Until it is paired, this
+   takes you to the companion's page, which shows a six-digit code. On a device
+   without the certificate yet, use
+   **`http://openbrewbyweight-secure.local/__companion/`**.
+3. Choose **Open the controller's Admin**, unlock it, and type the code in
+   **Admin → Companion**. Choose **Approve**. The companion's page then opens
+   the Web UI by itself.
+
+This one step uses the controller's own address, which is not encrypted, so do
+it on a network you trust. Any device on your network can approve.
 
 The code proves that the companion asking is the one you are looking at, so
 no other device on your network can pair in its place. If the request
@@ -379,10 +386,7 @@ live only in memory and change every time it starts.
 - **Each device signs in on its own.** A paired companion tells the controller
   which device each request comes from, signed so that no other device on
   your network can claim to be the companion, so five wrong passwords on one
-  phone pause sign-in for that phone only. Before pairing, or with older
-  firmware, every device looks like the same one to the controller, as with
-  any reverse proxy, and five wrong passwords pause sign-in for everyone
-  using the companion for 30 seconds.
+  phone pause sign-in for that phone only.
 - **The name has a single part before `.local` on purpose.** Names such as
   `secure.openbrewbyweight.local` work on Apple devices, but some Windows,
   Linux and Android devices cannot open `.local` names with more than one

@@ -183,11 +183,15 @@ class Controller:
             assert request.transport is not None
             request.transport.abort()
             return web.Response()
+        if self.mode == "not_paired":  # One pairing answers both routes.
+            return web.json_response({"error": "COMPANION_NOT_PAIRED"}, status=404)
         if not self.relay:  # Before that, the relay handshake fails: the link opens as ever.
             return web.json_response({"error": "UNAVAILABLE"}, status=503)
         return web.json_response({"challenge": crypto.b64(self.RELAY_CHALLENGE), "protocol": 1})
 
     async def relay_post(self, request: web.Request) -> web.Response:
+        if self.mode == "not_paired":
+            return web.json_response({"error": "COMPANION_NOT_PAIRED"}, status=404)
         body = await request.json()
         nc = crypto.unb64(body["nonce"], 16)
         assert crypto.unb64(body["mac"]) == crypto.mac(SECRET, b"R", self.RELAY_CHALLENGE, nc), (

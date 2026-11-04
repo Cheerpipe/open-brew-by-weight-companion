@@ -31,7 +31,7 @@ from .assets import Assets
 from .lamarzocco import LaMarzocco
 from .link import ErasedError, LinkClosedError, open_link
 from .logstore import EXPORT_VERSION, FIRST_PAGE, FORMAT, LogStore
-from .pairing import Pairing
+from .pairing import IN_USE, Pairing
 from .push import MAX_EVENT_BYTES as PUSH_MAX_EVENT_BYTES
 from .push import MAX_KEY as PUSH_MAX_KEY
 from .push import MAX_TEST_DELAY_S as PUSH_MAX_TEST_DELAY_S
@@ -229,6 +229,12 @@ class Companion:
             raise RuntimeError("no controller yet")
         return self.controller
 
+    def pairing_required(self) -> bool:
+        """Nothing reaches the controller through the companion until they are paired: with no
+        secret in common nothing could be sealed, verified or told apart. A pairing the controller
+        no longer recognizes has none either."""
+        return self.pairing.state != "paired"
+
     def base_url(self, scheme: str = "http", at: tuple[str, int] | None = None) -> str:
         ip, port = at or self._target()[1]
         return f"{scheme}://{ip}" + ("" if port == 80 else f":{port}")
@@ -236,17 +242,20 @@ class Companion:
     async def prove(self, target: Target, done: Callable[[bool], object]) -> None:
         """Paired, a device announcing itself as the controller at a new address counts only once
         it proves the pairing secret; `done` receives the answer. A controller still starting up
-        gets a few tries."""
-        for wait in PROVE_RETRY_S:
-            await asyncio.sleep(wait)
-            if await self.relay.proves(self.base_url(at=target[1])):
-                done(True)
-                return
-        log(
-            f"ignoring {target[1][0]}:{target[1][1]}: it announces itself as the controller "
-            "but does not prove the pairing secret"
-        )
-        done(False)
+        gets a few tries. `done` always runs: the supervisor asks no more until it does."""
+        proved = False
+        try:
+            for wait in PROVE_RETRY_S:
+                await asyncio.sleep(wait)
+                proved = await self.relay.proves(self.base_url(at=target[1]))
+                if proved:
+                    return
+            log(
+                f"ignoring {target[1][0]}:{target[1][1]}: it announces itself as the controller "
+                "but does not prove the pairing secret"
+            )
+        finally:
+            done(proved)
 
     def set_controller(self, target: Target | None) -> None:
         """The controller in use, on start and on each of its mDNS announcements."""
@@ -272,7 +281,11 @@ class Companion:
         """(status, JSON object) from the controller, or (None, {}) when it did not answer."""
         try:
             async with self.http.request(
-                method, url, json=body, timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)
+                method,
+                url,
+                json=body,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S),
             ) as reply:
                 try:
                     data = json.loads(await read_capped(reply))
@@ -286,7 +299,6 @@ class Companion:
         await offload(self.store.erase_pairing)
         self.lm.erase()
         await offload(self.store.save_pairing, secret, self._target()[0])
-        self.screens.end_plain_streams()
         log(f"paired with {self._target()[0]}")
         if self.ws is not None:
             _ = self.spawn(self.ws.close())
@@ -330,10 +342,17 @@ class Companion:
             log("the controller does not recognize this companion; La Marzocco is stopped")
 
     async def recognized(self) -> None:
-        """A relay session proved the pairing: a controller that did not know us does again."""
-        if self.pairing.state == "not_recognized":
+        """A relay session proved the stored pairing: a controller that did not know us does again,
+        and a new attempt that failed since changed nothing."""
+        if self.pairing.state not in (*IN_USE, "unpaired"):
             self.pairing.state = "paired"
             await self._apply_account()
+
+    async def recheck(self) -> None:
+        """Before acting on a pairing that seems gone: only an unsigned answer can say so, so the
+        controller may prove it after all."""
+        if self.pairing.state not in IN_USE:
+            await self.relay.handshake()
 
     def link_wanted(self, wanted: bool | None) -> None:
         """The relay learned whether a feature needs the link [D4]; with no relay it always
@@ -775,7 +794,9 @@ class Companion:
         for LOG_UNREACHABLE_S, so a page never waits on it twice in a row.
         `live` (changing the archive or the log) needs the controller's answer
         now: (signed in, Admin unlocked for this screen, login off), or None when
-        it cannot give one."""
+        it cannot give one. Without a pairing nobody may, whatever was granted before."""
+        if self.pairing_required():
+            return (False, False, False) if live else False
         session = hashlib.sha256(headers.get("X-WebUI-Session", "").encode()).hexdigest()
         now = time.time()
         opened = self.log_grants.get(OPEN_ACCESS)
@@ -831,7 +852,8 @@ class Companion:
         login off), or None when it cannot answer. It asks through the relay as the screen itself
         (its own X-WebUI-Client, signed), so the unlock it reads is that screen's, never the
         companion's shared client's; without a relay session, or without the screen's id, nothing
-        counts as unlocked."""
+        counts as unlocked. An answer in clear can only end access: anyone in the middle can write
+        one, and can also make the handshake say the Web UI is off."""
         if self.controller is None:
             return None
         client = headers.get("X-WebUI-Client", "")
@@ -850,9 +872,9 @@ class Companion:
                 )
             relayed = reply is not None
             if reply is None:
-                # Paired and without a session, an answer in clear could be forged; what the
-                # controller said last stands. Otherwise the session stays here: ask as nobody.
-                if self.relay.mode != "disabled" and await self.relay.paired():
+                # Without a session, what the controller said last stands. With the Web UI through
+                # the companion off, ask as nobody: the login may have come on.
+                if self.relay.mode != "disabled":
                     return None
                 reply = await self.relay.passthrough("GET", "/api/v1/auth", {}, b"")
             try:
@@ -863,9 +885,11 @@ class Companion:
             return None
         if not isinstance(answer, dict):
             return None
+        if not relayed:
+            return (False, False, False) if answer.get("loginRequired") is True else None
         return (
             answer.get("loginRequired") is False or answer.get("signedIn") is True,
-            relayed and screen is not None and answer.get("adminUnlocked") is True,
+            screen is not None and answer.get("adminUnlocked") is True,
             answer.get("loginRequired") is False,
         )
 
@@ -1082,6 +1106,7 @@ class Companion:
             "version": VERSION,
             "id": self.id,
             "paired": pairing is not None,
+            "pairingRequired": self.pairing_required(),
             "pairedWith": (self.device_name or pairing.get("controller")) if pairing else None,
             "controller": {
                 "name": self.device_name or self.controller[0],
@@ -1175,21 +1200,25 @@ def web_app(companion: Companion) -> web.Application:
         return web.Response(text=page, content_type="text/html", headers=page_headers)
 
     async def gate(request: web.Request) -> web.Response:
-        """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens
-        directly."""
+        """nginx asks before each Web UI page: 401 sends it to the pairing page while unpaired, and
+        403 shows the notice while the Web UI opens directly."""
         nonlocal gate_asked
         page = request.headers.get("X-Original-URI", "").partition("?")[0]
         now = asyncio.get_running_loop().time()
-        # Turned back on at the controller's own address, with no link open to say so.
+        # Turned back on at the controller's own address, with no link open to say so; or a
+        # controller that seemed to forget this companion, which an unsigned answer can only claim.
         if (
-            companion.relay.mode == "disabled"
+            (companion.relay.mode == "disabled" or companion.pairing_required())
             and page != "/sw.js"
             and now - gate_asked >= GATE_HANDSHAKE_S
         ):
             gate_asked = now
             await companion.relay.handshake()
-        allowed = companion.relay.mode != "disabled" or page == "/sw.js"
-        return web.Response(status=204 if allowed else 403)
+        if page == "/sw.js":
+            return web.Response(status=204)
+        if companion.pairing_required():
+            return web.Response(status=401)
+        return web.Response(status=403 if companion.relay.mode == "disabled" else 204)
 
     async def ui_off(_request: web.Request) -> web.Response:
         address = html.escape(companion.base_url()) if companion.controller else ""
@@ -1207,6 +1236,7 @@ def web_app(companion: Companion) -> web.Application:
             request.content_type != "application/json"
         ):  # A web page elsewhere cannot send this without asking.
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+        await companion.recheck()
         if companion.pairing.state == "paired":
             return web.json_response({"error": "ALREADY_PAIRED"}, status=409)
         if companion.controller is None:
@@ -1219,10 +1249,11 @@ def web_app(companion: Companion) -> web.Application:
     async def erase(request: web.Request) -> web.Response:
         if request.content_type != "application/json":
             return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+        await companion.recheck()
         if (
             await offload(companion.store.pairing) is None
             or companion.ws is not None
-            or companion.pairing.state in ("paired", "requesting", "pending")
+            or companion.pairing.state in IN_USE
         ):
             return web.json_response(
                 {
@@ -1814,6 +1845,8 @@ class Handle:
         """Ask whether `target` may replace the controller; `done` runs on the service's thread."""
         if self.loop and self.companion:
             asyncio.run_coroutine_threadsafe(self.companion.prove(target, done), self.loop)
+        else:
+            done(False)
 
     def stop(self) -> None:
         if self.loop and self.stopping:

@@ -138,6 +138,7 @@ class StubRelay:
     client_id = "abcdefabcdefabcd"
 
     def __init__(self) -> None:
+        self.key: bytes | None = b"session 1"
         self.body_key: bytes | None = b"session 1"
         self.mode, self.features, self.is_paired, self.answers = "ready", 1, True, True
         self.http: aiohttp.ClientSession | None = None
@@ -163,6 +164,9 @@ class StubCompanion:
     def __init__(self, port: int) -> None:
         self.relay, self.port = StubRelay(), port
 
+    def pairing_required(self) -> bool:
+        return not self.relay.is_paired
+
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
@@ -180,6 +184,8 @@ class Standin:
 
     async def gate(self, request: web.Request) -> web.Response:
         await self.record(request)
+        if self.companion.pairing_required() and request.headers["X-Original-URI"] != "/sw.js":
+            return web.Response(status=401)
         return web.Response(status=204 if state["ui"] else 403)
 
     async def notice(self, request: web.Request) -> web.Response:
@@ -482,17 +488,28 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
             status, headers, body = get("/stats?legacy=1")
             assert (status, gzip.decompress(body)[:5]) == (200, b"<html")
             assert "service-worker-allowed" not in headers
+            shells = len(upstream("/stats?legacy=1"))
+            for path in ("/stats?legacy=1", "/stats?legacy=1", f"/app.js?v={TAG}new"):
+                status, headers, _ = get(path)
+                assert (status, headers["x-gateway-cache"]) == (200, "MISS"), path
+            assert len(upstream("/stats?legacy=1")) == shells + 2, "nginx keeps nothing unverified"
             relay.features = 1
 
-            # Before pairing: files pass, nothing is kept, and no worker can register.
+            # Before pairing every page leads to the companion's, even one nginx holds in its
+            # cache, nothing reaches the controller, and a worker from an earlier pairing goes.
             relay.is_paired = False
-            for _ in range(2):
-                status, headers, _ = get("/stats?unpaired=1")
-                assert (status, headers["x-gateway-cache"]) == (200, "MISS")
-                assert headers["cache-control"] == "no-store"
-            assert get("/sw.js?unpaired=1", **worker)[0] == 403
-            assert get("/evil.js?unpaired=1", **worker)[0] == 403
+            before = len(state["requests"])
+            for path in ("/", "/stats", "/settings", "/app.js?v=old", "/evil.js"):
+                status, headers, _ = get(path)
+                assert (status, headers["location"]) == (302, "/__companion/?pair=1"), path
+                assert headers["cache-control"] == "no-store", path
+            for path in ("/sw.js", "/evil.js", f"/app.js?v={TAG}"):
+                status, _, body = get(path, **worker)
+                assert (status, body) == (200, UNREGISTER), path
+            assert len(state["requests"]) == before
             relay.is_paired = True
+            status, _, body = get("/")
+            assert status == 200, "pairing again opens it, from the same cache"
 
             # Controller off: the last shell, worker and assets still load; nothing else does.
             controller.shutdown()
