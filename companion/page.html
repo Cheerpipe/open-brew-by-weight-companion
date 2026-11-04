@@ -40,6 +40,12 @@
         opacity: 0.92;
       }
 
+      #copy {
+        background: none;
+        border: 1px solid var(--ln);
+        color: inherit;
+      }
+
       #erase {
         background: none;
         border: 1px solid var(--dn);
@@ -112,7 +118,10 @@
       <section class="card">
         <h2 id="pairing-title">Pairing</h2>
         <p id="pairing" class="status"></p>
-        <p id="code" class="code" hidden></p>
+        <p id="code-row" hidden>
+          <span id="code" class="code"></span>
+          <button id="copy" type="button"></button>
+        </p>
         <p id="pairing-help" class="muted"></p>
         <p id="admin" hidden>
           <a id="admin-link" href="/" target="_blank" rel="noopener"></a>
@@ -198,6 +207,9 @@
             pending:
               "Waiting for your approval. On the controller's own page, open Admin → Companion and type this code:",
             adminLink: "Open the controller's Admin",
+            copy: "Copy code",
+            copied: "Copied",
+            copyFailed: "Select the code to copy it",
             adminHelp:
               "Its address is not encrypted, so do this on a network you trust. Any device on your network can do it. This page continues by itself.",
             unsupported:
@@ -352,7 +364,7 @@
           $("pairing").className =
             "status" +
             (state === "paired" ? " ok" : pending || state === "unpaired" ? "" : " warn");
-          $("code").hidden = !(state === "pending" && p.code);
+          $("code-row").hidden = !(state === "pending" && p.code);
           $("code").textContent = p.code || "";
           $("pairing-help").textContent =
             state === "pending"
@@ -363,7 +375,15 @@
           $("admin").hidden = $("admin-help").hidden = !required || !s.controller;
           if (s.controller) {
             $("admin-link").textContent = t.adminLink;
-            $("admin-link").href = "http://" + s.controller.address + "/admin";
+            // Admin opens its Companion section, and knows where to send this window afterwards.
+            $("admin-link").href =
+              "http://" +
+              s.controller.address +
+              "/admin" +
+              (location.protocol === "https:"
+                ? "?companion=" + encodeURIComponent(location.origin)
+                : "") +
+              "#companionPanel";
           }
           $("admin-help").textContent = t.adminHelp;
           // Sent here by the Web UI's address: back to it, once it can open.
@@ -424,6 +444,31 @@
               timer = setTimeout(refresh, 5000);
             });
         }
+        // The Clipboard API needs HTTPS; this page may be on plain HTTP before the certificate.
+        function copyCode() {
+          var text = $("code").textContent;
+          if (navigator.clipboard) return navigator.clipboard.writeText(text);
+          var range = document.createRange(),
+            selection = getSelection();
+          range.selectNodeContents($("code"));
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return document.execCommand("copy") ? Promise.resolve() : Promise.reject(new Error());
+        }
+        $("copy").textContent = t.copy;
+        $("copy").addEventListener("click", function () {
+          copyCode().then(
+            function () {
+              $("copy").textContent = t.copied;
+            },
+            function () {
+              $("copy").textContent = t.copyFailed;
+            },
+          );
+          setTimeout(function () {
+            $("copy").textContent = t.copy;
+          }, 2500);
+        });
         $("pair").addEventListener("click", function () {
           $("pair").hidden = true;
           fetch("/__companion/pair", {
