@@ -3,9 +3,10 @@
 nginx sends `/api/` and `/api/v1/ui/ui-stream` here with the browser's
 address in X-Real-IP. With a relay session every REST call goes signed, with
 the companion's one client id for screens that claimed through it, and live
-updates come from the multiplexer. Without one the companion is the plain
-proxy it always was (one screen at a time); with the Web UI through the
-companion turned off it refuses and names the direct address.
+updates come from the multiplexer. Before pairing the companion is the plain
+proxy it always was (one screen at a time). Paired, nothing crosses in clear:
+without a relay session, or with the Web UI through the companion turned off,
+it refuses and names the direct address.
 """
 
 import asyncio
@@ -94,7 +95,10 @@ class Screens:
         if refusal is not None:
             return refusal
         if self.relay.mode != "ready":
-            return await self._passthrough_stream(request)
+            if not await self.relay.paired():
+                return await self._passthrough_stream(request)
+            if await self.relay.renew() != "ready":
+                return self._refusal() or self._no_session()
         ws = web.WebSocketResponse(max_msg_size=REQUEST_BYTES, autoping=True, heartbeat=HEARTBEAT_S)
         await ws.prepare(request)
         screen = self.mux.connect(ws, address(request.headers.get("X-Real-IP")))
@@ -193,7 +197,7 @@ class Screens:
             try:
                 if changes:
                     archive.invalidate(changes)
-                if self.relay.mode == "ready":
+                if self.relay.mode == "ready" or await self.relay.paired():
                     reply = await self.relay.request(
                         method,
                         uri,
@@ -207,6 +211,8 @@ class Screens:
                     refusal = self._refusal()
                     if refusal is not None:
                         return refusal
+                    if await self.relay.paired():
+                        return self._no_session()
                     reply = await self.relay.passthrough(method, uri, request.headers, body)
                     rewrite = False
             except TimeoutError, aiohttp.ClientError, OSError:
@@ -252,6 +258,7 @@ class Screens:
         data = _json(reply.data) if reply.data is not None else {}
         if (
             screen
+            and rewrite
             and reply.status == 200
             and (path == CLAIM or (path == LOGIN and data.get("active") is True))
         ):

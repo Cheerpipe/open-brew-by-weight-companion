@@ -336,15 +336,79 @@ async def relay_scenario(data: Path) -> None:
         ) as reply:
             assert reply.status == 204
 
-        # --- A failed relay handshake: passthrough, the link always on ----------------------------
+        # --- A failed relay handshake while paired: refused, never in clear; the link always on --
         fake.mode = "none"
         assert await relay.handshake() == "passthrough"
         assert (relay.mode, relay.link) == ("passthrough", True)
         fake.active = B
-        status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
+        seen = len(fake.requests)
+
+        async def refused(client: str) -> None:
+            status, _, body = await call(
+                "POST", "/api/v1/ui/claim", client=client, json={}, headers={"X-WebUI-Session": "s"}
+            )
+            assert status == 502
+            assert f"http://127.0.0.1:{server.port}" in json.loads(body)["message"]
+            status, _, body = await call("GET", "/api/v1/status/admin", client=client)
+            assert status == 502
+            assert len(fake.requests) == seen, "nothing crossed in clear"
+            assert companion.screens.mux.claimed == {A}, "no claim without a relay session"
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refusal:
+                await browser.ws_connect(base + "/api/v1/ui/ui-stream")
+            assert refusal.value.status == 502
+            assert not fake.streams, "nothing crossed in clear"
+
+        await refused(B)
+        for mode in ("bad_proof", "unknown"):  # A forged answer, an unsigned refusal.
+            fake.mode = mode
+            await relay.handshake()
+            await refused(B)
+        assert companion.pairing.state == "not_recognized", "unsigned: nothing erased"
+        assert companion.store.pairing(), "unsigned: nothing erased"
+        async with browser.get(base + "/__companion/status") as reply:
+            assert (await reply.json())["relay"] == "passthrough"
+
+        # A lasting failure costs one handshake every RENEW_S, however many requests ask.
+        relay.renew_at = float("-inf")
+        asked = fake.relay_gets
+        for _ in range(3):
+            await call("GET", "/api/v1/status/admin", client=B)
+        assert fake.relay_gets == asked + 1
+        # An answer from the controller needs no wait: a handshake the announcement starts
+        # brings the session back, and the requests with it.
+        fake.mode = "ok"
+        assert await relay.handshake() == "ready"
+        status, _, _ = await call("GET", "/api/v1/auth", client=B)
         assert status == 200
+        assert last_identity(fake) is not None
+
+        # A session lost after a success renews at once, whatever failed before.
+        relay.key, relay.body_key = None, None
+        status, _, _ = await call("GET", "/api/v1/auth", client=B)
+        assert status == 200
+
+        # A companion that starts paired has no session yet: its first request makes one.
+        relay.reset()
+        assert relay.mode == "passthrough"
+        status, _, _ = await call("GET", "/api/v1/auth", client=B)
+        assert status == 200
+        assert (relay.mode, last_identity(fake) is not None) == ("ready", True)
+
+        # --- Only an erased pairing is a plain proxy again ---------------------------------------
+        fake.mode = "bad_erase"
+        await relay.handshake()
+        assert companion.store.pairing()
+        assert relay.mode == "passthrough"
+        fake.mode = "forgotten"
+        relay.renew_at = float("-inf")
+        status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
+        assert status == 200, "the request that learned of the erase goes as a plain proxy"
+        assert companion.store.pairing() is None
+        assert companion.pairing.state == "unpaired"
+        assert (relay.mode, relay.link) == ("passthrough", None)
         assert last_identity(fake) is None
         assert fake.requests[-1][2]["X-WebUI-Client"] == B
+        fake.mode = "none"
         fake.require_relay_stream = False
         async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
             await ws.send_str(json.dumps({"op": "bind", "client": B}))
@@ -355,27 +419,6 @@ async def relay_scenario(data: Path) -> None:
             message = await ws.receive()
             assert message.type is aiohttp.WSMsgType.CLOSE, "close codes pass through"
             assert message.data == 4001, "close codes pass through"
-
-        # --- A forged answer, an unsigned refusal, then a real erase
-        fake.mode = "bad_proof"
-        assert await relay.handshake() == "passthrough"
-        assert companion.store.pairing()
-        fake.mode = "unknown"
-        await relay.handshake()
-        assert companion.pairing.state == "not_recognized", "unsigned: nothing erased"
-        assert companion.store.pairing(), "unsigned: nothing erased"
-        fake.mode = "ok"
-        assert await relay.handshake() == "ready"
-        assert companion.pairing.state == "paired"
-        fake.mode = "bad_erase"
-        await relay.handshake()
-        assert companion.store.pairing()
-        assert relay.mode == "passthrough"
-        fake.mode = "forgotten"
-        await relay.handshake()
-        assert companion.store.pairing() is None
-        assert companion.pairing.state == "unpaired"
-        assert (relay.mode, relay.link) == ("passthrough", None)
 
         async with browser.get(base + "/__companion/status") as reply:
             facts = await reply.json()

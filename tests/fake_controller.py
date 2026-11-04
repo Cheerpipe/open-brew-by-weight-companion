@@ -125,6 +125,7 @@ class Controller:
         self.high, self.mask = 0, 0
         self.responses = 0
         self.handshakes, self.stale_next = 0, False
+        self.relay_gets, self.auth_required = 0, False
         self.corrupt_body, self.corrupt_reply = False, False  # A man in the middle, for tests.
         self.active: str | None = None  # activeWebUiClientId_
         # Each request's method, URI, headers, body and identity.
@@ -141,6 +142,7 @@ class Controller:
 
     # --- Relay routes -------------------------------------------------------------
     async def relay_get(self, _request: web.Request) -> web.Response:
+        self.relay_gets += 1
         if self.mode == "none":
             return web.Response(status=404, text="404: Not Found")
         if self.mode in ("forgotten", "bad_erase", "unknown"):

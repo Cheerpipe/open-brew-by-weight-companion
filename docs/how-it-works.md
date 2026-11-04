@@ -467,10 +467,14 @@ the controller closes the screens plainly, so they show the out-of-reach
 notice and reconnect. A screen that falls 1 MiB behind is closed with
 `4002` and reconnects quietly.
 
-**Passthrough and the switch.** Before pairing, or while the relay handshake
-fails, the service is a plain proxy: each
-browser gets its own session with the controller, one at a time, as without
-the companion, and the link stays on as before. While the controller has
+**Passthrough and the switch.** Before pairing the service is a plain proxy:
+each browser gets its own session with the controller, one at a time, as
+without the companion. A paired companion never is: without a relay session
+`/api/` and the ui-stream answer `502` and name the controller's own address,
+because a fallback would let anyone who breaks the handshake turn the sealing
+off. The link stays on as before. A request starts a new handshake at most every
+10 seconds after a failed one; an announcement, a `cfg` frame or an Admin action
+starts one at once. While the controller has
 the Web UI through the companion turned off, `/api/` answers
 `409 COMPANION_UI_OFF` and pages show the notice. The link itself opens
 only while the controller's relay answer says a feature needs it, such as

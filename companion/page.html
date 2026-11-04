@@ -237,6 +237,7 @@
             ui: "Web UI",
             uiReady: "Through the companion · {screens}",
             uiPassthrough: "Straight to the controller, one screen at a time",
+            uiNoSession: "Waiting for a secure session with the controller",
             uiDisabled: "Directly on the controller (off in Admin → Companion)",
             screens0: "no screen open",
             screens1: "1 screen open",
@@ -365,7 +366,9 @@
               ? fill(t.uiReady, { screens: screens })
               : s.relay === "disabled"
                 ? t.uiDisabled
-                : t.uiPassthrough;
+                : s.paired
+                  ? t.uiNoSession
+                  : t.uiPassthrough;
           var lm = s.laMarzocco;
           $("lm").textContent = !s.paired
             ? "—"
