@@ -657,6 +657,25 @@ async def scenario() -> None:
             await a.next("home")
             await b.next("home")
 
+            # --- A relayed UI_TAKEN_OVER does not claim a direct page took it ---------------------
+            taken = await screen(3).open()
+            await taken.next("home")
+            fake.active = DIRECT
+            async with web.get(
+                base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[3]}
+            ) as reply:
+                assert reply.status == 409
+            assert await taken.closed() == 4001
+            assert not taken.reason
+            assert await a.closed() == 4001
+            assert await b.closed() == 4001
+            await eventually(lambda: the_mux.upstream.state == "closed")
+            a = await screen(0).open()
+            session = await asyncio.wait_for(fake.sessions.get(), 2)
+            b = await screen(1).open()
+            await a.next("home")
+            await b.next("home")
+
             # --- A signed-out screen loses its claim and live updates; the others keep theirs -----
             for path, code in (("/api/v1/auth/logout", 200), ("/api/v1/status/admin", 401)):
                 d = await screen(3).open()

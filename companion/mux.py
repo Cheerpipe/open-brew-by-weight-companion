@@ -1091,7 +1091,7 @@ class Mux:
         ):  # The controller gave the Web UI to a direct browser, or forgot the claim (reboot).
             self.claimed.clear()
             log(
-                "the Web UI was opened directly on another device; "
+                "the controller ended the companion's Web UI session; "
                 "every companion screen offers Reload"
             )
             for screen in screens:
@@ -1153,10 +1153,10 @@ class Mux:
         self.upstream.close()
 
     def takeover(self) -> None:
-        """A relayed call answered UI_TAKEN_OVER: a direct browser holds the Web UI."""
+        """A relayed call answered UI_TAKEN_OVER: the claim moved, not always to a direct page."""
         self.claimed.clear()
         for screen in list(self.screens):
-            screen.close(4001, "direct")
+            screen.close(4001)
         self.upstream.close()
 
     # --- Screens ---------------------------------------------------------------------
