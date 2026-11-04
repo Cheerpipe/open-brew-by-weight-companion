@@ -452,8 +452,13 @@ every op itself:
 
 **Commands.** Changes go to the controller one at a time, in order, beside at
 most one read. After a `202` the next change waits until Home's
-`lastCommand` shows that request settled, or 10 seconds. A request from a
-browser that left while it waited is dropped.
+`lastCommand` shows that request settled, or 4 seconds, about as long as the
+Web UI waits for it: `lastCommand` holds one request, so another screen's change
+would hide the result from the screen that is waiting. A time sync holds nothing,
+since it never reaches `lastCommand`. `/api/v1/control/*`, Stop among them, joins
+no queue and goes at once. A request from a browser that left while it waited is
+dropped. A signed-out screen (a relayed logout or `401 AUTH_REQUIRED`) loses its
+claim and its live updates, closed with `4001`.
 
 **Takeover and loss.** When a browser opens the Web UI at the controller's
 own address, the controller closes the shared session with `4001`; every

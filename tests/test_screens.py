@@ -591,6 +591,40 @@ async def scenario() -> None:
             await session.send({"type": "home", "changes": {"lastCommand.state": "PERSISTED"}})
             assert (await asyncio.wait_for(second_command, 2))[1]["requestId"] == 102
             assert len(fake.requests) == seen + 1
+
+            # A held save does not hold back a control action.
+            async def post(path: str) -> int:
+                async with web.post(
+                    base + path, json={}, headers={"X-WebUI-Client": CLIENTS[0]}
+                ) as reply:
+                    return reply.status
+
+            for path in ("/api/v1/control/stop", "/api/v1/control/paddle"):
+                assert await asyncio.wait_for(post(path), 1) == 202, "control never queues"
+                assert fake.requests[-1][1] == path
+            third_command = asyncio.create_task(command(1))
+            await asyncio.sleep(0.2)
+            assert not third_command.done(), "another save still waits"
+
+            async def settle() -> None:
+                await session.send(
+                    {
+                        "type": "home",
+                        "changes": {
+                            "lastCommand.requestId": fake.request_id,
+                            "lastCommand.state": "PERSISTED",
+                        },
+                    }
+                )
+
+            await settle()
+            await asyncio.wait_for(third_command, 2)
+            await settle()
+            await eventually(lambda: not companion.screens.commands.locked())
+            assert await post("/api/v1/time/sync") == 202
+            assert (await asyncio.wait_for(command(1), 1))[0] == 202, "a time sync holds nothing"
+            await settle()
+            await eventually(lambda: not companion.screens.commands.locked())
             async with web.get(
                 base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[2]}
             ) as reply:

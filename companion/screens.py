@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from .service import Companion
 
 CLAIM, LOGIN, COMPANION_ADMIN = "/api/v1/ui/claim", "/api/v1/auth/login", "/api/v1/companion/admin"
+LOGOUT = "/api/v1/auth/logout"
+CONTROL, TIME_SYNC = "/api/v1/control/", "/api/v1/time/sync"
 TRACE = "/api/v1/diagnostic/shot-trace"
 # Changes a screen makes to the controller's records: the replica's store is not current from the
 # moment one leaves until it caught up after the controller's answer.
@@ -37,7 +39,7 @@ CHANGES = {
     "/api/v1/history/delete": "history",
     "/api/v1/history/clear": "history",
 }
-COMMAND_SETTLE_S = 10
+COMMAND_SETTLE_S = 4  # The Web UI stops waiting for a save's lastCommand after about this.
 CHUNK = 16 * 1024
 HEARTBEAT_S = 30  # A screen that stops answering pongs is closed and frees its slot.
 
@@ -61,7 +63,7 @@ class Screens:
         self.companion, self.relay = companion, relay
         self.mux = Mux(companion, relay)
         # Mutations one at a time, in order, beside at most one read: two controller sockets at
-        # most.
+        # most, plus any control action, which never queues.
         self.commands, self.reads = asyncio.Lock(), asyncio.Lock()
 
     def routes(self) -> list[web.RouteDef]:
@@ -77,6 +79,14 @@ class Screens:
                 "The Web UI opens directly on the controller at " + self.companion.base_url(),
             )
         return None
+
+    def _no_session(self) -> web.Response:
+        return _error(
+            502,
+            "CONTROLLER_UNREACHABLE",
+            "The companion has no secure session with the controller. "
+            "The Web UI opens directly on the controller at " + self.companion.base_url(),
+        )
 
     # --- Live updates ------------------------------------------------------------------
     async def stream(self, request: web.Request) -> web.StreamResponse:
@@ -166,7 +176,13 @@ class Screens:
                 )
         changes = CHANGES.get(path) if method == "POST" else None
         session_route = path == CLAIM or path.startswith("/api/v1/auth/")
-        lane = self.reads if method in ("GET", "HEAD") or session_route else self.commands
+        lane = (
+            self.reads
+            if method in ("GET", "HEAD") or session_route
+            else asyncio.Lock()  # Its own: Stop waits for no save and no other request.
+            if path.startswith(CONTROL)
+            else self.commands
+        )
         await lane.acquire()
         held = False
         try:
@@ -206,7 +222,12 @@ class Screens:
                         body=reply.data,
                         headers=CIMultiDict(response_headers(reply)),
                     )
-                    if request_id and lane is self.commands and self.mux.upstream.state == "open":
+                    if (
+                        request_id
+                        and lane is self.commands
+                        and path != TIME_SYNC  # Its id never reaches lastCommand.
+                        and self.mux.upstream.state == "open"
+                    ):
                         held = True  # The next mutation waits for this one's lastCommand.
                         _ = self.companion.spawn(self._settle(lane, request_id))
                     return response
