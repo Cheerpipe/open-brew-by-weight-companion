@@ -259,6 +259,7 @@ class Companion:
         await offload(self.store.erase_pairing)
         self.lm.erase()
         await offload(self.store.save_pairing, secret, self._target()[0])
+        self.screens.end_plain_streams()
         log(f"paired with {self._target()[0]}")
         if self.ws is not None:
             _ = self.spawn(self.ws.close())
@@ -798,9 +799,11 @@ class Companion:
                     False,
                 )
             relayed = reply is not None
-            if (
-                reply is None
-            ):  # No relay session: the session would cross the LAN in clear, so ask as nobody.
+            if reply is None:
+                # Paired and without a session, an answer in clear could be forged; what the
+                # controller said last stands. Otherwise the session stays here: ask as nobody.
+                if self.relay.mode != "disabled" and await self.relay.paired():
+                    return None
                 reply = await self.relay.passthrough("GET", "/api/v1/auth", {}, b"")
             try:
                 answer = json.loads(reply.data) if reply.status == 200 and reply.data else None

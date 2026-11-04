@@ -423,6 +423,8 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
                 await browser.ws_connect(base + "/api/v1/ui/ui-stream")
             assert refusal.value.status == 502
             assert not fake.streams, "nothing crossed in clear"
+            assert await companion._web_ui_allows({"X-WebUI-Client": client}) is None
+            assert len(fake.requests) == seen, "an answer in clear could be forged"
 
         await refused(B)
         for mode in ("bad_proof", "unknown"):  # A forged answer, an unsigned refusal.
@@ -512,6 +514,13 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             "history",
             "stats",
         }
+
+        # A page proxied before pairing stops being in clear the moment the pairing is saved.
+        async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
+            await companion.paired(SECRET)
+            assert (await ws.receive()).type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED)
+        await relay.handshake()  # After the one the pairing started: none outlives this scenario.
+
         await pages.close()
         await relay.close()
     await server.close()

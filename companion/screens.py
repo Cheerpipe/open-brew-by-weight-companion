@@ -68,6 +68,7 @@ class Screens:
         # slow download keeps no page from opening: three controller sockets at most, plus any
         # control action, which never queues.
         self.commands, self.reads, self.sessions = asyncio.Lock(), asyncio.Lock(), asyncio.Lock()
+        self.plain: set[web.WebSocketResponse] = set()
 
     def routes(self) -> list[web.RouteDef]:
         return [web.get(STREAM, self.stream), web.route("*", "/api/{tail:.*}", self.api)]
@@ -83,12 +84,17 @@ class Screens:
             )
         return None
 
+    def end_plain_streams(self) -> None:
+        """Paired now: a page proxied before stops being in clear and reconnects by the relay."""
+        for ws in list(self.plain):
+            _ = self.companion.spawn(ws.close(code=aiohttp.WSCloseCode.GOING_AWAY))
+
     def _no_session(self) -> web.Response:
         return _error(
             502,
             "CONTROLLER_UNREACHABLE",
-            "The companion has no secure session with the controller. "
-            "The Web UI opens directly on the controller at " + self.companion.base_url(),
+            "The companion could not open a secure session with the controller. "
+            "If it is on, the Web UI opens directly at " + self.companion.base_url(),
         )
 
     # --- Live updates ------------------------------------------------------------------
@@ -127,6 +133,7 @@ class Screens:
             return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
         ws = web.WebSocketResponse(max_msg_size=MAX_FRAME, autoping=True, heartbeat=HEARTBEAT_S)
         await ws.prepare(request)
+        self.plain.add(ws)
 
         async def pipe(
             source: web.WebSocketResponse | aiohttp.ClientWebSocketResponse,
@@ -149,6 +156,7 @@ class Screens:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self.plain.discard(ws)
             code = upstream.close_code
             await upstream.close()
             await ws.close(code=code if code and code >= 3000 else aiohttp.WSCloseCode.GOING_AWAY)
