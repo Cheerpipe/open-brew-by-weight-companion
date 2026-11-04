@@ -316,6 +316,10 @@ class Controller:
             return self.answer(identity, {"ok": True})
         if path == "/api/v1/auth":
             return self.answer(identity, {"login": False})
+        if path == "/api/v1/auth/logout":
+            return self.answer(identity, {"ok": True})
+        if self.auth_required:
+            return self.answer(identity, {"error": "AUTH_REQUIRED"}, status=401)
         if client != self.active:
             return self.answer(
                 identity,

@@ -639,6 +639,21 @@ async def scenario() -> None:
             slow.send("x" * 600000)
             assert await c.closed() == 4002
 
+            # --- A signed-out screen loses its claim and live updates; the others keep theirs -----
+            for path, code in (("/api/v1/auth/logout", 200), ("/api/v1/status/admin", 401)):
+                d = await screen(3).open()
+                await d.next("home")
+                fake.auth_required = code == 401
+                call = web.post if code == 200 else web.get
+                async with call(base + path, headers={"X-WebUI-Client": CLIENTS[3]}) as reply:
+                    assert reply.status == code
+                fake.auth_required = False
+                assert await d.closed() == 4001
+                assert CLIENTS[3] not in the_mux.claimed
+                assert CLIENTS[0] in the_mux.claimed
+                assert await (await screen(3).open(claim=False)).closed() == 4001
+                assert a.code is None
+
             # --- 4003 from the controller: the screen that just sent an op, 4002 for the others ---
             async def reject(
                 controller_session: fake_controller.Session, op: fake_controller.Op

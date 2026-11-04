@@ -263,6 +263,11 @@ class Screens:
             and (path == CLAIM or (path == LOGIN and data.get("active") is True))
         ):
             self.mux.claimed.add(screen)
+        elif screen and (
+            (reply.status == 200 and path == LOGOUT)
+            or (reply.status == 401 and data.get("error") == "AUTH_REQUIRED")
+        ):
+            self.mux.signed_out(screen)
         elif rewrite and reply.status == 409 and data.get("error") == "UI_TAKEN_OVER":
             self.mux.takeover()
         elif path == COMPANION_ADMIN and reply.status == 200:

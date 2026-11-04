@@ -1138,6 +1138,13 @@ class Mux:
             if notice is None or type(notice.get(key)) is int:
                 self.views[kind].unpark(None if notice is None else notice[key])
 
+    def signed_out(self, client: str | None) -> None:
+        """This browser's session ended: its claim goes and so do its pages' live updates."""
+        self.claimed.discard(client or "")
+        for screen in list(self.screens):
+            if screen.id == client:
+                screen.close(4001)
+
     def takeover(self) -> None:
         """A relayed call answered UI_TAKEN_OVER: a direct browser holds the Web UI."""
         self.claimed.clear()
