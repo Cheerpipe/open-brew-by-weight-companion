@@ -88,6 +88,7 @@ class Upstream:
         host = companion.base_url().removeprefix("http://")
         for attempt in (0, 1):
             value = await relay.signed("GET", PATH, NO_ADDRESS, relay.client_id)
+            body_key = relay.body_key
             if value is None:
                 return None
             try:
@@ -102,10 +103,7 @@ class Upstream:
                 if error.status != 401 or attempt:
                     log(f"the controller refused the live updates: HTTP {error.status}")
                     return None
-                relay.key, relay.body_key = (
-                    None,
-                    None,
-                )  # RELAY_STALE: a new relay session, then once more.
+                relay.forget(body_key)  # RELAY_STALE: a new relay session, then once more.
         return None
 
     async def _run(self) -> None:

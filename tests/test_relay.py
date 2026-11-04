@@ -7,7 +7,7 @@ its own copy of the design's formulas. Offline, inside the image (see the README
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import pytest
@@ -121,7 +121,7 @@ def test_relay_vectors() -> None:
     )
 
 
-async def relay_scenario(data: Path) -> None:
+async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = fake_controller.Controller(SECRET, ID)
     server = TestServer(fake.app(), host="127.0.0.1")
     await server.start_server()
@@ -292,10 +292,30 @@ async def relay_scenario(data: Path) -> None:
         assert json.loads(fake.requests[-1][3]) == {"patch": {"a": 1}}
         assert relayed(fake)["q"] == 1
 
+        # A stale answer that arrives after another request replaced the session keeps the new
+        # one: this request retries with it, and nothing pays for a further handshake.
+        send, rotated = relay._send, False
+
+        async def rotating(*args: Any) -> relay_module.Reply:
+            nonlocal rotated
+            reply = await send(*args)
+            if not rotated:
+                rotated = True
+                await relay.handshake()
+            return reply
+
+        with monkeypatch.context() as patch:
+            patch.setattr(relay, "_send", rotating)
+            fake.stale_next = True
+            handshakes = fake.handshakes
+            status, _, _ = await call("GET", "/api/v1/auth")
+        assert status == 200
+        assert fake.handshakes == handshakes + 1
+
         # A counter at its end starts a new session first.
         relay.counter = relay_module.COUNTER_MAX
         await call("GET", "/api/v1/auth")
-        assert fake.handshakes == 4
+        assert fake.handshakes == 5
         assert relayed(fake)["q"] == 1
 
         # --- The link opens only when the controller says a feature needs it [D4]
@@ -306,7 +326,7 @@ async def relay_scenario(data: Path) -> None:
         # Admin → Companion's actions may change the switches: the relay asks again.
         fake.link = True
         await call("POST", "/api/v1/companion/admin", json={"action": "switches", "lm": True})
-        await eventually(lambda: fake.handshakes == 5 and relay.link is True)
+        await eventually(lambda: fake.handshakes == 6 and relay.link is True)
         await eventually(lambda: any(r[1] == "/api/v1/companion/link" for r in fake.requests))
         link.cancel()
 
@@ -487,7 +507,7 @@ async def relay_scenario(data: Path) -> None:
     await server.close()
 
 
-def test_relay(tmp_path: Path) -> None:
+def test_relay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Companion relay: handshake, signing, sealing, whitelist, client id, stale retry, erase,
     passthrough and switch."""
-    asyncio.run(relay_scenario(tmp_path))
+    asyncio.run(relay_scenario(tmp_path, monkeypatch))

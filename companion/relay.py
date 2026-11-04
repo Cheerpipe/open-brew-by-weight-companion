@@ -355,11 +355,16 @@ class Relay:
                 and _error(reply.data) == "RELAY_STALE"
             ):
                 reply.release()
-                self.key, self.body_key = None, None
+                self.forget(body_key)
                 continue
             await self._open(reply, body_key)
             return reply
         return None
+
+    def forget(self, body_key: bytes | None) -> None:
+        """The session that signed with `body_key` is over, unless another request replaced it."""
+        if self.body_key is body_key:
+            self.key, self.body_key = None, None
 
     async def _open(self, reply: Reply, body_key: bytes) -> None:
         """Open a sealed answer; a seal that does not open is never delivered."""
@@ -378,7 +383,7 @@ class Relay:
             reply.data = crypto.relay_open(body_key, int(counter), sealed)
         except (InvalidTag, ValueError, TypeError) as error:
             log("the controller's sealed answer did not open; starting a new relay session")
-            self.key, self.body_key = None, None  # The next request makes a new session.
+            self.forget(body_key)  # The next request makes a new session.
             raise aiohttp.ClientResponseError(
                 reply.request_info, (), status=502, message="the sealed answer did not open"
             ) from error
