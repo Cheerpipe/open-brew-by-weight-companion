@@ -745,6 +745,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
         data = Path(temporary)
         async with aiohttp.ClientSession() as http:
             companion = Companion("Kitchen server", data, http, Upstream)
+            companion.pairing.state = "paired"  # The archive's reads belong to a paired companion.
             await companion.open_log()
             verdict: dict[str, bool | None] = {"value": True}
             admin = {"value": True}
@@ -1131,6 +1132,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             # The switch as a companion restarted now, with the controller off, knows it.
             async def kept() -> tuple[bool, bool]:
                 restarted = Companion("Kitchen server", data, http, Upstream)
+                restarted.pairing.state = "paired"
                 await restarted.open_log()
                 await restarted.logs.close()
                 await restarted.relay.close()
@@ -1353,6 +1355,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             # --- Forget erases it all --------------------------------------------------------
             link_.close()
             await companion.erase("forgotten for the test")
+            companion.pairing.state = "paired"  # Paired again, for what follows.
             assert not await sql(companion, "select * from archive_records")
             assert not await sql(companion, "select * from archive_sync")
 
@@ -1563,6 +1566,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             records_kept = await sql(companion, "select count(*) from archive_records")
             link_.close()
             await companion.erase("erased on the page", history=False)
+            companion.pairing.state = "paired"  # Paired again, for what follows.
             assert await sql(companion, "select count(*) from archive_records") == records_kept
             assert await companion.logs.meta("device") == DEVICE, (
                 "the log store keeps the controller and its history"
@@ -1573,6 +1577,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             # --- D8: the controller names the user's deletions and Clears --------------------
             link_.close()
             await companion.erase("forgotten for the deletion marks")
+            companion.pairing.state = "paired"  # Paired again, for what follows.
             fake = Controller(capacity=10)
             link_ = Link(companion, fake)
             for _ in range(12):  # 1 and 2 rotate out before the companion copies anything.
@@ -1658,6 +1663,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
 
             monkeypatch.setattr(fresh, "answer", recording)
             await companion.erase("forgotten for the replay")
+            companion.pairing.state = "paired"  # Paired again, for what follows.
             link_ = Link(companion, fresh)
             await link_.open()
             await settled(companion)
@@ -1668,6 +1674,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
                 "order by store, generation, id",
             )
             await companion.erase("forgotten for the replay")
+            companion.pairing.state = "paired"  # Paired again, for what follows.
             assert await replayed(companion, recorder.cases) == len(recorder.cases)
             assert (
                 await sql(

@@ -229,6 +229,12 @@ class Companion:
             raise RuntimeError("no controller yet")
         return self.controller
 
+    def pairing_required(self) -> bool:
+        """Nothing reaches the controller through the companion until they are paired: with no
+        secret in common nothing could be sealed, verified or told apart. A pairing the controller
+        no longer recognizes has none either."""
+        return self.pairing.state != "paired"
+
     def base_url(self, scheme: str = "http", at: tuple[str, int] | None = None) -> str:
         ip, port = at or self._target()[1]
         return f"{scheme}://{ip}" + ("" if port == 80 else f":{port}")
@@ -286,7 +292,6 @@ class Companion:
         await offload(self.store.erase_pairing)
         self.lm.erase()
         await offload(self.store.save_pairing, secret, self._target()[0])
-        self.screens.end_plain_streams()
         log(f"paired with {self._target()[0]}")
         if self.ws is not None:
             _ = self.spawn(self.ws.close())
@@ -775,7 +780,9 @@ class Companion:
         for LOG_UNREACHABLE_S, so a page never waits on it twice in a row.
         `live` (changing the archive or the log) needs the controller's answer
         now: (signed in, Admin unlocked for this screen, login off), or None when
-        it cannot give one."""
+        it cannot give one. Without a pairing nobody may, whatever was granted before."""
+        if self.pairing_required():
+            return (False, False, False) if live else False
         session = hashlib.sha256(headers.get("X-WebUI-Session", "").encode()).hexdigest()
         now = time.time()
         opened = self.log_grants.get(OPEN_ACCESS)
@@ -850,9 +857,9 @@ class Companion:
                 )
             relayed = reply is not None
             if reply is None:
-                # Paired and without a session, an answer in clear could be forged; what the
-                # controller said last stands. Otherwise the session stays here: ask as nobody.
-                if self.relay.mode != "disabled" and await self.relay.paired():
+                # Without a session, an answer in clear could be forged: what the controller said
+                # last stands. With the Web UI through the companion off, ask as nobody.
+                if self.relay.mode != "disabled":
                     return None
                 reply = await self.relay.passthrough("GET", "/api/v1/auth", {}, b"")
             try:
@@ -1082,6 +1089,7 @@ class Companion:
             "version": VERSION,
             "id": self.id,
             "paired": pairing is not None,
+            "pairingRequired": self.pairing_required(),
             "pairedWith": (self.device_name or pairing.get("controller")) if pairing else None,
             "controller": {
                 "name": self.device_name or self.controller[0],
@@ -1175,21 +1183,25 @@ def web_app(companion: Companion) -> web.Application:
         return web.Response(text=page, content_type="text/html", headers=page_headers)
 
     async def gate(request: web.Request) -> web.Response:
-        """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens
-        directly."""
+        """nginx asks before each Web UI page: 401 sends it to the pairing page while unpaired, and
+        403 shows the notice while the Web UI opens directly."""
         nonlocal gate_asked
         page = request.headers.get("X-Original-URI", "").partition("?")[0]
         now = asyncio.get_running_loop().time()
-        # Turned back on at the controller's own address, with no link open to say so.
+        # Turned back on at the controller's own address, with no link open to say so; or a
+        # controller that seemed to forget this companion, which an unsigned answer can only claim.
         if (
-            companion.relay.mode == "disabled"
+            (companion.relay.mode == "disabled" or companion.pairing.state == "not_recognized")
             and page != "/sw.js"
             and now - gate_asked >= GATE_HANDSHAKE_S
         ):
             gate_asked = now
             await companion.relay.handshake()
-        allowed = companion.relay.mode != "disabled" or page == "/sw.js"
-        return web.Response(status=204 if allowed else 403)
+        if page == "/sw.js":
+            return web.Response(status=204)
+        if companion.pairing_required():
+            return web.Response(status=401)
+        return web.Response(status=403 if companion.relay.mode == "disabled" else 204)
 
     async def ui_off(_request: web.Request) -> web.Response:
         address = html.escape(companion.base_url()) if companion.controller else ""

@@ -5,10 +5,9 @@ controller's challenge, a POST proves the pairing secret and both sides derive
 Kr (signing) and Kb (sealing) from it. Each request then carries
 `X-OBBW-Relay: 2 <q> <addr> <screen> <mac>`, its body and credential headers
 sealed with AES-256-GCM under Kb (protocol 2): no password, session token or
-sign-in body crosses the hop in the clear. Before pairing the companion
-forwards as a plain proxy (passthrough). Paired, it never does: without a relay
-session, or with the Web UI through the companion turned off (disabled), it
-refuses.
+sign-in body crosses the hop in the clear. Without a relay session, or with the
+Web UI through the companion turned off (disabled), it refuses, and before
+pairing nothing is relayed at all.
 """
 
 import asyncio
@@ -529,7 +528,7 @@ class Relay:
     async def passthrough(
         self, method: str, uri: str, incoming: Mapping[str, str], body: bytes
     ) -> Reply:
-        """Today's transparent proxy: the browser's own id, nothing signed."""
+        """A question with no session to sign it, while the Web UI through the companion is off."""
         return await self._send(method, uri, self.forwarded(incoming), body)
 
     async def _send(self, method: str, uri: str, headers: dict[str, str], body: bytes) -> Reply:

@@ -336,7 +336,10 @@ fi
 
 bold "Checking the Web UI through the companion"
 if web=$(check --controller); then
-	say "The Web UI answers through the secure address."
+	case "$web" in
+	*"web-ui 302"*) say "Next, pair it: open the secure address below and follow its steps." ;;
+	*) say "The Web UI answers through the secure address." ;;
+	esac
 else
 	warn "$(tail -n 1 <<<"$web")"
 	warn "The companion works, but the controller did not answer. Is the espresso machine on?"

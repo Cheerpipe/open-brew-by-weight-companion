@@ -3,6 +3,7 @@ for the controller, read past a size limit, end a background task, or leave half
 
 import asyncio
 import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -849,8 +850,9 @@ def test_files_are_verified_against_the_sealed_list(
     asyncio.run(scenario())
 
 
-def test_stray_workers_and_the_unpaired_origin(tmp_path: Path) -> None:
-    """A worker planted before pairing is told to go once paired, and none can register before."""
+def test_nothing_passes_before_pairing(tmp_path: Path) -> None:
+    """Every page leads to the pairing page, nothing reaches the controller, a stored grant opens
+    nothing, and a worker from an earlier pairing removes itself. The page still answers."""
 
     async def scenario() -> None:
         async with Rig(tmp_path) as rig:
@@ -860,12 +862,76 @@ def test_stray_workers_and_the_unpaired_origin(tmp_path: Path) -> None:
             assert reply.headers["Service-Worker-Allowed"] == "/"
             assert await (await rig.client.get("/sw.js", headers=worker)).read() == b"worker"
 
-            rig.companion.store.erase_pairing()
-            assert (await rig.client.get("/evil.js", headers=worker)).status == 403
-            assert (await rig.client.get("/sw.js", headers=worker)).status == 403
-            reply = await rig.client.get("/app.js")
-            assert (reply.status, await reply.read()) == (200, b"app")
-            assert reply.headers["Cache-Control"] == "no-store"
+            session = {"X-WebUI-Session": "kept"}
+            digest = hashlib.sha256(session["X-WebUI-Session"].encode()).hexdigest()
+            rig.companion.log_grants[digest] = time.time()
+            rig.companion.device_id = "device"
+            assert (await rig.client.get("/__companion/log/boots", headers=session)).status == 200
+
+            await rig.companion.erase("a test", history=False)
+            assert rig.companion.pairing_required()
+            seen = len(rig.fake.requests)
+            for path in ("/", "/stats", "/app.js", "/evil.js"):
+                reply = await rig.client.get(path, allow_redirects=False)
+                assert (reply.status, reply.headers["Location"]) == (302, "/__companion/?pair=1")
+                assert reply.headers["Cache-Control"] == "no-store"
+            for path in ("/sw.js", "/evil.js"):
+                assert await (await rig.client.get(path, headers=worker)).read() == UNREGISTER
+            reply = await rig.client.post("/api/v1/auth/login", json={}, headers=CLIENT)
+            assert (reply.status, (await reply.json())["error"]) == (409, "COMPANION_NOT_PAIRED")
+            assert len(rig.fake.requests) == seen
+            with pytest.raises(aiohttp.WSServerHandshakeError):
+                await rig.client.ws_connect("/api/v1/ui/ui-stream")
+            assert (await rig.client.get("/__companion/log/boots", headers=session)).status == 401
+            reply = await rig.client.get("/__companion/ui-gate", headers={"X-Original-URI": "/"})
+            assert reply.status == 401
+            reply = await rig.client.get(
+                "/__companion/ui-gate", headers={"X-Original-URI": "/sw.js"}
+            )
+            assert reply.status == 204
+
+            page = await (await rig.client.get("/__companion/?pair=1")).text()
+            assert "Open the controller's Admin" in page
+            facts = await (await rig.client.get("/__companion/status")).json()
+            assert facts["pairingRequired"] is True, "an open tab reads this to come here"
+
+            # A controller that forgot this companion is the same case.
+            rig.companion.pairing.state = "not_recognized"
+            assert rig.companion.pairing_required()
+
+    asyncio.run(scenario())
+
+
+def test_a_page_load_asks_a_controller_that_seemed_to_forget(tmp_path: Path) -> None:
+    """An unsigned answer can only claim the controller forgot this companion, so opening the Web
+    UI asks again: a controller that proves the secret brings it back."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            rig.companion.pairing.state = "not_recognized"
+            reply = await rig.client.get("/__companion/ui-gate", headers={"X-Original-URI": "/"})
+            assert reply.status == 204
+            assert rig.companion.pairing.state == "paired"
+
+    asyncio.run(scenario())
+
+
+def test_firmware_without_pairing_says_to_update(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = web.Application()
+        server = TestServer(app, host="127.0.0.1")
+        await server.start_server()
+        Store(tmp_path).write("identity", {"id": ID, "key": "11" * 32})
+        async with aiohttp.ClientSession() as http:
+            companion = Companion("Kitchen server", tmp_path, http, Idle)
+            companion.controller = target_of(server)
+            assert companion.pairing.start(manual=True)
+            task = companion.pairing.task
+            assert task is not None
+            await task
+            assert companion.pairing.state == "unsupported"
+            await companion.relay.close()
+        await server.close()
 
     asyncio.run(scenario())
 
@@ -879,43 +945,5 @@ def test_diagnostic_says_an_older_controller_is_not_verified(tmp_path: Path) -> 
             assert (reply.status, await reply.read()) == (200, b"app")
             facts = await (await rig.client.get("/__companion/status")).json()
             assert facts["assets"]["legacy"] is True
-
-    asyncio.run(scenario())
-
-
-def test_pairing_tells_a_proxied_window_it_keeps_control(tmp_path: Path) -> None:
-    """A window using the companion before pairing is not told another one took over."""
-
-    async def scenario() -> None:
-        async def stream(request: web.Request) -> web.WebSocketResponse:
-            ws = web.WebSocketResponse()
-            await ws.prepare(request)
-            await ws.receive()
-            return ws
-
-        app = web.Application()
-        app.router.add_get("/api/v1/ui/ui-stream", stream)
-        server = TestServer(app, host="127.0.0.1")
-        await server.start_server()
-        Store(tmp_path).write("identity", {"id": ID, "key": "11" * 32})
-        async with aiohttp.ClientSession() as http:
-            companion = Companion("Kitchen server", tmp_path, http, Idle)
-            companion.pairing.auto = False
-            companion.set_controller(target_of(server))
-            client = TestClient(TestServer(web_app(companion)))
-            await client.start_server()
-            ws = await client.ws_connect("/api/v1/ui/ui-stream")
-            for _ in range(100):
-                if companion.screens.plain:
-                    break
-                await asyncio.sleep(0.01)
-            companion.screens.end_plain_streams()
-            closing = await ws.receive(timeout=3)
-            assert closing.type is aiohttp.WSMsgType.CLOSE
-            assert (closing.data, closing.extra) == (4001, "paired")
-            await ws.close()
-            await client.close()
-            await companion.relay.close()
-        await server.close()
 
     asyncio.run(scenario())

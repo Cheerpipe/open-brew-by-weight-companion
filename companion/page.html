@@ -114,6 +114,10 @@
         <p id="pairing" class="status"></p>
         <p id="code" class="code" hidden></p>
         <p id="pairing-help" class="muted"></p>
+        <p id="admin" hidden>
+          <a id="admin-link" href="/" target="_blank" rel="noopener"></a>
+        </p>
+        <p id="admin-help" class="muted" hidden></p>
         <button id="pair" type="button" hidden></button>
         <button id="erase" type="button" hidden></button>
       </section>
@@ -189,10 +193,15 @@
             pairAgain: "Pair again",
             searching: "Looking for the controller on your network…",
             unpaired:
-              "Not paired yet. Pairing lets several phones, tablets and computers use the Web UI through this companion at the same time, and lets the controller hand its La Marzocco cloud connection to it, so the espresso machine's controller has less to do.",
+              "Not paired yet. The Web UI opens here once this companion is paired with the controller, which protects your password and sign-in on your network. Pairing also lets several phones, tablets and computers use it at the same time, and lets the controller hand its La Marzocco cloud connection to the companion.",
             requesting: "Asking the controller…",
             pending:
-              "Waiting for your approval. In the Web UI, open Admin → Companion and type this code:",
+              "Waiting for your approval. On the controller's own page, open Admin → Companion and type this code:",
+            adminLink: "Open the controller's Admin",
+            adminHelp:
+              "Its address is not encrypted, so do this on a network you trust. Any device on your network can do it. This page continues by itself.",
+            unsupported:
+              "This controller's firmware cannot pair yet. Update it at its own address, then pair again.",
             pendingNoCode: "Waiting for the controller to prepare the request…",
             expires: "The request expires in {m} min.",
             paired: "Paired with {name}.",
@@ -236,7 +245,7 @@
             none: "Not found yet",
             ui: "Web UI",
             uiReady: "Through the companion · {screens}",
-            uiPassthrough: "Straight to the controller, one screen at a time",
+            uiNotPaired: "Opens here once paired",
             uiNoSession: "Waiting for a secure session with the controller",
             uiDisabled: "Directly on the controller (off in Admin → Companion)",
             screens0: "no screen open",
@@ -349,6 +358,23 @@
             state === "pending"
               ? fill(t.expires, { m: Math.max(1, Math.ceil(p.expiresInS / 60)) })
               : "";
+          var required = state !== "paired";
+          $("m-webui").style.display = required ? "none" : "";
+          $("admin").hidden = $("admin-help").hidden = !required || !s.controller;
+          if (s.controller) {
+            $("admin-link").textContent = t.adminLink;
+            $("admin-link").href = "http://" + s.controller.address + "/admin";
+          }
+          $("admin-help").textContent = t.adminHelp;
+          // Sent here by the Web UI's address: back to it, once it can open.
+          if (
+            !required &&
+            s.relay === "ready" &&
+            new URLSearchParams(location.search).has("pair")
+          ) {
+            location.replace("/");
+            return;
+          }
           $("pair").hidden = !s.controller || pending || state === "paired";
           $("pair").textContent = state === "unpaired" ? t.pair : t.pairAgain;
           $("erase").hidden = !s.paired || pending || state === "paired" || s.link === "open";
@@ -368,7 +394,7 @@
                 ? t.uiDisabled
                 : s.paired
                   ? t.uiNoSession
-                  : t.uiPassthrough;
+                  : t.uiNotPaired;
           var lm = s.laMarzocco;
           $("lm").textContent = !s.paired
             ? "—"

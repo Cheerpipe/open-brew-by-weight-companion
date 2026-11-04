@@ -160,6 +160,12 @@ http {
       proxy_read_timeout 1h;
     }
 
+    # Before pairing, every page leads to the companion's own, which guides it.
+    location @pair {
+      add_header Cache-Control "no-store" always;
+      return 302 /__companion/?pair=1;
+    }
+
     # The companion's own controller routes are never reachable through it...
     location ^~ /api/v1/companion/ {
       return 404;
@@ -204,8 +210,8 @@ http {
     # load, at most every second or two (a 304 when unchanged, so an OTA shows
     # at once), and served from the last copy while the controller is off.
     location ~ ^/(diagnostic|log|stats|history|admin|settings|setup|sw\.js)?$ {
-      @OFFLINE@
       auth_request /__companion/ui-gate;
+      error_page 401 = @pair;
       error_page 403 = /__companion/ui-off;
       proxy_pass http://unix:@RUN@/companion.sock;
       proxy_http_version 1.1;
@@ -221,7 +227,6 @@ http {
 
     # Anything else: the companion decides, and a paired one sends it to the Web UI.
     location / {
-      @OFFLINE@
       proxy_pass http://unix:@RUN@/companion.sock;
       proxy_http_version 1.1;
     }

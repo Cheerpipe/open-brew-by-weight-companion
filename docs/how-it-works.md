@@ -180,10 +180,8 @@ where a device on your network could change them. So each file is checked first:
 - A browser checking a service worker at any other path than `/sw.js` is told to
   remove it, so one planted earlier cannot stay.
 
-Before pairing there is nothing to check against: files pass as they are, nothing
-is kept and no service worker can register, so nothing from that time outlives
-the pairing, and a page cannot be installed as an app until then. A controller
-from before the list keeps working unverified, and Diagnostic says so.
+A controller from before the list keeps working unverified, and Diagnostic says
+so.
 
 This protects what the browser runs. It does not cover answers streamed in chunks
 (the Wi-Fi scan, time zones, downloads), which are data, nor the controller's own
@@ -531,12 +529,18 @@ the controller closes the screens plainly, so they show the out-of-reach
 notice and reconnect. A screen that falls 1 MiB behind is closed with
 `4002` and reconnects quietly.
 
-**Passthrough and the switch.** Before pairing the service is a plain proxy:
-each browser gets its own session with the controller, one at a time, as
-without the companion. A paired companion never is: without a relay session
-`/api/` and the ui-stream answer `502` and name the controller's own address,
-because a fallback would let anyone who breaks the handshake turn the sealing
-off. The link stays on as before. A request starts a new handshake at most every
+**Before pairing, and the switch.** Without a pairing there is no secret to seal,
+verify or tell browsers apart with, so nothing is relayed. Every page redirects to
+`/__companion/?pair=1`, even one nginx holds in its cache, because `auth_request`
+runs first; `/api/` and the ui-stream answer `409 COMPANION_NOT_PAIRED`, the stored
+log and archive refuse whatever was granted before, and any service worker is told
+to unregister. Nothing from a browser reaches the controller. A pairing the controller
+seems to have forgotten counts as none; since only a signed answer can say so for
+certain, a page load asks it again, at most once a minute. From that page, a pairing
+returns to the Web UI once the relay session is ready. A paired companion never falls
+back: without a relay session `/api/` and the ui-stream answer `502` and name the
+controller's own address, because a fallback would let anyone who breaks the handshake
+turn the sealing off. The link stays on as before. A request starts a new handshake at most every
 10 seconds after a failed one; an announcement, a `cfg` frame or an Admin action
 starts one at once. While the Web UI through the companion is off, a page load
 also asks the controller again, at most once a minute. While the controller has
@@ -826,10 +830,11 @@ link or the archive. Only a malformed `ev` closes the link, like any malformed f
 
 `/__companion/` (and `/__companion/pair`) is the status and pairing page.
 `/__companion/status` returns the same state as JSON for the Web UI's
-Diagnostic page: `name`, `version`, `id`, `paired`, `pairedWith`, the
+Diagnostic page: `name`, `version`, `id`, `paired`, `pairingRequired`, `pairedWith`, the
 `controller`, `pairing` (`state`, and the `code` while pending), `relay`
-(`passthrough`, `ready` or `disabled`; `passthrough` with `paired` true means no
-session yet, and nothing is proxied), `screens` (screens connected),
+(`passthrough`, `ready` or `disabled`; `passthrough` means no session yet, and
+nothing is relayed), `relayFeatures`, `assets` (files `verified` and `refused`,
+`lastPath`, `legacy`), `screens` (screens connected),
 `owner` (whether the companion holds the controller's Web UI claim),
 `views` (screens per view: `home`, `settings`, `diagnostic`, `log`,
 `history`, `stats`), `link`
@@ -896,7 +901,7 @@ name). It asks for the controller's address only when nothing answers.
 | `gateway/setup.html` | Setup page template. |
 | `gateway/strings.json` | Setup page texts. |
 | `companion/service.py` | Companion service: the link, the La Marzocco route, the status page and JSON. |
-| `companion/relay.py` | Relay session, signed requests, header whitelist, passthrough. |
+| `companion/relay.py` | Relay session, signed requests, header whitelist. |
 | `companion/screens.py`, `companion/mux.py`, `companion/upstream.py` | Screens' API and live updates, the multiplexer, and the one session with the controller. |
 | `companion/pairing.py`, `companion/link.py`, `companion/crypto.py` | Pairing client, link handshake and frame codec, link cryptography. |
 | `companion/lamarzocco.py`, `companion/dashboard.py` | La Marzocco client, and the dashboard filter. |

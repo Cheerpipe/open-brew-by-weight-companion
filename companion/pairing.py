@@ -144,7 +144,9 @@ class Pairing:
     def _refused(self, status: int | None, reply: dict[str, object]) -> None:
         error = reply.get("error")
         refusal = REFUSALS.get(error, "error") if isinstance(error, str) else "error"
-        self.state = "unreachable" if status is None else refusal
+        self.state = (
+            "unreachable" if status is None else "unsupported" if status == 404 else refusal
+        )
         log(
             "the controller did not answer the pairing request"
             if status is None

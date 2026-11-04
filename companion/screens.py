@@ -3,10 +3,9 @@
 nginx sends `/api/` and `/api/v1/ui/ui-stream` here with the browser's
 address in X-Real-IP. With a relay session every REST call goes signed, with
 the companion's one client id for screens that claimed through it, and live
-updates come from the multiplexer. Before pairing the companion is the plain
-proxy it always was (one screen at a time). Paired, nothing crosses in clear:
-without a relay session, or with the Web UI through the companion turned off,
-it refuses and names the direct address.
+updates come from the multiplexer. Nothing crosses in clear: before pairing
+nothing crosses at all, and without a relay session, or with the Web UI through
+the companion turned off, it refuses and names the direct address.
 """
 
 import asyncio
@@ -20,8 +19,8 @@ from multidict import CIMultiDict
 from . import log
 from .mux import Mux
 from .relay import API_TYPES, CLIENT_ID, address, response_headers
-from .upstream import MAX_FRAME, REQUEST_BYTES
 from .upstream import PATH as STREAM
+from .upstream import REQUEST_BYTES
 
 if TYPE_CHECKING:
     from .relay import Relay, Reply
@@ -68,12 +67,17 @@ class Screens:
         # slow download keeps no page from opening: three controller sockets at most, plus any
         # control action, which never queues.
         self.commands, self.reads, self.sessions = asyncio.Lock(), asyncio.Lock(), asyncio.Lock()
-        self.plain: set[web.WebSocketResponse] = set()
 
     def routes(self) -> list[web.RouteDef]:
         return [web.get(STREAM, self.stream), web.route("*", "/api/{tail:.*}", self.api)]
 
     def _refusal(self) -> web.Response | None:
+        if self.companion.pairing_required():
+            return _error(
+                409,
+                "COMPANION_NOT_PAIRED",
+                "Pair this companion with the controller first: open /__companion/",
+            )
         if self.companion.controller is None:
             return _error(503, "NO_CONTROLLER", "The companion has not found the controller yet")
         if self.relay.mode == "disabled":
@@ -83,12 +87,6 @@ class Screens:
                 "The Web UI opens directly on the controller at " + self.companion.base_url(),
             )
         return None
-
-    def end_plain_streams(self) -> None:
-        """Paired now: a page proxied before stops being in clear and claims again by the relay,
-        which a 4001 alone would tell it another window took over."""
-        for ws in list(self.plain):
-            _ = self.companion.spawn(ws.close(code=4001, message=b"paired"))
 
     def _no_session(self) -> web.Response:
         return _error(
@@ -103,11 +101,8 @@ class Screens:
         refusal = self._refusal()
         if refusal is not None:
             return refusal
-        if self.relay.mode != "ready":
-            if not await self.relay.paired():
-                return await self._passthrough_stream(request)
-            if await self.relay.renew() != "ready":
-                return self._refusal() or self._no_session()
+        if self.relay.mode != "ready" and await self.relay.renew() != "ready":
+            return self._refusal() or self._no_session()
         ws = web.WebSocketResponse(max_msg_size=REQUEST_BYTES, autoping=True, heartbeat=HEARTBEAT_S)
         await ws.prepare(request)
         screen = self.mux.connect(ws, address(request.headers.get("X-Real-IP")))
@@ -120,49 +115,6 @@ class Screens:
             self.mux.disconnect(screen)
         return ws
 
-    async def _passthrough_stream(self, request: web.Request) -> web.StreamResponse:
-        """One browser, one controller session, exactly as without the companion."""
-        host = self.companion.base_url().removeprefix("http://")
-        try:
-            upstream = await self.relay.session().ws_connect(
-                self.companion.base_url("ws") + STREAM,
-                headers={"Origin": f"http://{host}"},
-                autoping=True,
-                max_msg_size=MAX_FRAME,
-            )
-        except TimeoutError, aiohttp.ClientError, OSError:
-            return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
-        ws = web.WebSocketResponse(max_msg_size=MAX_FRAME, autoping=True, heartbeat=HEARTBEAT_S)
-        await ws.prepare(request)
-        self.plain.add(ws)
-
-        async def pipe(
-            source: web.WebSocketResponse | aiohttp.ClientWebSocketResponse,
-            target: web.WebSocketResponse | aiohttp.ClientWebSocketResponse,
-        ) -> None:
-            async for message in source:
-                if message.type is aiohttp.WSMsgType.TEXT:
-                    await target.send_str(message.data)
-                elif message.type is aiohttp.WSMsgType.BINARY:
-                    await target.send_bytes(message.data)
-                else:
-                    return
-
-        tasks = [asyncio.create_task(pipe(ws, upstream)), asyncio.create_task(pipe(upstream, ws))]
-        try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        except aiohttp.ClientError, ConnectionError:
-            pass
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self.plain.discard(ws)
-            code = upstream.close_code
-            await upstream.close()
-            await ws.close(code=code if code and code >= 3000 else aiohttp.WSCloseCode.GOING_AWAY)
-        return ws
-
     # --- REST ----------------------------------------------------------------------------
     async def api(self, request: web.Request) -> web.StreamResponse:
         refusal = self._refusal()
@@ -172,11 +124,8 @@ class Screens:
         method, uri, path = request.method, request.raw_path, request.path
         client = request.headers.get("X-WebUI-Client", "")
         screen = client if CLIENT_ID.fullmatch(client) else None
-        if (
-            screen is None
-            and method not in ("GET", "HEAD")
-            and (self.relay.mode == "ready" or await self.relay.paired())
-        ):  # It would act under the identity of the session every screen shares.
+        if screen is None and method not in ("GET", "HEAD"):
+            # It would act under the identity of the session every screen shares.
             return _error(400, "UI_CLIENT_INVALID", "A valid X-WebUI-Client is required")
         archive = self.companion.archive
         if (
@@ -212,28 +161,21 @@ class Screens:
             if request.transport is None or request.transport.is_closing():
                 return web.Response(status=499)  # The browser left while its request waited.
             rewrite = path in (CLAIM, LOGIN) or screen in self.mux.claimed
-            reply = None
+            reply: Reply | None = None
             try:
                 if changes:
                     archive.invalidate(changes)
-                if self.relay.mode == "ready" or await self.relay.paired():
-                    reply = await self.relay.request(
-                        method,
-                        uri,
-                        request.headers,
-                        body,
-                        address(request.headers.get("X-Real-IP")),
-                        screen or self.relay.client_id,
-                        rewrite,
-                    )
+                reply = await self.relay.request(
+                    method,
+                    uri,
+                    request.headers,
+                    body,
+                    address(request.headers.get("X-Real-IP")),
+                    screen or self.relay.client_id,
+                    rewrite,
+                )
                 if reply is None:
-                    refusal = self._refusal()
-                    if refusal is not None:
-                        return refusal
-                    if await self.relay.paired():
-                        return self._no_session()
-                    reply = await self.relay.passthrough(method, uri, request.headers, body)
-                    rewrite = False
+                    return self._refusal() or self._no_session()
             except TimeoutError, aiohttp.ClientError, OSError:
                 return _error(502, "CONTROLLER_UNREACHABLE", "The controller did not answer")
             finally:
