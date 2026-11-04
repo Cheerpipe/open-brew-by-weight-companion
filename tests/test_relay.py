@@ -17,6 +17,7 @@ from cryptography.exceptions import InvalidTag
 import fake_controller
 from companion import crypto
 from companion import relay as relay_module
+from companion import screens as screens_module
 from companion import service as service_module
 from companion.service import Companion, web_app
 from companion.store import Store
@@ -270,6 +271,18 @@ async def relay_scenario(data: Path) -> None:
         assert body[:2] == b"\x1f\x8b"
         assert headers["Content-Encoding"] == "gzip"
         assert "export.gz" in headers["Content-Disposition"]
+
+        # A download never delays a sign-in or a claim, and one nobody reads ends.
+        async with companion.screens.reads:
+            status, _, _ = await asyncio.wait_for(call("GET", "/api/v1/auth"), 2)
+            assert status == 200
+            status, _, _ = await asyncio.wait_for(call("POST", "/api/v1/ui/claim", json={}), 2)
+            assert status == 200
+        screens_module.WRITE_S = 0
+        with pytest.raises(aiohttp.ClientError):
+            await call("GET", "/api/v1/debug/export")
+        screens_module.WRITE_S = 10
+        assert not companion.screens.reads.locked()
 
         # --- RELAY_STALE: one new session and the same request again ----------------------------
         fake.stale_next = True

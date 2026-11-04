@@ -40,6 +40,7 @@ CHANGES = {
     "/api/v1/history/delete": "history",
     "/api/v1/history/clear": "history",
 }
+WRITE_S = 10  # A browser that takes longer to accept one chunk of a download has stopped reading.
 COMMAND_SETTLE_S = 4  # The Web UI stops waiting for a save's lastCommand after about this.
 CHUNK = 16 * 1024
 HEARTBEAT_S = 30  # A screen that stops answering pongs is closed and frees its slot.
@@ -63,9 +64,10 @@ class Screens:
     def __init__(self, companion: Companion, relay: Relay) -> None:
         self.companion, self.relay = companion, relay
         self.mux = Mux(companion, relay)
-        # Mutations one at a time, in order, beside at most one read: two controller sockets at
-        # most, plus any control action, which never queues.
-        self.commands, self.reads = asyncio.Lock(), asyncio.Lock()
+        # Mutations one at a time, in order, beside at most one read and one sign-in or claim, so a
+        # slow download keeps no page from opening: three controller sockets at most, plus any
+        # control action, which never queues.
+        self.commands, self.reads, self.sessions = asyncio.Lock(), asyncio.Lock(), asyncio.Lock()
 
     def routes(self) -> list[web.RouteDef]:
         return [web.get(STREAM, self.stream), web.route("*", "/api/{tail:.*}", self.api)]
@@ -179,10 +181,12 @@ class Screens:
                     headers={"Cache-Control": "no-store"},
                 )
         changes = CHANGES.get(path) if method == "POST" else None
-        session_route = path == CLAIM or path.startswith("/api/v1/auth/")
+        session_route = path == CLAIM or path.startswith("/api/v1/auth")
         lane = (
-            self.reads
-            if method in ("GET", "HEAD") or session_route
+            self.sessions
+            if session_route
+            else self.reads
+            if method in ("GET", "HEAD")
             else asyncio.Lock()  # Its own: Stop waits for no save and no other request.
             if path.startswith(CONTROL)
             else self.commands
@@ -243,8 +247,13 @@ class Screens:
                 if reply.content_length is not None:
                     response.content_length = reply.content_length
                 await response.prepare(request)
-                async for chunk in reply.content.iter_chunked(CHUNK):
-                    await response.write(chunk)
+                try:
+                    async for chunk in reply.content.iter_chunked(CHUNK):
+                        await asyncio.wait_for(response.write(chunk), WRITE_S)
+                except TimeoutError:  # It must not hold the lane for every other screen.
+                    if request.transport is not None:
+                        request.transport.abort()
+                    return response
                 await response.write_eof()
                 return response
             finally:

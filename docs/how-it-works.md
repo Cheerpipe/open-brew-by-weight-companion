@@ -451,7 +451,9 @@ every op itself:
   the last 25 seconds.
 
 **Commands.** Changes go to the controller one at a time, in order, beside at
-most one read. After a `202` the next change waits until Home's
+most one read and one sign-in or claim, so a slow download keeps no page from
+opening. A download whose browser takes over 10 seconds to accept a chunk is cut.
+After a `202` the next change waits until Home's
 `lastCommand` shows that request settled, or 4 seconds, about as long as the
 Web UI waits for it: `lastCommand` holds one request, so another screen's change
 would hide the result from the screen that is waiting. A time sync holds nothing,
