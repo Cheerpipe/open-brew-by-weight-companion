@@ -7,7 +7,7 @@ its own copy of the design's formulas. Offline, inside the image (see the README
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import pytest
@@ -17,6 +17,8 @@ from cryptography.exceptions import InvalidTag
 import fake_controller
 from companion import crypto
 from companion import relay as relay_module
+from companion import screens as screens_module
+from companion import service as service_module
 from companion.service import Companion, web_app
 from companion.store import Store
 
@@ -119,7 +121,7 @@ def test_relay_vectors() -> None:
     )
 
 
-async def relay_scenario(data: Path) -> None:
+async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = fake_controller.Controller(SECRET, ID)
     server = TestServer(fake.app(), host="127.0.0.1")
     await server.start_server()
@@ -226,6 +228,16 @@ async def relay_scenario(data: Path) -> None:
             "an unclaimed screen's refusal is not a takeover"
         )
 
+        # Without a client id a change is refused here; a read goes as on the controller itself.
+        seen = len(fake.requests)
+        status, _, body = await call("POST", "/api/v1/ui/claim", client="", json={})
+        assert status == 400
+        assert json.loads(body)["error"] == "UI_CLIENT_INVALID"
+        assert len(fake.requests) == seen
+        status, _, _ = await call("GET", "/api/v1/auth", client="")
+        assert status == 200
+        assert relayed(fake)["screen"] == relay.client_id
+
         # Addresses as nginx gives them.
         await call("GET", "/api/v1/auth", real_ip="fe80::1%eth0")
         assert relayed(fake)["addr"] == "fe80::1"
@@ -270,6 +282,18 @@ async def relay_scenario(data: Path) -> None:
         assert headers["Content-Encoding"] == "gzip"
         assert "export.gz" in headers["Content-Disposition"]
 
+        # A download never delays a sign-in or a claim, and one nobody reads ends.
+        async with companion.screens.reads:
+            status, _, _ = await asyncio.wait_for(call("GET", "/api/v1/auth"), 2)
+            assert status == 200
+            status, _, _ = await asyncio.wait_for(call("POST", "/api/v1/ui/claim", json={}), 2)
+            assert status == 200
+        screens_module.WRITE_S = 0
+        with pytest.raises(aiohttp.ClientError):
+            await call("GET", "/api/v1/debug/export")
+        screens_module.WRITE_S = 10
+        assert not companion.screens.reads.locked()
+
         # --- RELAY_STALE: one new session and the same request again ----------------------------
         fake.stale_next = True
         status, _, body = await call("POST", "/api/v1/config", json={"patch": {"a": 1}})
@@ -278,10 +302,30 @@ async def relay_scenario(data: Path) -> None:
         assert json.loads(fake.requests[-1][3]) == {"patch": {"a": 1}}
         assert relayed(fake)["q"] == 1
 
+        # A stale answer that arrives after another request replaced the session keeps the new
+        # one: this request retries with it, and nothing pays for a further handshake.
+        send, rotated = relay._send, False
+
+        async def rotating(*args: Any) -> relay_module.Reply:
+            nonlocal rotated
+            reply = await send(*args)
+            if not rotated:
+                rotated = True
+                await relay.handshake()
+            return reply
+
+        with monkeypatch.context() as patch:
+            patch.setattr(relay, "_send", rotating)
+            fake.stale_next = True
+            handshakes = fake.handshakes
+            status, _, _ = await call("GET", "/api/v1/auth")
+        assert status == 200
+        assert fake.handshakes == handshakes + 1
+
         # A counter at its end starts a new session first.
         relay.counter = relay_module.COUNTER_MAX
         await call("GET", "/api/v1/auth")
-        assert fake.handshakes == 4
+        assert fake.handshakes == 5
         assert relayed(fake)["q"] == 1
 
         # --- The link opens only when the controller says a feature needs it [D4]
@@ -292,7 +336,7 @@ async def relay_scenario(data: Path) -> None:
         # Admin → Companion's actions may change the switches: the relay asks again.
         fake.link = True
         await call("POST", "/api/v1/companion/admin", json={"action": "switches", "lm": True})
-        await eventually(lambda: fake.handshakes == 5 and relay.link is True)
+        await eventually(lambda: fake.handshakes == 6 and relay.link is True)
         await eventually(lambda: any(r[1] == "/api/v1/companion/link" for r in fake.requests))
         link.cancel()
 
@@ -330,21 +374,122 @@ async def relay_scenario(data: Path) -> None:
             assert f"http://127.0.0.1:{server.port}/" in page
             assert "@STYLE@" not in page
         fake.ui = True
-        assert await relay.handshake() == "ready"
+        async with browser.get(
+            base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
+        ) as reply:
+            assert reply.status == 403, "a page load asks again only once a minute"
+        service_module.GATE_HANDSHAKE_S = 0
+        async with browser.get(
+            base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
+        ) as reply:
+            assert reply.status == 204, "turned back on at the controller's own address"
+        service_module.GATE_HANDSHAKE_S = 60
+        assert (await companion.status())["relay"] == "ready"
         async with browser.get(
             base + "/__companion/ui-gate", headers={"X-Original-URI": "/stats"}
         ) as reply:
             assert reply.status == 204
 
-        # --- A failed relay handshake: passthrough, the link always on ----------------------------
+        # A switch changed from a direct page reaches an open link as a `cfg` frame.
+        fake.ui = False
+        await companion._on_frame({"t": "cfg", "ui": False})
+        await eventually(lambda: relay.mode == "disabled")
+        fake.ui = True
+        await companion._on_frame({"t": "cfg", "ui": True})
+        await eventually(lambda: relay.mode == "ready")
+        asked = fake.relay_gets
+        await companion._on_frame({"t": "cfg", "ui": True})
+        await asyncio.sleep(0.05)
+        assert fake.relay_gets == asked, "an unchanged switch costs no handshake"
+
+        # --- A failed relay handshake while paired: refused, never in clear; the link always on --
         fake.mode = "none"
         assert await relay.handshake() == "passthrough"
         assert (relay.mode, relay.link) == ("passthrough", True)
         fake.active = B
-        status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
+        seen = len(fake.requests)
+
+        async def refused(client: str) -> None:
+            status, _, body = await call(
+                "POST", "/api/v1/ui/claim", client=client, json={}, headers={"X-WebUI-Session": "s"}
+            )
+            assert status == 502
+            assert f"http://127.0.0.1:{server.port}" in json.loads(body)["message"]
+            status, _, body = await call("GET", "/api/v1/status/admin", client=client)
+            assert status == 502
+            assert len(fake.requests) == seen, "nothing crossed in clear"
+            assert not companion.screens.mux.claimed, "no claim without a relay session"
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refusal:
+                await browser.ws_connect(base + "/api/v1/ui/ui-stream")
+            assert refusal.value.status == 502
+            assert not fake.streams, "nothing crossed in clear"
+            assert await companion._web_ui_allows({"X-WebUI-Client": client}) is None
+            assert len(fake.requests) == seen, "an answer in clear could be forged"
+
+        await refused(B)
+        for mode in ("bad_proof", "unknown"):  # A forged answer, an unsigned refusal.
+            fake.mode = mode
+            await relay.handshake()
+            await refused(B)
+        assert companion.pairing.state == "not_recognized", "unsigned: nothing erased"
+        assert companion.store.pairing(), "unsigned: nothing erased"
+        async with browser.get(base + "/__companion/status") as reply:
+            assert (await reply.json())["relay"] == "passthrough"
+
+        # A lasting failure costs one handshake every RENEW_S, however many requests ask.
+        relay.renew_at = float("-inf")
+        asked = fake.relay_gets
+        for _ in range(3):
+            await call("GET", "/api/v1/status/admin", client=B)
+        assert fake.relay_gets == asked + 1
+        # An answer from the controller needs no wait: a handshake the announcement starts
+        # brings the session back, and the requests with it.
+        fake.mode = "ok"
+        assert await relay.handshake() == "ready"
+        status, _, _ = await call("GET", "/api/v1/auth", client=B)
         assert status == 200
+        assert last_identity(fake) is not None
+
+        # A busy controller ends nothing: the session stays.
+        fake.mode = "busy"
+        assert await relay.handshake() == "ready"
+        assert relay.body_key is not None
+        fake.ui = False
+        fake.mode = "ok"
+        assert await relay.handshake() == "disabled"
+        fake.mode = "busy"
+        assert await relay.handshake() == "disabled", "the switch stays known"
+        fake.ui = True
+        fake.mode = "ok"
+        assert await relay.handshake() == "ready"
+
+        # A session lost after a success renews at once, whatever failed before.
+        relay.key, relay.body_key = None, None
+        status, _, _ = await call("GET", "/api/v1/auth", client=B)
+        assert status == 200
+
+        # A companion that starts paired has no session yet: its first request makes one.
+        relay.reset()
+        assert relay.mode == "passthrough"
+        status, _, _ = await call("GET", "/api/v1/auth", client=B)
+        assert status == 200
+        assert (relay.mode, last_identity(fake) is not None) == ("ready", True)
+
+        # --- Only an erased pairing is a plain proxy again ---------------------------------------
+        fake.mode = "bad_erase"
+        await relay.handshake()
+        assert companion.store.pairing()
+        assert relay.mode == "passthrough"
+        fake.mode = "forgotten"
+        relay.renew_at = float("-inf")
+        status, _, _ = await call("GET", "/api/v1/status/admin", client=B)
+        assert status == 200, "the request that learned of the erase goes as a plain proxy"
+        assert companion.store.pairing() is None
+        assert companion.pairing.state == "unpaired"
+        assert (relay.mode, relay.link) == ("passthrough", None)
         assert last_identity(fake) is None
         assert fake.requests[-1][2]["X-WebUI-Client"] == B
+        fake.mode = "none"
         fake.require_relay_stream = False
         async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
             await ws.send_str(json.dumps({"op": "bind", "client": B}))
@@ -355,27 +500,6 @@ async def relay_scenario(data: Path) -> None:
             message = await ws.receive()
             assert message.type is aiohttp.WSMsgType.CLOSE, "close codes pass through"
             assert message.data == 4001, "close codes pass through"
-
-        # --- A forged answer, an unsigned refusal, then a real erase
-        fake.mode = "bad_proof"
-        assert await relay.handshake() == "passthrough"
-        assert companion.store.pairing()
-        fake.mode = "unknown"
-        await relay.handshake()
-        assert companion.pairing.state == "not_recognized", "unsigned: nothing erased"
-        assert companion.store.pairing(), "unsigned: nothing erased"
-        fake.mode = "ok"
-        assert await relay.handshake() == "ready"
-        assert companion.pairing.state == "paired"
-        fake.mode = "bad_erase"
-        await relay.handshake()
-        assert companion.store.pairing()
-        assert relay.mode == "passthrough"
-        fake.mode = "forgotten"
-        await relay.handshake()
-        assert companion.store.pairing() is None
-        assert companion.pairing.state == "unpaired"
-        assert (relay.mode, relay.link) == ("passthrough", None)
 
         async with browser.get(base + "/__companion/status") as reply:
             facts = await reply.json()
@@ -390,12 +514,19 @@ async def relay_scenario(data: Path) -> None:
             "history",
             "stats",
         }
+
+        # A page proxied before pairing stops being in clear the moment the pairing is saved.
+        async with browser.ws_connect(base + "/api/v1/ui/ui-stream") as ws:
+            await companion.paired(SECRET)
+            assert (await ws.receive()).type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED)
+        await relay.handshake()  # After the one the pairing started: none outlives this scenario.
+
         await pages.close()
         await relay.close()
     await server.close()
 
 
-def test_relay(tmp_path: Path) -> None:
+def test_relay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Companion relay: handshake, signing, sealing, whitelist, client id, stale retry, erase,
     passthrough and switch."""
-    asyncio.run(relay_scenario(tmp_path))
+    asyncio.run(relay_scenario(tmp_path, monkeypatch))

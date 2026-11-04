@@ -5,10 +5,10 @@ controller's challenge, a POST proves the pairing secret and both sides derive
 Kr (signing) and Kb (sealing) from it. Each request then carries
 `X-OBBW-Relay: 2 <q> <addr> <screen> <mac>`, its body and credential headers
 sealed with AES-256-GCM under Kb (protocol 2): no password, session token or
-sign-in body crosses the hop in the clear. Without a relay session (not
-paired, a failed handshake, or a controller that turned the Web UI through
-the companion off) the companion forwards as a plain proxy
-(passthrough) or refuses (disabled).
+sign-in body crosses the hop in the clear. Before pairing the companion
+forwards as a plain proxy (passthrough). Paired, it never does: without a relay
+session, or with the Web UI through the companion turned off (disabled), it
+refuses.
 """
 
 import asyncio
@@ -72,6 +72,7 @@ READ_LIMIT = 64 * 1024  # JSON answers are read whole: claims, commands and erro
 # this), matching nginx's own 5-minute proxy_read_timeout. The total does not
 # reach the two WebSockets: aiohttp drops the timer on upgrade, by design.
 TIMEOUT = aiohttp.ClientTimeout(total=300, connect=5, sock_read=180)
+RENEW_S = 10
 
 
 def address(text: str | None) -> str:
@@ -103,6 +104,7 @@ class Relay:
         self.lock = asyncio.Lock()
         self.http: aiohttp.ClientSession | None = None
         self.reported: str | None = None
+        self.renew_at = float("-inf")
 
     def session(self) -> aiohttp.ClientSession:
         """Connections that close after each request and pass bodies through untouched."""
@@ -120,8 +122,15 @@ class Relay:
             await self.http.close()
 
     def reset(self, link: bool | None = None) -> None:
-        self.key, self.body_key, self.counter, self.mode = None, None, 0, "passthrough"
+        self.key, self.body_key, self.counter = None, None, 0
+        self._set_mode("passthrough")
         self._set_link(link)
+
+    def _set_mode(self, mode: Mode) -> None:
+        left = self.mode == "ready" and mode != "ready"
+        self.mode = mode
+        if left:
+            self.companion.screens.mux.relay_ended()
 
     def _set_link(self, link: bool | None) -> None:
         if link != self.link:
@@ -146,8 +155,25 @@ class Relay:
                     self.reset(True)
                     self._note(
                         "the controller sent a malformed relay answer; "
-                        "the Web UI passes straight through"
+                        "the Web UI through the companion waits for a secure session"
                     )
+        return self.mode
+
+    def _busy(self, status: int) -> bool:
+        """A 5xx ends nothing the relay has learned; the controller could not answer now."""
+        return status >= 500 and self.mode != "passthrough"
+
+    async def paired(self) -> bool:
+        return await offload(self.companion.store.pairing) is not None
+
+    async def renew(self) -> Mode:
+        """A request found no session: a handshake, at most one every RENEW_S after a failed one,
+        so a lasting failure does not turn every Web UI request into a challenge and a proof."""
+        now = asyncio.get_running_loop().time()
+        if now >= self.renew_at:
+            await self.handshake()
+            if self.key is None:
+                self.renew_at = now + RENEW_S
         return self.mode
 
     async def _handshake(self) -> None:
@@ -159,8 +185,8 @@ class Relay:
             return
         url = companion.base_url() + PATH
         status, reply = await companion.controller_request("GET", url)
-        if status is None:
-            return  # Unreachable: keep what we have and try again when it announces itself.
+        if status is None or self._busy(status):
+            return  # Unreachable or busy: keep what we have and try again when it announces itself.
         if status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED":
             await self._prove(
                 url, pairing["secret"], bytes(16)
@@ -170,7 +196,7 @@ class Relay:
             self._note(
                 f"the relay handshake answered HTTP {status} "
                 f"with protocol {reply.get('protocol')!r}; "
-                "the Web UI passes straight through, one screen at a time"
+                "the Web UI through the companion waits for a secure session"
             )
         else:
             await self._prove(url, pairing["secret"], crypto.unb64(reply.get("challenge"), 16))
@@ -181,7 +207,7 @@ class Relay:
         status, reply = await companion.controller_request(
             "POST", url, {"id": companion.id, "nonce": crypto.b64(nonce), "mac": crypto.b64(proof)}
         )
-        if status is None:
+        if status is None or self._busy(status):
             return
         if status == 200:
             if not hmac.compare_digest(
@@ -190,12 +216,13 @@ class Relay:
                 self.reset()
                 self._note(
                     "the controller did not prove the pairing secret; "
-                    "the Web UI passes straight through"
+                    "the Web UI through the companion waits for a secure session"
                 )
                 return
             key = crypto.relay_key(secret, challenge, nonce)
             self.key, self.body_key, self.counter = key, crypto.relay_body_key(key), 0
-            self.mode = "disabled" if reply.get("ui") is False else "ready"
+            self.renew_at = float("-inf")
+            self._set_mode("disabled" if reply.get("ui") is False else "ready")
             self._set_link(reply.get("link") is True)
             await companion.recognized()
             # The controller just proved itself again: a dead link socket is found now.
@@ -254,7 +281,7 @@ class Relay:
     ) -> str | None:
         value = self.header(method, uri, addr, screen, session)
         if value is None and self.mode != "disabled":
-            await self.handshake()
+            await self.renew()
             value = (
                 self.header(method, uri, addr, screen, session) if self.mode == "ready" else None
             )
@@ -266,7 +293,7 @@ class Relay:
         """`signed`, keeping the q and the sealed session that belong to it."""
         value, q, sealed_session = self.admit(method, uri, addr, screen, session)
         if value is None and self.mode != "disabled":
-            await self.handshake()
+            await self.renew()
             if self.mode == "ready":
                 value, q, sealed_session = self.admit(method, uri, addr, screen, session)
         return value, q, sealed_session
@@ -328,11 +355,16 @@ class Relay:
                 and _error(reply.data) == "RELAY_STALE"
             ):
                 reply.release()
-                self.key, self.body_key = None, None
+                self.forget(body_key)
                 continue
             await self._open(reply, body_key)
             return reply
         return None
+
+    def forget(self, body_key: bytes | None) -> None:
+        """The session that signed with `body_key` is over, unless another request replaced it."""
+        if self.body_key is body_key:
+            self.key, self.body_key = None, None
 
     async def _open(self, reply: Reply, body_key: bytes) -> None:
         """Open a sealed answer; a seal that does not open is never delivered."""
@@ -351,7 +383,7 @@ class Relay:
             reply.data = crypto.relay_open(body_key, int(counter), sealed)
         except (InvalidTag, ValueError, TypeError) as error:
             log("the controller's sealed answer did not open; starting a new relay session")
-            self.key, self.body_key = None, None  # The next request makes a new session.
+            self.forget(body_key)  # The next request makes a new session.
             raise aiohttp.ClientResponseError(
                 reply.request_info, (), status=502, message="the sealed answer did not open"
             ) from error

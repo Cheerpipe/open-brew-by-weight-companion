@@ -152,8 +152,8 @@ def _integer(value: object, low: int, high: int) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
+        or not low <= value <= high  # First: int() cannot take infinity.
         or value != int(value)
-        or not low <= value <= high
     ):
         raise InvalidOpError
     return int(value)
@@ -692,6 +692,7 @@ class View:
             s is not screen for s in self.members(self.standing)
         )
         record.params, record.group, record.request = params, group, request
+        self._forget(old)
         self.mux.attribute(screen)
         if self.standing is None:
             record.synced = False
@@ -711,13 +712,25 @@ class View:
 
     def unsubscribe(self, screen: Screen, settle: bool = True) -> None:
         record = screen.records[self.kind]
+        old = record.group
         record.group, record.synced, record.replica = None, False, False
+        self._forget(old)
         record.serial += 1
         for fetch in [self.inflight, *self.queue]:
             if fetch:
                 fetch.targets = [target for target in fetch.targets if target[0] is not screen]
         if settle:
             self.settle()
+
+    def _forget(self, group: Group | None) -> None:
+        """A group's last screen left: its page copy goes, once no fetch is still filling it."""
+        if (
+            group is not None
+            and group != self.standing
+            and not self.members(group)
+            and not (self.inflight and self.inflight.group == group)
+        ):
+            self.pages.pop(group, None)
 
     def resync(self, screen: Screen) -> None:
         record = screen.records[self.kind]
@@ -986,6 +999,7 @@ class View:
             if fetch.timer:
                 fetch.timer.cancel()
             self.inflight = None
+            self._forget(fetch.group)
             self.pump()
 
 
@@ -1091,7 +1105,7 @@ class Mux:
         ):  # The controller gave the Web UI to a direct browser, or forgot the claim (reboot).
             self.claimed.clear()
             log(
-                "the Web UI was opened directly on another device; "
+                "the controller ended the companion's Web UI session; "
                 "every companion screen offers Reload"
             )
             for screen in screens:
@@ -1138,11 +1152,25 @@ class Mux:
             if notice is None or type(notice.get(key)) is int:
                 self.views[kind].unpark(None if notice is None else notice[key])
 
-    def takeover(self) -> None:
-        """A relayed call answered UI_TAKEN_OVER: a direct browser holds the Web UI."""
+    def signed_out(self, client: str | None) -> None:
+        """This browser's session ended: its claim goes and so do its pages' live updates."""
+        self.claimed.discard(client or "")
+        for screen in list(self.screens):
+            if screen.id == client:
+                screen.close(4001)
+
+    def relay_ended(self) -> None:
+        """The relay session ended (a Forget, an erase, the Web UI turned off): no screen stays."""
         self.claimed.clear()
         for screen in list(self.screens):
-            screen.close(4001, "direct")
+            screen.close(4001)
+        self.upstream.close()
+
+    def takeover(self) -> None:
+        """A relayed call answered UI_TAKEN_OVER: the claim moved, not always to a direct page."""
+        self.claimed.clear()
+        for screen in list(self.screens):
+            screen.close(4001)
         self.upstream.close()
 
     # --- Screens ---------------------------------------------------------------------

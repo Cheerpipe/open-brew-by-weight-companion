@@ -115,9 +115,8 @@ def index_answer(
 class Controller:
     def __init__(self, secret: bytes, companion_id: str) -> None:
         self.secret, self.companion_id = secret, companion_id
-        self.mode = (
-            "ok"  # ok, none (no relay route answers), forgotten, bad_erase, unknown, bad_proof
-        )
+        # ok, none (no relay route answers), forgotten, bad_erase, unknown, bad_proof, busy
+        self.mode = "ok"
         self.ui, self.link = True, False
         self.rb = os.urandom(16)
         self.kr: bytes | None = None
@@ -125,6 +124,7 @@ class Controller:
         self.high, self.mask = 0, 0
         self.responses = 0
         self.handshakes, self.stale_next = 0, False
+        self.relay_gets, self.auth_required = 0, False
         self.corrupt_body, self.corrupt_reply = False, False  # A man in the middle, for tests.
         self.active: str | None = None  # activeWebUiClientId_
         # Each request's method, URI, headers, body and identity.
@@ -141,6 +141,9 @@ class Controller:
 
     # --- Relay routes -------------------------------------------------------------
     async def relay_get(self, _request: web.Request) -> web.Response:
+        self.relay_gets += 1
+        if self.mode == "busy":
+            return web.json_response({"error": "BUSY"}, status=503)
         if self.mode == "none":
             return web.Response(status=404, text="404: Not Found")
         if self.mode in ("forgotten", "bad_erase", "unknown"):
@@ -314,6 +317,10 @@ class Controller:
             return self.answer(identity, {"ok": True})
         if path == "/api/v1/auth":
             return self.answer(identity, {"login": False})
+        if path == "/api/v1/auth/logout":
+            return self.answer(identity, {"ok": True})
+        if self.auth_required:
+            return self.answer(identity, {"error": "AUTH_REQUIRED"}, status=401)
         if client != self.active:
             return self.answer(
                 identity,

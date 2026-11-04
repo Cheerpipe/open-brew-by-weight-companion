@@ -451,9 +451,23 @@ every op itself:
   the last 25 seconds.
 
 **Commands.** Changes go to the controller one at a time, in order, beside at
-most one read. After a `202` the next change waits until Home's
-`lastCommand` shows that request settled, or 10 seconds. A request from a
-browser that left while it waited is dropped.
+most one read and one sign-in or claim, so a slow download keeps no page from
+opening. A download whose browser takes over 10 seconds to accept a chunk is cut.
+After a `202` the next change waits until Home's
+`lastCommand` shows that request settled, or 4 seconds, about as long as the
+Web UI waits for it: `lastCommand` holds one request, so another screen's change
+would hide the result from the screen that is waiting. A time sync holds nothing,
+since it never reaches `lastCommand`. `/api/v1/control/*`, Stop among them, joins
+no queue and goes at once. A request from a browser that left while it waited is
+dropped. A change with no valid `X-WebUI-Client` is refused with `400 UI_CLIENT_INVALID` while
+paired, so nothing acts under the session the screens share; such a read still goes
+through. A signed-out screen (a relayed logout or `401 AUTH_REQUIRED`) loses its
+claim and its live updates, closed with `4001`.
+
+**The relay ends.** When the relay session ends for good (a Forget, an erase, the
+Web UI through the companion turned off), the claims go, every screen is closed
+with `4001` and the shared session closes. A controller that is busy or does not
+answer a handshake (5xx, no reply) ends nothing: the session stays.
 
 **Takeover and loss.** When a browser opens the Web UI at the controller's
 own address, the controller closes the shared session with `4001`; every
@@ -462,10 +476,15 @@ the controller closes the screens plainly, so they show the out-of-reach
 notice and reconnect. A screen that falls 1 MiB behind is closed with
 `4002` and reconnects quietly.
 
-**Passthrough and the switch.** Before pairing, or while the relay handshake
-fails, the service is a plain proxy: each
-browser gets its own session with the controller, one at a time, as without
-the companion, and the link stays on as before. While the controller has
+**Passthrough and the switch.** Before pairing the service is a plain proxy:
+each browser gets its own session with the controller, one at a time, as
+without the companion. A paired companion never is: without a relay session
+`/api/` and the ui-stream answer `502` and name the controller's own address,
+because a fallback would let anyone who breaks the handshake turn the sealing
+off. The link stays on as before. A request starts a new handshake at most every
+10 seconds after a failed one; an announcement, a `cfg` frame or an Admin action
+starts one at once. While the Web UI through the companion is off, a page load
+also asks the controller again, at most once a minute. While the controller has
 the Web UI through the companion turned off, `/api/` answers
 `409 COMPANION_UI_OFF` and pages show the notice. The link itself opens
 only while the controller's relay answer says a feature needs it, such as
@@ -720,7 +739,8 @@ mux serves Shots and History from (`companion/mux.py`, `companion/pages.py`).
 `/__companion/status` returns the same state as JSON for the Web UI's
 Diagnostic page: `name`, `version`, `id`, `paired`, `pairedWith`, the
 `controller`, `pairing` (`state`, and the `code` while pending), `relay`
-(`passthrough`, `ready` or `disabled`), `screens` (screens connected),
+(`passthrough`, `ready` or `disabled`; `passthrough` with `paired` true means no
+session yet, and nothing is proxied), `screens` (screens connected),
 `owner` (whether the companion holds the controller's Web UI claim),
 `views` (screens per view: `home`, `settings`, `diagnostic`, `log`,
 `history`, `stats`), `link`

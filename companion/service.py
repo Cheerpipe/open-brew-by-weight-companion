@@ -56,6 +56,7 @@ LOG_CATEGORY_MAX, LOG_MESSAGE_MAX = 24, 1024
 LOG_ACCESS_RECHECK_S = (
     300  # How often a session's right to read the history is asked of the controller.
 )
+GATE_HANDSHAKE_S = 60  # While the Web UI is off, how often a page load asks the controller again.
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
 STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
@@ -258,6 +259,7 @@ class Companion:
         await offload(self.store.erase_pairing)
         self.lm.erase()
         await offload(self.store.save_pairing, secret, self._target()[0])
+        self.screens.end_plain_streams()
         log(f"paired with {self._target()[0]}")
         if self.ws is not None:
             _ = self.spawn(self.ws.close())
@@ -540,6 +542,9 @@ class Companion:
                     "update the companion"
                 )
         elif kind == "cfg":
+            ui, mode = frame.get("ui"), self.relay.mode
+            if (ui is False and mode == "ready") or (ui is True and mode == "disabled"):
+                _ = self.spawn(self.relay.handshake())  # Changed from a direct page.
             self.cfg = {
                 "lm": frame.get("lm") is True,
                 "conn": "api" if frame.get("conn") == "api" else "ws",
@@ -794,9 +799,11 @@ class Companion:
                     False,
                 )
             relayed = reply is not None
-            if (
-                reply is None
-            ):  # No relay session: the session would cross the LAN in clear, so ask as nobody.
+            if reply is None:
+                # Paired and without a session, an answer in clear could be forged; what the
+                # controller said last stands. Otherwise the session stays here: ask as nobody.
+                if self.relay.mode != "disabled" and await self.relay.paired():
+                    return None
                 reply = await self.relay.passthrough("GET", "/api/v1/auth", {}, b"")
             try:
                 answer = json.loads(reply.data) if reply.status == 200 and reply.data else None
@@ -1103,13 +1110,25 @@ def web_app(companion: Companion) -> web.Application:
     notice = notice_page(companion.name)
     no_store = {"Cache-Control": "no-store"}
 
+    gate_asked = float("-inf")
+
     async def show(_request: web.Request) -> web.Response:
         return web.Response(text=page, content_type="text/html", headers=no_store)
 
     async def gate(request: web.Request) -> web.Response:
         """nginx asks before each Web UI page: 403 shows the notice while the Web UI opens
         directly."""
+        nonlocal gate_asked
         page = request.headers.get("X-Original-URI", "").partition("?")[0]
+        now = asyncio.get_running_loop().time()
+        # Turned back on at the controller's own address, with no link open to say so.
+        if (
+            companion.relay.mode == "disabled"
+            and page != "/sw.js"
+            and now - gate_asked >= GATE_HANDSHAKE_S
+        ):
+            gate_asked = now
+            await companion.relay.handshake()
         allowed = companion.relay.mode != "disabled" or page == "/sw.js"
         return web.Response(status=204 if allowed else 403)
 

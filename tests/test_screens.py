@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import aiohttp
+import pytest
 from aiohttp.test_utils import TestServer
 
 import fake_controller
@@ -25,8 +26,6 @@ from fake_controller import event, history_frame, log_frame
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    import pytest
 
     from companion.store import Account
 
@@ -201,6 +200,13 @@ async def ops_after(session: fake_controller.Session, count: int) -> list[fake_c
     async with asyncio.timeout(OPS_S):
         await eventually(lambda: len(session.ops) >= count)
     return session.ops
+
+
+def test_an_op_number_must_be_finite() -> None:
+    """`1e400` parses as infinity, which int() cannot take."""
+    for value in (json.loads("1e400"), float("nan"), 10**400):
+        with pytest.raises(mux.InvalidOpError):
+            mux._integer(value, 0, 10)
 
 
 def test_replay_fixture_is_the_firmwares() -> None:
@@ -591,6 +597,40 @@ async def scenario() -> None:
             await session.send({"type": "home", "changes": {"lastCommand.state": "PERSISTED"}})
             assert (await asyncio.wait_for(second_command, 2))[1]["requestId"] == 102
             assert len(fake.requests) == seen + 1
+
+            # A held save does not hold back a control action.
+            async def post(path: str) -> int:
+                async with web.post(
+                    base + path, json={}, headers={"X-WebUI-Client": CLIENTS[0]}
+                ) as reply:
+                    return reply.status
+
+            for path in ("/api/v1/control/stop", "/api/v1/control/paddle"):
+                assert await asyncio.wait_for(post(path), 1) == 202, "control never queues"
+                assert fake.requests[-1][1] == path
+            third_command = asyncio.create_task(command(1))
+            await asyncio.sleep(0.2)
+            assert not third_command.done(), "another save still waits"
+
+            async def settle() -> None:
+                await session.send(
+                    {
+                        "type": "home",
+                        "changes": {
+                            "lastCommand.requestId": fake.request_id,
+                            "lastCommand.state": "PERSISTED",
+                        },
+                    }
+                )
+
+            await settle()
+            await asyncio.wait_for(third_command, 2)
+            await settle()
+            await eventually(lambda: not companion.screens.commands.locked())
+            assert await post("/api/v1/time/sync") == 202
+            assert (await asyncio.wait_for(command(1), 1))[0] == 202, "a time sync holds nothing"
+            await settle()
+            await eventually(lambda: not companion.screens.commands.locked())
             async with web.get(
                 base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[2]}
             ) as reply:
@@ -604,6 +644,58 @@ async def scenario() -> None:
             slow.send("x" * 600000)
             slow.send("x" * 600000)
             assert await c.closed() == 4002
+
+            # --- The relay session ends: no screen stays ------------------------------------------
+            e = await screen(3).open()
+            await e.next("home")
+            fake.ui = False
+            assert await companion.relay.handshake() == "disabled"
+            assert await e.closed() == 4001
+            assert await a.closed() == 4001
+            assert await b.closed() == 4001
+            assert not the_mux.claimed
+            await eventually(lambda: the_mux.upstream.state == "closed")
+            fake.ui = True
+            assert await companion.relay.handshake() == "ready"
+            a = await screen(0).open()
+            session = await asyncio.wait_for(fake.sessions.get(), 2)
+            b = await screen(1).open()
+            await a.next("home")
+            await b.next("home")
+
+            # --- A relayed UI_TAKEN_OVER does not claim a direct page took it ---------------------
+            taken = await screen(3).open()
+            await taken.next("home")
+            fake.active = DIRECT
+            async with web.get(
+                base + "/api/v1/status/admin", headers={"X-WebUI-Client": CLIENTS[3]}
+            ) as reply:
+                assert reply.status == 409
+            assert await taken.closed() == 4001
+            assert not taken.reason
+            assert await a.closed() == 4001
+            assert await b.closed() == 4001
+            await eventually(lambda: the_mux.upstream.state == "closed")
+            a = await screen(0).open()
+            session = await asyncio.wait_for(fake.sessions.get(), 2)
+            b = await screen(1).open()
+            await a.next("home")
+            await b.next("home")
+
+            # --- A signed-out screen loses its claim and live updates; the others keep theirs -----
+            for path, code in (("/api/v1/auth/logout", 200), ("/api/v1/status/admin", 401)):
+                d = await screen(3).open()
+                await d.next("home")
+                fake.auth_required = code == 401
+                call = web.post if code == 200 else web.get
+                async with call(base + path, headers={"X-WebUI-Client": CLIENTS[3]}) as reply:
+                    assert reply.status == code
+                fake.auth_required = False
+                assert await d.closed() == 4001
+                assert CLIENTS[3] not in the_mux.claimed
+                assert CLIENTS[0] in the_mux.claimed
+                assert await (await screen(3).open(claim=False)).closed() == 4001
+                assert a.code is None
 
             # --- 4003 from the controller: the screen that just sent an op, 4002 for the others ---
             async def reject(
@@ -870,6 +962,30 @@ async def scenario() -> None:
             assert status["screens"] == 0
             assert status["relay"] == "ready"
             assert status["owner"] is True
+            # --- A group nobody holds keeps no page copy ------------------------------------------
+            view = the_mux.views["history"]
+            a = await screen(0).open([{**HISTORY, "request": 2}])
+            session = await asyncio.wait_for(fake.sessions.get(), 2)
+            await a.next("home")
+            await a.next("card")
+            await a.next("history")
+            c = await screen(2).open([{**HISTORY, "request": 3, "dir": "asc", "types": ["rinse"]}])
+            await c.next("home")
+            await c.next("card")
+            await c.next("history")
+            assert view.pages
+            await c.send({"op": "history", "on": False})
+            await eventually(lambda: not view.pages)
+            await all_closed(a, c)
+            # A fetch still filling it keeps it: a screen that joins now needs the whole page.
+            gone: mux.Group = (0, 0, "gone", ())
+            view.pages[gone], view.inflight = ([], False), mux.Fetch(gone, gone, None)
+            view._forget(gone)
+            assert gone in view.pages
+            view.inflight = None
+            view._forget(gone)
+            assert gone not in view.pages
+
             await pages.close()
             await companion.relay.close()
     await server.close()
