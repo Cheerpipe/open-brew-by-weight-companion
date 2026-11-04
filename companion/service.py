@@ -25,7 +25,7 @@ import aiohttp
 from aiohttp import web
 from cryptography.exceptions import InvalidTag
 
-from . import VERSION, crypto, dashboard, log, logger, stats
+from . import VERSION, crypto, dashboard, log, logger, pushprobe, stats
 from .archive import FETCH_MAX, Archive, UnavailableError
 from .lamarzocco import LaMarzocco
 from .link import ErasedError, LinkClosedError, open_link
@@ -1606,6 +1606,7 @@ def web_app(companion: Companion) -> web.Application:
     app.router.add_get("/__companion/ui-gate", gate)
     app.router.add_get("/__companion/ui-off", ui_off)
     app.router.add_routes(companion.screens.routes())
+    app.router.add_routes(pushprobe.routes(companion.store, HERE / "push-probe.html"))
     app.router.add_get("/__companion/pair", show)
     app.router.add_get("/__companion/status", status)
     app.router.add_get("/__companion/log", log_page)

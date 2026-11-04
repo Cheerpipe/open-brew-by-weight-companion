@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Push probe</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 16px;
+        max-width: 480px;
+      }
+
+      button {
+        display: block;
+        font: inherit;
+        margin: 12px 0;
+        padding: 12px;
+        width: 100%;
+      }
+
+      dt {
+        font-weight: 600;
+        margin-top: 8px;
+      }
+
+      dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Push probe</h1>
+    <p>
+      On iPhone or iPad, add this page to your Home Screen and open it from there. Send a delayed
+      push, then close the app and lock the phone.
+    </p>
+    <button id="enable" type="button">Turn on notifications</button>
+    <button id="now" type="button" disabled>Send now</button>
+    <button id="later" type="button" disabled>Send in 30 seconds</button>
+    <dl>
+      <dt>Secure page</dt>
+      <dd id="secure"></dd>
+      <dt>Opened as an installed app</dt>
+      <dd id="installed"></dd>
+      <dt>Service worker</dt>
+      <dd id="worker"></dd>
+      <dt>Push available</dt>
+      <dd id="push"></dd>
+      <dt>Permission</dt>
+      <dd id="permission"></dd>
+      <dt>Push service</dt>
+      <dd id="service">Not subscribed</dd>
+      <dt>Last delivery</dt>
+      <dd id="delivery">None yet</dd>
+      <dt>Last error</dt>
+      <dd id="error">None</dd>
+    </dl>
+    <script>
+      "use strict";
+      const VAPID_KEY = "@VAPID_KEY@";
+      const field = (id) => document.getElementById(id);
+      let subscriber = null;
+
+      function keyBytes() {
+        const text = VAPID_KEY.replace(/-/g, "+").replace(/_/g, "/");
+        return Uint8Array.from(atob(text), (letter) => letter.charCodeAt(0));
+      }
+
+      async function postJson(path, body) {
+        const answer = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const text = await answer.text();
+        if (!answer.ok) throw new Error(`${path}: ${answer.status} ${text}`);
+        return JSON.parse(text);
+      }
+
+      async function report(subscription) {
+        subscriber = (await postJson("subscribe", subscription.toJSON())).id;
+        field("service").textContent = new URL(subscription.endpoint).hostname;
+        field("now").disabled = field("later").disabled = false;
+        field("enable").disabled = true;
+      }
+
+      async function refresh() {
+        field("permission").textContent =
+          "Notification" in window ? Notification.permission : "Not available";
+        if (!subscriber) return;
+        const found = await (await fetch(`result?id=${subscriber}`)).json();
+        if (found) {
+          const when = new Date(found.at * 1000).toLocaleTimeString();
+          field("delivery").textContent = `${when}: ${found.status} ${found.detail}`;
+        }
+      }
+
+      function guarded(work) {
+        return async () => {
+          try {
+            await work();
+          } catch (failure) {
+            field("error").textContent = String(failure);
+          }
+          await refresh().catch(() => {});
+        };
+      }
+
+      function send(delayS) {
+        return guarded(async () => {
+          await postJson("send", { id: subscriber, delayS });
+          setTimeout(guarded(refresh), (delayS + 3) * 1000);
+        });
+      }
+
+      field("enable").addEventListener(
+        "click",
+        guarded(async () => {
+          if ((await Notification.requestPermission()) !== "granted") {
+            throw new Error("Notifications were not allowed");
+          }
+          const registration = await navigator.serviceWorker.ready;
+          await report(
+            await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: keyBytes(),
+            }),
+          );
+        }),
+      );
+      field("now").addEventListener("click", send(0));
+      field("later").addEventListener("click", send(30));
+
+      field("secure").textContent = window.isSecureContext ? "Yes" : "No";
+      field("installed").textContent = matchMedia("(display-mode: standalone)").matches
+        ? "Yes"
+        : "No";
+      field("push").textContent = "PushManager" in window ? "Yes" : "No";
+      guarded(async () => {
+        if (!("serviceWorker" in navigator)) {
+          field("worker").textContent = "Not available";
+          return;
+        }
+        await navigator.serviceWorker.register("sw.js");
+        const registration = await navigator.serviceWorker.ready;
+        field("worker").textContent = "Active";
+        const existing = await registration.pushManager?.getSubscription();
+        if (existing) await report(existing);
+      })();
+    </script>
+  </body>
+</html>

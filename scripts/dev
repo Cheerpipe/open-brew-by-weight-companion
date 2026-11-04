@@ -91,6 +91,8 @@ RISK_PATHS = {
         "companion/lamarzocco.py",
         "companion/logstore.py",
         "companion/mux.py",
+        "companion/push-probe.html",
+        "companion/pushprobe.py",
         "companion/relay.py",
         "companion/screens.py",
         "companion/service.py",
@@ -131,7 +133,12 @@ TEST_IMAGE = f"{IMAGE}:test"
 RUNTIME_IMAGE = f"{IMAGE}:validate"
 DOCKERFILE_LABEL = "org.openbrewbyweight.companion.dockerfile"
 COVERAGE_FAIL_UNDER = 85  # The whole suite's branch coverage; raise it as tests grow.
-PAGES = ("companion/page.html", "companion/ui-off.html", "gateway/setup.html")
+PAGES = (
+    "companion/page.html",
+    "companion/push-probe.html",
+    "companion/ui-off.html",
+    "gateway/setup.html",
+)
 PRETTIER_PATHS = (*PAGES, "gateway/strings.json", "package.json", "scripts/lint")
 SHELL_SCRIPTS = ("setup", "gateway/entrypoint.sh")
 # The Dockerfile installs these exports of uv.lock: the runtime, and pytest and coverage.

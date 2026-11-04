@@ -3,8 +3,8 @@
   "private": true,
   "description": "Lint and format tooling for the companion's web pages",
   "scripts": {
-    "format:web": "prettier --write companion/page.html companion/ui-off.html gateway/setup.html gateway/strings.json",
-    "format:web:check": "prettier --check companion/page.html companion/ui-off.html gateway/setup.html gateway/strings.json"
+    "format:web": "prettier --write companion/page.html companion/push-probe.html companion/ui-off.html gateway/setup.html gateway/strings.json",
+    "format:web:check": "prettier --check companion/page.html companion/push-probe.html companion/ui-off.html gateway/setup.html gateway/strings.json"
   },
   "prettier": {
     "printWidth": 100
