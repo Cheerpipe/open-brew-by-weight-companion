@@ -85,9 +85,10 @@ class Screens:
         return None
 
     def end_plain_streams(self) -> None:
-        """Paired now: a page proxied before stops being in clear and reconnects by the relay."""
+        """Paired now: a page proxied before stops being in clear and claims again by the relay,
+        which a 4001 alone would tell it another window took over."""
         for ws in list(self.plain):
-            _ = self.companion.spawn(ws.close(code=aiohttp.WSCloseCode.GOING_AWAY))
+            _ = self.companion.spawn(ws.close(code=4001, message=b"paired"))
 
     def _no_session(self) -> web.Response:
         return _error(
