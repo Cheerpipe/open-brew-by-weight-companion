@@ -692,6 +692,7 @@ class View:
             s is not screen for s in self.members(self.standing)
         )
         record.params, record.group, record.request = params, group, request
+        self._forget(old)
         self.mux.attribute(screen)
         if self.standing is None:
             record.synced = False
@@ -711,13 +712,25 @@ class View:
 
     def unsubscribe(self, screen: Screen, settle: bool = True) -> None:
         record = screen.records[self.kind]
+        old = record.group
         record.group, record.synced, record.replica = None, False, False
+        self._forget(old)
         record.serial += 1
         for fetch in [self.inflight, *self.queue]:
             if fetch:
                 fetch.targets = [target for target in fetch.targets if target[0] is not screen]
         if settle:
             self.settle()
+
+    def _forget(self, group: Group | None) -> None:
+        """A group's last screen left: its page copy goes, once no fetch is still filling it."""
+        if (
+            group is not None
+            and group != self.standing
+            and not self.members(group)
+            and not (self.inflight and self.inflight.group == group)
+        ):
+            self.pages.pop(group, None)
 
     def resync(self, screen: Screen) -> None:
         record = screen.records[self.kind]
@@ -986,6 +999,7 @@ class View:
             if fetch.timer:
                 fetch.timer.cancel()
             self.inflight = None
+            self._forget(fetch.group)
             self.pump()
 
 

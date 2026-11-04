@@ -962,6 +962,30 @@ async def scenario() -> None:
             assert status["screens"] == 0
             assert status["relay"] == "ready"
             assert status["owner"] is True
+            # --- A group nobody holds keeps no page copy ------------------------------------------
+            view = the_mux.views["history"]
+            a = await screen(0).open([{**HISTORY, "request": 2}])
+            session = await asyncio.wait_for(fake.sessions.get(), 2)
+            await a.next("home")
+            await a.next("card")
+            await a.next("history")
+            c = await screen(2).open([{**HISTORY, "request": 3, "dir": "asc", "types": ["rinse"]}])
+            await c.next("home")
+            await c.next("card")
+            await c.next("history")
+            assert view.pages
+            await c.send({"op": "history", "on": False})
+            await eventually(lambda: not view.pages)
+            await all_closed(a, c)
+            # A fetch still filling it keeps it: a screen that joins now needs the whole page.
+            gone: mux.Group = (0, 0, "gone", ())
+            view.pages[gone], view.inflight = ([], False), mux.Fetch(gone, gone, None)
+            view._forget(gone)
+            assert gone in view.pages
+            view.inflight = None
+            view._forget(gone)
+            assert gone not in view.pages
+
             await pages.close()
             await companion.relay.close()
     await server.close()
