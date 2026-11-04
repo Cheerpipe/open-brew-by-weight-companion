@@ -6,6 +6,7 @@ requests arrive signed and sealed, JSON answers leave sealed under the response 
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import hmac
 import json
@@ -137,6 +138,11 @@ class Controller:
         self.relay_gets, self.auth_required = 0, False
         self.corrupt_body, self.corrupt_reply = False, False  # A man in the middle, for tests.
         self.features = 1  # `relayFeatures`; 0 is a controller that predates the field.
+        self.files = {"/": gzip.compress(b"shell", mtime=0), "/app.js": b"app", "/sw.js": b"worker"}
+        self.tag = "abcd1234"
+        self.served: dict[
+            str, bytes
+        ] = {}  # What the wire carries instead, for a man in the middle.
         self.active: str | None = None  # activeWebUiClientId_
         # Each request's method, URI, headers, body and identity.
         self.requests: list[tuple[str, str, dict[str, str], bytes, Identity | None]] = []
@@ -277,11 +283,37 @@ class Controller:
             body=sealed,
         )
 
+    def asset_list(self) -> dict[str, object]:
+        """The firmware's generated list, for `files` as they are."""
+
+        def row(path: str) -> list[object]:
+            body = self.files[path]
+            digest = base64.b64encode(hashlib.sha256(body).digest()).decode()
+            return [path, digest, len(body), "text/javascript", False]
+
+        return {
+            "v": 1,
+            "tag": self.tag,
+            "etag": f'"1.0.0.{self.tag}"',
+            "csp": "default-src 'self'",
+            "shell": row("/")[1:3],
+            "shellPaths": ["/", "/stats"],
+            "assets": [row(path) for path in self.files if path != "/"],
+        }
+
+    async def file(self, request: web.Request) -> web.Response:
+        path = request.path
+        if path not in self.files:
+            return web.Response(status=404)
+        return web.Response(body=self.served.get(path, self.files[path]))
+
     # --- REST -------------------------------------------------------------------------
     async def api(self, request: web.Request) -> web.StreamResponse:
         identity, refusal = self.admit(request)
         if refusal is not None:
             return refusal
+        if request.path == "/api/v1/companion/assets":
+            return self.answer(identity, self.asset_list())
         if request.path == "/api/v1/integration/info":
             info: Frame = {
                 "apiVersion": 1,
@@ -398,6 +430,7 @@ class Controller:
         app.router.add_post("/api/v1/companion/relay", self.relay_post)
         app.router.add_get("/api/v1/ui/ui-stream", self.stream)
         app.router.add_route("*", "/api/{tail:.*}", self.api)
+        app.router.add_get("/{tail:.*}", self.file)
         return app
 
 

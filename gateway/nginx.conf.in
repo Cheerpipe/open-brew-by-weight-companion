@@ -33,8 +33,16 @@ http {
 
   # Web UI shell and assets, so each device's first load and the loads after an
   # OTA reach the controller once instead of once per device. Keyed by the full
-  # URI: the controller only marks ?v=<asset tag> URLs cacheable.
-  proxy_cache_path @RUN@/cache levels=1:2 keys_zone=webui:1m max_size=16m inactive=30d use_temp_path=off;
+  # URI: only ?v=<asset tag> URLs are cacheable. It holds only what the companion
+  # verified, which is why nothing here fetches from the controller itself.
+  proxy_cache_path @RUN@/assets levels=1:2 keys_zone=webui:1m max_size=16m inactive=30d use_temp_path=off;
+
+  # A browser checking a service worker at any path but the real one: the
+  # companion answers each time, so one left behind can be removed.
+  map "$http_service_worker:$uri" $stray_worker {
+    default "";
+    "~^script:(?!/sw\.js$)" 1;
+  }
 
   # Setup page and certificate downloads, reachable before the CA is trusted.
   server {
@@ -177,18 +185,17 @@ http {
       proxy_read_timeout 5m;
     }
 
-    # Versioned assets: cached for as long as the controller allows, which is
-    # a year for ?v=<asset tag> and never for any other URL. The controller
-    # always sends gzip, so one copy serves every Accept-Encoding.
+    # Versioned assets, verified by the companion: cached for a year for
+    # ?v=<asset tag> and never for any other URL. The controller always sends
+    # gzip, so one copy serves every Accept-Encoding.
     location ~ ^/(app\.(js|css)|js/[a-z-]+\.js|manifest\.webmanifest|icons/icon-192\.png|favicon\.ico|apple-touch-icon[^/]*)$ {
       @OFFLINE@
-      proxy_pass http://@UPSTREAM@;
-      proxy_set_header Host @UPSTREAM@;
-      proxy_set_header Origin http://@UPSTREAM@;
+      proxy_pass http://unix:@RUN@/companion.sock;
       proxy_http_version 1.1;
-      proxy_connect_timeout 5s;
       proxy_cache webui;
       proxy_cache_lock on;
+      proxy_cache_bypass $stray_worker;
+      proxy_no_cache $stray_worker;
       proxy_ignore_headers Vary;
       add_header X-Gateway-Cache $upstream_cache_status always;
     }
@@ -200,30 +207,23 @@ http {
       @OFFLINE@
       auth_request /__companion/ui-gate;
       error_page 403 = /__companion/ui-off;
-      proxy_pass http://@UPSTREAM@;
-      proxy_set_header Host @UPSTREAM@;
-      proxy_set_header Origin http://@UPSTREAM@;
+      proxy_pass http://unix:@RUN@/companion.sock;
       proxy_http_version 1.1;
-      proxy_connect_timeout 5s;
       proxy_cache webui;
       proxy_cache_lock on;
-      proxy_ignore_headers Cache-Control Expires Vary;
-      proxy_cache_valid 200 1s;
+      proxy_cache_bypass $stray_worker;
+      proxy_no_cache $stray_worker;
+      proxy_ignore_headers Vary;
       proxy_cache_revalidate on;
       proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
       add_header X-Gateway-Cache $upstream_cache_status always;
     }
 
-    # Anything else the Web UI loads. The controller only answers requests addressed to itself.
+    # Anything else: the companion decides, and a paired one sends it to the Web UI.
     location / {
       @OFFLINE@
-      proxy_pass http://@UPSTREAM@;
-      proxy_set_header Host @UPSTREAM@;
-      proxy_set_header Origin http://@UPSTREAM@;
+      proxy_pass http://unix:@RUN@/companion.sock;
       proxy_http_version 1.1;
-      proxy_set_header Connection close;
-      proxy_buffering off;
-      proxy_connect_timeout 5s;
     }
   }
 }

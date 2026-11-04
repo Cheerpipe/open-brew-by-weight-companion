@@ -147,8 +147,7 @@ def test_certificates_rendering_and_status(monkeypatch: pytest.MonkeyPatch) -> N
 
         gateway.write_site(cfg, data, run, ("Cafe Bar", ("192.168.1.50", 8080)))
         conf = (run / "nginx.conf").read_text()
-        assert "proxy_pass http://192.168.1.50:8080;" in conf
-        assert "proxy_set_header Origin http://192.168.1.50:8080;" in conf
+        assert "192.168.1.50" not in conf, "nginx never fetches what a browser runs by itself"
         assert "return 503;" not in conf
         page = (run / "www/index.en.html").read_text()
         assert "Found Cafe Bar at 192.168.1.50:8080" in page
@@ -182,7 +181,7 @@ def test_certificates_rendering_and_status(monkeypatch: pytest.MonkeyPatch) -> N
         )
         assert "Open Brew by Weight Companion · Kitchen server" in page
         assert 'fetch("https://openbrewbyweight-secure.local/__companion/ping"' in page
-        assert f"proxy_cache_path {run}/cache " in conf
+        assert f"proxy_cache_path {run}/assets " in conf
         api = conf.split("    location / {", 1)[1].split("\n    }", 1)[0]
         assert "proxy_pass" in api, "API and WebSocket traffic is never cached"
         assert "proxy_cache" not in api, "API and WebSocket traffic is never cached"

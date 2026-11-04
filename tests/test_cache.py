@@ -3,30 +3,37 @@
 Needs the image's nginx, so it runs inside the test image (./scripts/dev test).
 """
 
+import asyncio
 import base64
 import gzip
 import hashlib
 import http.client
 import http.server
+import json
 import socket
-import socketserver
 import ssl
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, override
+from typing import TYPE_CHECKING, TypedDict, cast, override
+
+import aiohttp
+from aiohttp import web
 
 import gateway
+from companion.assets import UNREGISTER, Assets
 
 if TYPE_CHECKING:
     import pytest
 
+    from companion.service import Companion
+
 NGINX = "/usr/sbin/nginx"  # The image's nginx, run against the rendered configuration.
 
 TAG = "abcd1234"
-ASSETS = {"/app.js", "/js/runtime.js"}
+ASSETS = {"/app.js", "/js/launch.js", "/js/runtime.js", "/js/settings.js"}
 SHELLS = {"/", "/stats"}
 
 
@@ -35,18 +42,44 @@ class State(TypedDict):
     requests: list[tuple[str, str | None, str | None]]  # (path, Host, If-None-Match)
     companion: list[tuple[str, str, dict[str, str]]]  # (method, path, headers)
     ui: bool
+    tampered: set[str]
 
 
-state: State = {"release": "1.0.0", "requests": [], "companion": [], "ui": True}
+state: State = {"release": "1.0.0", "requests": [], "companion": [], "ui": True, "tampered": set()}
 lock = threading.Lock()
 
 
 def shell_body() -> bytes:
-    return gzip.compress(f'<html data-fw="{state["release"]}">'.encode())
+    return gzip.compress(f'<html data-fw="{state["release"]}">'.encode(), mtime=0)
+
+
+def asset_body(path: str) -> bytes:
+    return gzip.compress(path.encode(), mtime=0)
+
+
+def digest(body: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(body).digest()).decode()
+
+
+def asset_list() -> dict[str, object]:
+    """What the firmware's generated list says, for its current release."""
+    return {
+        "v": 1,
+        "tag": TAG,
+        "etag": f'"{state["release"]}.{TAG}"',
+        "csp": "default-src 'self'",
+        "shell": [digest(shell_body()), len(shell_body())],
+        "shellPaths": sorted(SHELLS),
+        "assets": [
+            [path, digest(asset_body(path)), len(asset_body(path)), "text/javascript", True]
+            for path in sorted(ASSETS)
+        ]
+        + [["/sw.js", digest(shell_body()), len(shell_body()), "text/javascript", True]],
+    }
 
 
 class Controller(http.server.BaseHTTPRequestHandler):
-    """Answers like the firmware's rootHandler and serveWebAsset, plus one API route."""
+    """Answers like the firmware's rootHandler and serveWebAsset, with headers worth ignoring."""
 
     protocol_version = "HTTP/1.1"
 
@@ -68,97 +101,150 @@ class Controller(http.server.BaseHTTPRequestHandler):
             state["requests"].append(
                 (self.path, self.headers.get("Host"), self.headers.get("If-None-Match"))
             )
-        path, _, query = self.path.partition("?")
-        gzipped = {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
-        if path == "/api/v1/status":
-            self.reply(
-                200,
-                b'{"ok":true}',
-                {"Content-Type": "application/json", "Cache-Control": "public, max-age=60"},
-            )
-        elif path in SHELLS or path == "/sw.js":
-            etag = f'"{state["release"]}.{TAG}"'
-            control = (
-                "no-cache" if path == "/sw.js" else "public, max-age=86400, stale-if-error=604800"
-            )
-            status = 304 if self.headers.get("If-None-Match") == etag else 200
-            self.reply(status, shell_body(), {**gzipped, "Cache-Control": control, "ETag": etag})
+        path = self.path.partition("?")[0]
+        gzipped = {
+            "Content-Encoding": "gzip",
+            "Vary": "Accept-Encoding",
+            "Cache-Control": "public, max-age=99",
+            "Service-Worker-Allowed": "/",
+        }
+        if path in SHELLS or path == "/sw.js":
+            self.reply(200, shell_body(), {**gzipped, "Content-Type": "text/html"})
         elif path in ASSETS:
             time.sleep(0.3)  # Long enough for concurrent misses to overlap.
-            current = query == f"v={TAG}"
-            headers = {
-                **gzipped,
-                "Cache-Control": "public, max-age=31536000, immutable" if current else "no-store",
-            }
-            if current:
-                headers["ETag"] = f'"{TAG}"'
-            self.reply(200, gzip.compress(path.encode()), headers)
+            body = asset_body(path)
+            if path in state["tampered"]:
+                body = gzip.compress(b"steal(password)", mtime=0)
+            self.reply(200, body, gzipped)
         else:
             self.reply(404, b"", {})
 
 
-class Companion(http.server.BaseHTTPRequestHandler):
-    """The companion service's socket: the Web UI gate and notice, the API and the live updates."""
+class Reply:
+    """A relayed answer, opened: what Relay.request returns."""
 
-    protocol_version = "HTTP/1.1"
+    status = 200
 
-    @override
-    def log_message(self, format: str, *args: object) -> None:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def release(self) -> None:
         pass
 
-    def do_GET(self) -> None:
-        with lock:
-            state["companion"].append((self.command, self.path, dict(self.headers)))
-        if self.path == "/__companion/ui-gate":
-            self.send_response(204 if state["ui"] else 403)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-        elif self.headers.get("Upgrade", "").lower() == "websocket":
-            accept = base64.b64encode(
-                hashlib.sha1(
-                    (
-                        self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-                    ).encode()
-                ).digest()
+
+class StubRelay:
+    """The relay as the assets module sees it; its seal is covered by test_relay."""
+
+    client_id = "abcdefabcdefabcd"
+
+    def __init__(self) -> None:
+        self.body_key: bytes | None = b"session 1"
+        self.mode, self.features, self.is_paired, self.answers = "ready", 1, True, True
+        self.http: aiohttp.ClientSession | None = None
+
+    def session(self) -> aiohttp.ClientSession:
+        if self.http is None:
+            self.http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True), auto_decompress=False
             )
-            self.send_response(101)
-            self.send_header("Upgrade", "websocket")
-            self.send_header("Connection", "Upgrade")
-            self.send_header("Sec-WebSocket-Accept", accept.decode())
-            self.end_headers()
-            self.close_connection = True
-        elif self.path == "/api/v1/history":
+        return self.http
+
+    async def paired(self) -> bool:
+        return self.is_paired
+
+    async def renew(self) -> str:
+        return self.mode
+
+    async def request(self, *_: object) -> Reply | None:
+        return Reply(json.dumps(asset_list()).encode()) if self.answers else None
+
+
+class StubCompanion:
+    def __init__(self, port: int) -> None:
+        self.relay, self.port = StubRelay(), port
+
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+
+class Standin:
+    """The companion service's socket: real assets, with its other routes stood in for."""
+
+    def __init__(self, port: int) -> None:
+        self.companion = StubCompanion(port)
+        self.assets = Assets(cast("Companion", self.companion))
+
+    async def record(self, request: web.Request) -> None:
+        with lock:
+            state["companion"].append((request.method, request.path, dict(request.headers)))
+
+    async def gate(self, request: web.Request) -> web.Response:
+        await self.record(request)
+        return web.Response(status=204 if state["ui"] else 403)
+
+    async def notice(self, request: web.Request) -> web.Response:
+        await self.record(request)
+        return web.Response(text="notice", content_type="text/html")
+
+    async def stream(self, request: web.Request) -> web.StreamResponse:
+        await self.record(request)
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close()
+        return ws
+
+    async def api(self, request: web.Request) -> web.Response:
+        await self.record(request)
+        if request.path == "/api/v1/history":
             body = (
                 b'{"shots":['
                 + b",".join(b'{"id":%d,"doseG":360,"timeMs":28000}' % i for i in range(80))
                 + b"]}"
             )
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == "/api/v1/ota/image":
-            body = b"\0" * 4096
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            body = b"notice" if self.path == "/__companion/ui-off" else b'{"ok":true}'
-            self.send_response(200)
-            self.send_header(
-                "Content-Type", "text/html" if body == b"notice" else "application/json"
+            return web.Response(
+                body=body, content_type="application/json", headers={"Cache-Control": "no-store"}
             )
-            self.send_header("Cache-Control", "public, max-age=60")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        if request.path == "/api/v1/ota/image":
+            return web.Response(body=b"\0" * 4096, content_type="application/octet-stream")
+        return web.json_response({"ok": True}, headers={"Cache-Control": "public, max-age=60"})
 
-    def do_POST(self) -> None:
-        self.do_GET()
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/__companion/ui-gate", self.gate)
+        app.router.add_get("/__companion/ui-off", self.notice)
+        app.router.add_get("/api/v1/ui/ui-stream", self.stream)
+        app.router.add_route("*", "/api/{tail:.*}", self.api)
+        app.router.add_route("*", "/{tail:.*}", self.assets.serve)
+        return app
+
+
+class Served:
+    """The stand-in on the companion's socket, on its own thread and loop."""
+
+    def __init__(self, standin: Standin, socket_path: Path) -> None:
+        self.standin, self.socket_path = standin, socket_path
+        self.loop = asyncio.new_event_loop()
+        self.runner = web.AppRunner(standin.app())
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+        asyncio.run_coroutine_threadsafe(self.start(), self.loop).result(5)
+
+    async def start(self) -> None:
+        await self.runner.setup()
+        await web.UnixSite(self.runner, str(self.socket_path)).start()
+        await asyncio.to_thread(self.socket_path.chmod, 0o666)
+
+    async def finish(self) -> None:
+        await self.runner.cleanup()
+        http = self.standin.companion.relay.http
+        if http is not None:
+            await http.close()
+
+    def stop(self) -> None:
+        asyncio.run_coroutine_threadsafe(self.finish(), self.loop).result(5)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(5)
+        self.loop.close()
 
 
 def free_port() -> int:
@@ -194,9 +280,9 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         gateway.ensure_certificates(cfg, data)
         gateway.write_site(cfg, data, run, ("Fake", ("127.0.0.1", controller_port)))
-        companion = socketserver.ThreadingUnixStreamServer(str(run / "companion.sock"), Companion)
-        (run / "companion.sock").chmod(0o666)
-        threading.Thread(target=companion.serve_forever, daemon=True).start()
+        standin = Standin(controller_port)
+        relay = standin.companion.relay
+        served = Served(standin, run / "companion.sock")
         nginx = subprocess.Popen([NGINX, "-c", str(run / "nginx.conf"), "-g", "daemon off;"])
         try:
             for _ in range(100):
@@ -224,6 +310,8 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
             assert (status, headers["x-gateway-cache"]) == (200, "MISS")
             assert headers["content-encoding"] == "gzip"
             assert gzip.decompress(body) == b"/app.js"
+            assert "service-worker-allowed" not in headers, "headers come from the list"
+            assert headers["cache-control"] == "public, max-age=31536000, immutable"
             status, headers, body = get(
                 f"/app.js?v={TAG}", **{"Accept-Encoding": "gzip, deflate, br, zstd"}
             )
@@ -232,9 +320,9 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
                 "HIT",
                 b"/app.js",
             )
-            assert len(upstream(f"/app.js?v={TAG}")) == 1
+            assert len(upstream("/app.js")) == 1
             assert get(f"/app.js?v={TAG}", **{"If-None-Match": f'"{TAG}"'})[0] == 304
-            assert len(upstream(f"/app.js?v={TAG}")) == 1, (
+            assert len(upstream("/app.js")) == 1, (
                 "a browser revalidation is answered by the gateway"
             )
 
@@ -249,12 +337,43 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
             for thread in threads:
                 thread.join()
             assert [result[0] for result in results] == [200] * 5
-            assert len(upstream(f"/js/runtime.js?v={TAG}")) == 1
+            assert len(upstream("/js/runtime.js")) == 1
 
             # URLs the controller marks no-store are never kept: bare paths and other asset tags.
             for path in ("/app.js", "/app.js?v=old"):
+                before = len(upstream("/app.js"))
                 assert [get(path)[1]["x-gateway-cache"] for _ in range(2)] == ["MISS", "MISS"]
-                assert len(upstream(path)) == 2
+                assert len(upstream("/app.js")) == before + 2
+
+            # Anything else goes to the Web UI, and nothing reaches the controller for it.
+            status, headers, _ = get("/evil.js")
+            assert (status, headers["location"]) == (302, "/")
+            assert not upstream("/evil.js")
+
+            # A changed file never reaches a browser, nor the cache.
+            state["tampered"].add("/js/settings.js")
+            for _ in range(2):
+                status, headers, body = get(f"/js/settings.js?v={TAG}")
+                assert status == 502
+                assert b"steal" not in body
+                assert b"Do not sign in" in body
+            assert standin.assets.refused == 2
+            assert standin.assets.last_refused == "/js/settings.js"
+            state["tampered"].clear()
+            status, _, body = get(f"/js/settings.js?v={TAG}")
+            assert (status, gzip.decompress(body)) == (200, b"/js/settings.js")
+
+            # A worker left behind is told to go, even at a cached URL; the real one is not.
+            worker = {"Service-Worker": "script"}
+            status, headers, body = get(f"/app.js?v={TAG}", **worker)
+            assert status == 200
+            assert body == UNREGISTER
+            assert headers["service-worker-allowed"] == "/"
+            assert headers["x-gateway-cache"] == "BYPASS"
+            assert get(f"/app.js?v={TAG}")[2] != UNREGISTER, "the cache is untouched"
+            assert get("/evil.js", **worker)[2] == UNREGISTER
+            assert get("/api/v1/x.js", **worker)[0] == 200, "the API is not a place for a worker"
+            assert get("/sw.js", **worker)[2] == shell_body()
 
             # The API goes to the companion with the browser's address, never cached; its own
             # routes never do.
@@ -322,18 +441,23 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
             assert stream[0][2]["Upgrade"] == "websocket"
             assert stream[0][2]["X-Real-IP"] == "127.0.0.1"
 
-            # The shell is revalidated on every load: a 304 from the controller when unchanged...
+            # The shell is revalidated on every load, without the controller when unchanged...
             status, headers, body = get("/")
             assert (status, headers["x-gateway-cache"]) == (200, "MISS")
             assert b"1.0.0" in gzip.decompress(body)
+            assert headers["content-security-policy"] == "default-src 'self'"
+            assert headers["cache-control"] == "public, max-age=86400, stale-if-error=604800"
+            assert "x-accel-expires" not in headers
             get("/sw.js")
+            fetched = len(upstream("/"))
             time.sleep(2.1)  # Past the 1 s validity, counted in whole seconds.
             status, headers, body = get("/")
             assert (status, headers["x-gateway-cache"]) == (200, "REVALIDATED")
             assert b"1.0.0" in gzip.decompress(body)
-            assert upstream("/")[-1][2] == f'"1.0.0.{TAG}"'
-            # ...and the new copy right after an OTA.
+            assert len(upstream("/")) == fetched
+            # ...and the new copy right after an OTA, whose reboot starts a new relay session.
             state["release"] = "1.1.0"
+            relay.body_key = b"session 2"
             time.sleep(2.1)  # Past the 1 s validity, counted in whole seconds.
             status, headers, body = get("/")
             assert status == 200
@@ -353,20 +477,42 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
             assert gates[-1][2]["X-Original-URI"] == "/stats"
             state["ui"] = True
 
+            # A controller from before the list works, unverified, and still with known headers.
+            relay.features = 0
+            status, headers, body = get("/stats?legacy=1")
+            assert (status, gzip.decompress(body)[:5]) == (200, b"<html")
+            assert "service-worker-allowed" not in headers
+            relay.features = 1
+
+            # Before pairing: files pass, nothing is kept, and no worker can register.
+            relay.is_paired = False
+            for _ in range(2):
+                status, headers, _ = get("/stats?unpaired=1")
+                assert (status, headers["x-gateway-cache"]) == (200, "MISS")
+                assert headers["cache-control"] == "no-store"
+            assert get("/sw.js?unpaired=1", **worker)[0] == 403
+            assert get("/evil.js?unpaired=1", **worker)[0] == 403
+            relay.is_paired = True
+
             # Controller off: the last shell, worker and assets still load; nothing else does.
             controller.shutdown()
             controller.server_close()
+            relay.body_key, relay.answers = None, False
             time.sleep(2.1)  # Past the 1 s validity, counted in whole seconds.
+            status, headers, body = get("/")
+            assert (status, headers["x-gateway-cache"]) == (200, "REVALIDATED")
+            assert b"1.1.0" in gzip.decompress(body)
+            assert get(f"/app.js?v={TAG}")[1]["x-gateway-cache"] == "HIT"
+            standin.assets.listing = None  # A restarted companion: only its cache still knows.
+            time.sleep(2.1)
             status, headers, body = get("/")
             assert (status, headers["x-gateway-cache"]) == (200, "STALE")
             assert b"1.1.0" in gzip.decompress(body)
             assert get("/sw.js")[1]["x-gateway-cache"] == "STALE"
-            assert get(f"/app.js?v={TAG}")[1]["x-gateway-cache"] == "HIT"
-            assert get("/stats")[0] == 502, "a page never loaded through the gateway has no copy"
+            assert get("/stats")[0] == 503, "a page never loaded through the gateway has no copy"
 
             assert {host for _, host, _ in state["requests"]} == {f"127.0.0.1:{controller_port}"}
         finally:
             nginx.terminate()
             nginx.wait()
-            companion.shutdown()
-            companion.server_close()
+            served.stop()

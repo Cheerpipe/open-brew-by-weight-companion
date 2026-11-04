@@ -146,12 +146,11 @@ replaces the earlier copy.
 
 ## Forwarding
 
-nginx terminates HTTPS (TLS 1.2 and 1.3, HTTP/2). It forwards the Web UI's
-pages and files to the controller over plain HTTP on your network, with
-`Host` and `Origin` set to the controller's address because the controller
-only answers requests addressed to itself. The API (`/api/`) and the live
-updates (`/api/v1/ui/ui-stream`) go to the companion service instead, with
-the browser's address in `X-Real-IP`, unbuffered, so live readings flow
+nginx terminates HTTPS (TLS 1.2 and 1.3, HTTP/2) and sends everything to the
+companion service: the Web UI's pages and files, verified as described under
+[Verified files](#verified-files), and the API (`/api/`) and live updates
+(`/api/v1/ui/ui-stream`), with the browser's address in `X-Real-IP`,
+unbuffered, so live readings flow
 without delay; it relays them for every screen (see
 [Screens and the relay](#screens-and-the-relay)). Larger JSON answers, such
 as the shot list, curves and statistics, leave compressed (`gzip`) for every
@@ -161,6 +160,34 @@ Web UI work through the companion as well: their 64 KiB chunks go through
 it, signed like any other request. The companion's own controller routes
 (`/api/v1/companion/…`) answer `404` through the secure address, except
 `/api/v1/companion/admin`, which Admin → Companion sends.
+
+### Verified files
+
+Whatever a browser loads from this address runs with everything the address
+protects, and the files reach the companion from the controller over plain HTTP,
+where a device on your network could change them. So each file is checked first:
+
+- The controller publishes a list with the hash of every file, sent sealed
+  under the pairing, so a device on the network cannot change it. It describes
+  the running firmware, and the companion reads it again in each relay session.
+- A file is served only if its bytes match its hash. Its headers, the content
+  security policy included, come from the list rather than from the network.
+  One that does not match is read once more against a new list, in case the
+  firmware was updated. Then it is refused and never kept: the browser gets the
+  last verified copy or an error saying not to sign in, and the refusal is counted
+  in **Diagnostic → This screen** and logged.
+- A path that is not on the list goes to the Web UI, without asking the controller.
+- A browser checking a service worker at any other path than `/sw.js` is told to
+  remove it, so one planted earlier cannot stay.
+
+Before pairing there is nothing to check against: files pass as they are, nothing
+is kept and no service worker can register, so nothing from that time outlives
+the pairing, and a page cannot be installed as an app until then. A controller
+from before the list keeps working unverified, and Diagnostic says so.
+
+This protects what the browser runs. It does not cover answers streamed in chunks
+(the Wi-Fi scan, time zones, downloads), which are data, nor the controller's own
+address, which stays plain HTTP.
 
 ### Web UI cache
 
@@ -173,9 +200,9 @@ update, when every phone loads the new Web UI at the same time.
   firmware update changes those URLs, so the new files are fetched at once.
   When several devices ask for a file the gateway does not have yet, only one
   request reaches the controller.
-- **Pages and the service worker** are checked with the controller on each
+- **Pages and the service worker** are checked with the companion on each
   load, at most once every couple of seconds. An unchanged page costs the
-  controller a short "not modified" answer instead of the whole page.
+  controller nothing: the list already says it is current.
 - **While the controller is off**, the gateway serves the last copy of each
   page it loaded, so a new device can still open the Web UI. Everything else
   waits for the controller.
@@ -189,7 +216,7 @@ update, when every phone loads the new Web UI at the same time.
 The API, live readings and firmware updates are never cached. Every cached
 response carries an `X-Gateway-Cache` header (`HIT`, `MISS`, `REVALIDATED`,
 `STALE`…) that shows where it came from. The cache lives in
-`/run/gateway/cache` inside the container, holds at most 16 MB, drops files
+`/run/gateway/assets` inside the container, holds at most 16 MB, drops files
 unused for 30 days, and starts empty when the container is recreated.
 
 When the gateway restarts, it serves the controller it last found, over

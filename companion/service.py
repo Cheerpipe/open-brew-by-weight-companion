@@ -27,6 +27,7 @@ from cryptography.exceptions import InvalidTag
 
 from . import VERSION, crypto, dashboard, log, logger, stats
 from .archive import FETCH_MAX, Archive, UnavailableError
+from .assets import Assets
 from .lamarzocco import LaMarzocco
 from .link import ErasedError, LinkClosedError, open_link
 from .logstore import EXPORT_VERSION, FIRST_PAGE, FORMAT, LogStore
@@ -208,6 +209,7 @@ class Companion:
         self.lm = upstream(self.store, self)
         self.relay = Relay(self)
         self.screens = Screens(self, self.relay)
+        self.assets = Assets(self)
 
     def spawn[T](self, coroutine: Coroutine[object, None, T]) -> asyncio.Task[T]:
         task = asyncio.create_task(coroutine)
@@ -1106,6 +1108,7 @@ class Companion:
             "push": self.push.status_facts(),
             "relay": self.relay.mode,
             "relayFeatures": self.relay.features,
+            "assets": self.assets.facts() if pairing else None,
             **self.screens.mux.status(),
         }
 
@@ -1792,6 +1795,7 @@ def web_app(companion: Companion) -> web.Application:
     app.router.add_post("/__companion/push/remove", push_remove)
     app.router.add_post("/__companion/push/test", push_test)
     app.router.add_post("/__companion/push/ack", push_ack)
+    app.router.add_route("*", "/{tail:.*}", companion.assets.serve)
     return app
 
 

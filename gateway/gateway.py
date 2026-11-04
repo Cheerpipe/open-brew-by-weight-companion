@@ -21,6 +21,7 @@ import os
 import plistlib
 import queue
 import re
+import shutil
 import signal
 import socket
 import ssl
@@ -746,6 +747,8 @@ def write_site(cfg: Config, data: Path, run: Path, target: Target | None) -> Non
     for name, content in files.items():
         (www / name).write_bytes(content)
         (www / name).chmod(0o644)
+    # A cache from before the Web UI's files were verified may hold changed ones.
+    shutil.rmtree(run / "cache", ignore_errors=True)
     (run / "nginx.conf").write_text(
         fill(
             (HERE / "nginx.conf.in").read_text(),
@@ -754,7 +757,6 @@ def write_site(cfg: Config, data: Path, run: Path, target: Target | None) -> Non
                 "DATA": data,
                 "HTTP_PORT": cfg["http_port"],
                 "HTTPS_PORT": cfg["https_port"],
-                "UPSTREAM": upstream(target),
                 "OFFLINE": "" if target else "return 503;",
             },
         )
