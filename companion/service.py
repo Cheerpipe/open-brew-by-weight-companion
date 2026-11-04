@@ -1105,6 +1105,7 @@ class Companion:
             "archive": archive_facts,
             "push": self.push.status_facts(),
             "relay": self.relay.mode,
+            "relayFeatures": self.relay.features,
             **self.screens.mux.status(),
         }
 

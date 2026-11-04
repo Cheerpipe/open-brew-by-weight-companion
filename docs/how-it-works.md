@@ -384,6 +384,14 @@ info = "obbw-relay-body-v2")` for sealing. A
 forgotten companion receives `erase`, signed like the link's, and then
 deletes its pairing; an unsigned "not paired" only stops La Marzocco.
 
+The first request of every session reads `GET /api/v1/integration/info`, always
+as relay version 2, to learn `relayFeatures`. From 1 the session's requests use
+version 3, where each sealed answer also covers its request's `q` and its
+status, so an answer held back from one request opens for no other. A sealed
+answer with exactly the older keys means a controller from before this, which
+stays on version 2 with a line in the log. Anything else opens no session: a
+device on the network cannot lower it, only make it wait.
+
 **Signed and sealed requests.** Each request to the controller carries
 `X-OBBW-Relay: 2 <q> <addr> <screen> <mac>`: a counter from 1 per relay
 session, the browser's address from nginx, the browser's own

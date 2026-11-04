@@ -2,6 +2,7 @@
 for the controller, read past a size limit, end a background task, or leave half a certificate."""
 
 import asyncio
+import base64
 import ipaddress
 import os
 import shutil
@@ -12,15 +13,16 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography import x509
+from cryptography.exceptions import InvalidTag
 from test_gateway import BASE, TXT
-from test_relay import ID, SECRET, Idle
+from test_relay import ID, SECRET, Idle, V
 from zeroconf import BadTypeInNameException, ServiceStateChange
 
 import fake_controller
@@ -609,3 +611,138 @@ def test_api_answers_cannot_become_pages(tmp_path: Path, monkeypatch: pytest.Mon
             assert "Content-Security-Policy" not in reply.headers
 
     asyncio.run(scenario())
+
+
+def test_an_answer_held_back_opens_for_no_other_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-34: someone in the middle keeps a victim's sealed sign-in answer and delivers it for their
+    own request: under relay version 3 it opens for nobody, so the token stays sealed."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            assert rig.companion.relay.version == 3
+            sealed, held = rig.fake.answer, list[web.Response]()
+
+            def middle(
+                identity: fake_controller.Identity | None, payload: object, status: int = 200
+            ) -> web.Response:
+                answer = sealed(identity, payload, status)
+                if not held:
+                    held.append(answer)
+                    return web.Response(status=503, text="lost")
+                return web.Response(
+                    content_type="application/json",
+                    body=held[0].body,
+                    headers={"X-OBBW-Enc": held[0].headers["X-OBBW-Enc"]},
+                )
+
+            monkeypatch.setattr(rig.fake, "answer", middle)
+            victim = {"X-WebUI-Client": "aaaaaaaaaaaaaaaa", "X-Real-IP": "192.168.1.20"}
+            attacker = {"X-WebUI-Client": "bbbbbbbbbbbbbbbb", "X-Real-IP": "192.168.1.66"}
+            reply = await rig.client.post("/api/v1/auth/login", json={}, headers=victim)
+            assert reply.status == 503
+            reply = await rig.client.post("/api/v1/auth/login", json={}, headers=attacker)
+            assert reply.status == 502
+            assert "token" not in await reply.text()
+
+    asyncio.run(scenario())
+
+
+def test_an_older_controller_keeps_working_on_version_2(tmp_path: Path) -> None:
+    """Any update order: a sealed info answer without the field is a controller from before it."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            rig.fake.features = 0
+            assert await rig.companion.relay.handshake() == "ready"
+            assert rig.companion.relay.version == 2
+            assert rig.companion.relay.features == 0
+            reply = await rig.client.get("/api/v1/auth", headers=CLIENT)
+            assert reply.status == 200
+            assert rig.fake.requests[-1][4] is not None
+            assert rig.fake.requests[-1][4]["version"] == 2
+            status = await rig.client.get("/__companion/status")
+            assert (await status.json())["relayFeatures"] == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {"apiVersion": 1},  # Another sealed answer, swapped in.
+        {
+            "apiVersion": 1,
+            "name": "x",
+            "firmwareVersion": "1",
+            "authRequired": False,
+            "relayFeatures": 0,
+        },
+        ["not", "an", "object"],
+    ],
+)
+def test_nothing_else_lowers_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, info: object
+) -> None:
+    """Only exactly info's shape can mean an older controller; anything else opens no session."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            sealed = rig.fake.answer
+
+            def swapped(
+                identity: fake_controller.Identity | None, payload: object, status: int = 200
+            ) -> web.Response:
+                told = info if isinstance(payload, dict) and "authRequired" in payload else payload
+                return sealed(identity, told, status)
+
+            monkeypatch.setattr(rig.fake, "answer", swapped)
+            await rig.companion.relay.handshake()
+            assert rig.companion.relay.key is None
+            reply = await rig.client.get("/api/v1/auth", headers=CLIENT)
+            assert reply.status == 502
+
+    asyncio.run(scenario())
+
+
+def test_an_unsealed_info_opens_no_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+
+            def plain(
+                _identity: fake_controller.Identity | None, payload: object, status: int = 200
+            ) -> web.Response:
+                return web.json_response(payload, status=status)
+
+            monkeypatch.setattr(rig.fake, "answer", plain)
+            await rig.companion.relay.handshake()
+            assert rig.companion.relay.key is None
+
+    asyncio.run(scenario())
+
+
+def test_bound_answer_vectors() -> None:
+    """The shared vectors: the v3 signature and an answer sealed by the firmware's rule."""
+    relay = cast("dict[str, Any]", V["relay"])
+    bound = cast("dict[str, Any]", relay["boundRequest"])
+    key, body_key = bytes.fromhex(relay["key"]), bytes.fromhex(relay["bodyKey"])
+    version, q, addr, screen, tag = bound["header"].split(" ")
+    assert version == "3"
+    assert (
+        crypto.relay_tag(
+            key, bound["method"], bound["uri"], int(q), addr, screen, bound["session"], 3
+        )
+        == tag
+    )
+    assert crypto.relay_answer_aad(int(q), 401).decode() == bound["answerAad"]
+    sealed = base64.b64decode(bound["answerSealed"])
+    additional = crypto.relay_answer_aad(int(q), 401)
+    counter = bound["answerCounter"]
+    assert crypto.relay_open(body_key, counter, sealed, additional).decode() == bound["answerPlain"]
+    with pytest.raises(InvalidTag):
+        crypto.relay_open(body_key, counter, sealed, crypto.relay_answer_aad(int(q) + 1, 401))
+    with pytest.raises(InvalidTag):
+        crypto.relay_open(body_key, counter, sealed, crypto.relay_answer_aad(int(q), 200))
+    with pytest.raises(InvalidTag):
+        crypto.relay_open(body_key, counter, sealed)

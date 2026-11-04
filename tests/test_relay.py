@@ -198,7 +198,8 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         assert headers["X-WebUI-Client"] == relay.client_id
         assert fake.active == relay.client_id
         assert identity == {
-            "q": 1,
+            "q": 2,  # The session's first request, reading the features, took 1.
+            "version": 3,
             "addr": "192.168.1.50",
             "screen": A,
             "session": "token",
@@ -219,7 +220,7 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         status, _, _ = await call("GET", "/api/v1/time/zones?q=a%20b&x=1")
         assert status == 200, "the URI goes as sent"
         assert fake.requests[-1][1] == "/api/v1/time/zones?q=a%20b&x=1", "the URI goes as sent"
-        assert relayed(fake)["q"] == 2
+        assert relayed(fake)["q"] == 3
         assert fake.requests[-1][2]["X-WebUI-Client"] == relay.client_id
         status, _, body = await call("GET", "/api/v1/status/admin", client=B)
         assert status == 409
@@ -300,7 +301,7 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         assert status == 202, "the tampered answer cost one session already"
         assert fake.handshakes == 3, "the tampered answer cost one session already"
         assert json.loads(fake.requests[-1][3]) == {"patch": {"a": 1}}
-        assert relayed(fake)["q"] == 1
+        assert relayed(fake)["q"] == 2
 
         # A stale answer that arrives after another request replaced the session keeps the new
         # one: this request retries with it, and nothing pays for a further handshake.
@@ -326,7 +327,7 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         relay.counter = relay_module.COUNTER_MAX
         await call("GET", "/api/v1/auth")
         assert fake.handshakes == 5
-        assert relayed(fake)["q"] == 1
+        assert relayed(fake)["q"] == 2
 
         # --- The link opens only when the controller says a feature needs it [D4]
         link = companion.spawn(companion.run_link())

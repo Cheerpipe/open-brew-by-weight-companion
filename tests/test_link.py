@@ -194,6 +194,7 @@ class Controller:
             "the companion proves the pairing secret"
         )
         self.relay_body = crypto.relay_body_key(crypto.relay_key(SECRET, self.RELAY_CHALLENGE, nc))
+        self.relay_answers = 0
         return web.json_response(
             {
                 "mac": crypto.b64(crypto.mac(SECRET, b"Q", self.RELAY_CHALLENGE, nc)),
@@ -208,14 +209,16 @@ class Controller:
         if not self.auth_up:
             return web.json_response({"error": "UNAVAILABLE"}, status=503)
         relay = request.headers.get("X-OBBW-Relay", "").split()
-        answer = {
+        answer: dict[str, object] = {
             "loginRequired": self.login,
             "signedIn": bool(request.headers.get("X-WebUI-Session")),
             "adminUnlocked": len(relay) == 5 and relay[3] == self.admin_screen,
         }
-        if not relay:
-            return web.json_response(answer)
-        self.relay_answers += 1  # Every whole JSON answer to a relayed request is sealed.
+        return self.sealed(answer) if relay else web.json_response(answer)
+
+    def sealed(self, answer: dict[str, object]) -> web.Response:
+        """Every whole JSON answer to a relayed request is sealed."""
+        self.relay_answers += 1
         return web.Response(
             content_type="application/json",
             headers={"X-OBBW-Enc": str(self.relay_answers)},
@@ -224,6 +227,12 @@ class Controller:
                 json.dumps(answer).encode(),
                 None,
             ),
+        )
+
+    async def info(self, _request: web.Request) -> web.Response:
+        """A controller from before `relayFeatures`: the link scenario runs on relay version 2."""
+        return self.sealed(
+            {"apiVersion": 1, "name": "Cafe Bar", "firmwareVersion": "1.0.0", "authRequired": False}
         )
 
     async def link(self, request: web.Request) -> web.StreamResponse:
@@ -351,6 +360,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
     app.router.add_get("/api/v1/companion/relay", fake.relay_get)
     app.router.add_post("/api/v1/companion/relay", fake.relay_post)
     app.router.add_get("/api/v1/auth", fake.auth)
+    app.router.add_get("/api/v1/integration/info", fake.info)
     server = TestServer(app, host="127.0.0.1")
     await server.start_server()
     assert server.port is not None

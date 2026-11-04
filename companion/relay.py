@@ -34,6 +34,11 @@ if TYPE_CHECKING:
 type Mode = Literal["passthrough", "ready", "disabled"]
 
 PATH = "/api/v1/companion/relay"
+INFO = "/api/v1/integration/info"
+# Exactly what an older controller's info answers: only info has `authRequired`, so no other sealed
+# answer can pass for it, and a device on the network cannot make a newer controller look older.
+LEGACY_INFO = frozenset({"apiVersion", "name", "firmwareVersion", "authRequired"})
+BOUND_ANSWERS = 1  # `relayFeatures` from which a controller binds answers (relay version 3).
 PROTOCOL = 1
 CTX_SESSION, CTX_PASSWORD, CTX_BODY = 0, 1, 2
 COUNTER_MAX = 0xFFFFFFFF
@@ -117,6 +122,8 @@ class Relay:
         self.counter, self.generation = 0, 0
         self.answers: set[int] = set()
         self.answers_floor = 0
+        self.version = 2  # The relay version of this session's requests.
+        self.features: int | None = None  # What the controller offers; None until it said.
         self.lock = asyncio.Lock()
         self.http: aiohttp.ClientSession | None = None
         self.reported: str | None = None
@@ -269,8 +276,25 @@ class Relay:
                 )
                 return
             key = crypto.relay_key(secret, challenge, nonce)
-            self.key, self.body_key, self.counter = key, crypto.relay_body_key(key), 0
-            self.answers, self.answers_floor = set(), 0
+            body_key = crypto.relay_body_key(key)
+            self.answers, self.answers_floor, self.counter = set(), 0, 0
+            self.features = None
+            if reply.get("ui") is not False:
+                self.features = await self._read_features(key, body_key)
+                if self.features is None:
+                    self.reset(True)
+                    self._note(
+                        "the controller did not say what it offers; "
+                        "the Web UI through the companion waits for a secure session"
+                    )
+                    return
+                if self.features < BOUND_ANSWERS:
+                    self._note(
+                        "the controller's firmware cannot tie answers to their requests; "
+                        "update it to protect sign-ins from a device on this network"
+                    )
+            self.version = 3 if (self.features or 0) >= BOUND_ANSWERS else 2
+            self.key, self.body_key = key, body_key
             self.renew_at = float("-inf")
             self._set_mode("disabled" if reply.get("ui") is False else "ready")
             self._set_link(reply.get("link") is True)
@@ -299,6 +323,46 @@ class Relay:
                 f"HTTP {status} {reply.get('error') or ''}".strip()
             )
 
+    async def _read_features(self, key: bytes, body_key: bytes) -> int | None:
+        """What this controller offers, read before anything else under a new session and always
+        as version 2, which every controller takes: its answer cannot change within a boot, so it
+        needs no binding. None without a sealed answer of exactly the right shape: nothing else
+        may lower what the session uses."""
+        self.counter = 1
+        tag = crypto.relay_tag(key, "GET", INFO, 1, NO_ADDRESS, self.client_id, "")
+        try:
+            reply = await self._send(
+                "GET",
+                INFO,
+                {
+                    "X-WebUI-Client": self.client_id,
+                    "X-OBBW-Relay": f"2 1 {NO_ADDRESS} {self.client_id} {tag}",
+                },
+                b"",
+            )
+            try:
+                counter = int(reply.headers.get(SEALED_RESPONSE_HEADER, ""))
+                if reply.status != 200 or reply.data is None:
+                    return None
+                info = json.loads(crypto.relay_open(body_key, counter, reply.data))
+            finally:
+                reply.release()
+        except aiohttp.ClientError, TimeoutError, OSError, ValueError, InvalidTag:
+            return None
+        self.answers.add(counter)
+        if not isinstance(info, dict):
+            return None
+        features = info.get("relayFeatures")
+        if set(info) == LEGACY_INFO:
+            return 0
+        return (
+            features
+            if type(features) is int
+            and features >= 1
+            and set(info) == {*LEGACY_INFO, "relayFeatures"}
+            else None
+        )
+
     # --- Requests --------------------------------------------------------------
     def admit(
         self, method: str, uri: str, addr: str, screen: str, session: str = ""
@@ -317,8 +381,8 @@ class Relay:
             if session == ""
             else crypto.b64(crypto.relay_seal(self.body_key, CTX_SESSION, q, session.encode()))
         )
-        tag = crypto.relay_tag(self.key, method, uri, q, addr, screen, sealed)
-        return f"2 {q} {addr} {screen} {tag}", q, sealed
+        tag = crypto.relay_tag(self.key, method, uri, q, addr, screen, sealed, self.version)
+        return f"{self.version} {q} {addr} {screen} {tag}", q, sealed
 
     def header(
         self, method: str, uri: str, addr: str, screen: str, session: str = ""
@@ -379,7 +443,7 @@ class Relay:
             # The keys this request was signed and sealed with: another screen's
             # request may rotate the session while this one is in flight, and the
             # answer still has to open with the keys that asked.
-            body_key = self.body_key
+            body_key, version = self.body_key, self.version
             if value is None or body_key is None:
                 return None
             headers = self.forwarded(incoming, self.client_id if rewrite else None)
@@ -407,7 +471,7 @@ class Relay:
                 reply.release()
                 self.forget(body_key)
                 continue
-            await self._open(reply, body_key)
+            await self._open(reply, body_key, crypto.relay_answer_aad(q, reply.status), version)
             return reply
         return None
 
@@ -429,11 +493,12 @@ class Relay:
             self.answers.discard(self.answers_floor)
         return True
 
-    async def _open(self, reply: Reply, body_key: bytes) -> None:
+    async def _open(self, reply: Reply, body_key: bytes, additional: bytes, version: int) -> None:
         """Open a sealed answer; a seal that does not open is never delivered. The controller seals
         every whole JSON answer it sends to a relayed request, so one that claims success without a
         seal did not come from it. Refusals grant nothing and may come before admission, and
-        streamed JSON (a list too long to seal) is never read here."""
+        streamed JSON (a list too long to seal) is never read here. Under version 3 the seal also
+        names this request and status, so an answer held back from another request cannot open."""
         counter = reply.headers.get(SEALED_RESPONSE_HEADER)
         if counter is None and (reply.data is None or reply.status >= 400):
             return
@@ -449,7 +514,9 @@ class Relay:
             if sealed is None:  # Too large to read whole, so it cannot open either.
                 raise ValueError("the sealed answer is too large")
             number = int(counter)
-            reply.data = crypto.relay_open(body_key, number, sealed)
+            reply.data = crypto.relay_open(
+                body_key, number, sealed, additional if version >= 3 else None
+            )
             if not self._fresh(body_key, number):
                 raise ValueError("a sealed answer seen before")
         except (InvalidTag, ValueError, TypeError) as error:
