@@ -120,15 +120,32 @@ def relay_seal(body_key: bytes, context: int, counter: int, plaintext: bytes) ->
     return AESGCM(body_key).encrypt(relay_nonce(b"c", context, counter), plaintext, None)
 
 
-def relay_open(body_key: bytes, counter: int, sealed: bytes) -> bytes:
+def relay_answer_aad(q: int, status: int) -> bytes:
+    """What a sealed answer to a version 3 request also covers: the request and the status."""
+    return f"obbw-resp-v3\n{q}\n{status}".encode()
+
+
+def relay_open(
+    body_key: bytes, counter: int, sealed: bytes, additional: bytes | None = None
+) -> bytes:
     """A sealed response (context 3, controller to companion)."""
-    return AESGCM(body_key).decrypt(relay_nonce(b"f", 3, counter), sealed, None)
+    return AESGCM(body_key).decrypt(relay_nonce(b"f", 3, counter), sealed, additional)
 
 
 def relay_tag(
-    key: bytes, method: str, uri: str, counter: int, address: str, screen: str, session: str
+    key: bytes,
+    method: str,
+    uri: str,
+    counter: int,
+    address: str,
+    screen: str,
+    session: str,
+    version: int = 2,
 ) -> str:
     """The relayed request's MAC: 32 lowercase hex digits over the canonical string
-    (relay protocol 2: the session field is the sealed value exactly as sent)."""
-    canonical = f"obbw-relay-v2\n{method}\n{uri}\n{counter}\n{address}\n{screen}\n{session}\n"
+    (the session field is the sealed value exactly as sent; the version names the prefix, so a
+    header rewritten to another version fails)."""
+    canonical = (
+        f"obbw-relay-v{version}\n{method}\n{uri}\n{counter}\n{address}\n{screen}\n{session}\n"
+    )
     return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()[:32]

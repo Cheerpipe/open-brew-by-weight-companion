@@ -35,6 +35,7 @@ class Identity(TypedDict):
     """A relayed request as admission identifies it, its sealed values opened."""
 
     q: int
+    version: int
     addr: str
     screen: str
     session: str
@@ -74,9 +75,18 @@ def open_(key: bytes, direction: bytes, context: int, counter: int, sealed: byte
 
 
 def relay_tag(
-    key: bytes, method: str, uri: str, q: int, addr: str, screen: str, session: str
+    key: bytes,
+    method: str,
+    uri: str,
+    q: int,
+    addr: str,
+    screen: str,
+    session: str,
+    version: int = 2,
 ) -> str:
-    canonical = "\n".join(["obbw-relay-v2", method, uri, str(q), addr, screen, session]) + "\n"
+    canonical = (
+        "\n".join([f"obbw-relay-v{version}", method, uri, str(q), addr, screen, session]) + "\n"
+    )
     return hmac.new(key, canonical.encode(), hashlib.sha256).digest()[:16].hex()
 
 
@@ -126,6 +136,7 @@ class Controller:
         self.handshakes, self.stale_next = 0, False
         self.relay_gets, self.auth_required = 0, False
         self.corrupt_body, self.corrupt_reply = False, False  # A man in the middle, for tests.
+        self.features = 1  # `relayFeatures`; 0 is a controller that predates the field.
         self.active: str | None = None  # activeWebUiClientId_
         # Each request's method, URI, headers, body and identity.
         self.requests: list[tuple[str, str, dict[str, str], bytes, Identity | None]] = []
@@ -185,7 +196,7 @@ class Controller:
         parts = value.split(" ")
         if (
             len(parts) != 5
-            or parts[0] != "2"
+            or parts[0] not in ("2", "3")
             or not parts[1].isdigit()
             or not CLIENT.fullmatch(parts[3])
             or not re.fullmatch(r"[0-9a-f]{32}", parts[4])
@@ -200,7 +211,16 @@ class Controller:
             or self.kr is None
             or self.kb is None
             or tag
-            != relay_tag(self.kr, request.method, request.raw_path, q, addr, screen, raw_session)
+            != relay_tag(
+                self.kr,
+                request.method,
+                request.raw_path,
+                q,
+                addr,
+                screen,
+                raw_session,
+                int(parts[0]),
+            )
         ):
             self.stale_next = False
             return None, web.json_response({"error": "RELAY_STALE"}, status=401)
@@ -228,6 +248,7 @@ class Controller:
             return None, web.json_response({"error": "RELAY_DISABLED"}, status=403)
         return {
             "q": q,
+            "version": int(parts[0]),
             "addr": addr,
             "screen": screen,
             "session": session,
@@ -239,8 +260,13 @@ class Controller:
         if identity is None or self.kb is None:  # A relayed request found the session's keys.
             return web.json_response(payload, status=status, dumps=dumps)
         self.responses += 1
+        additional = (
+            f"obbw-resp-v3\n{identity['q']}\n{status}".encode()
+            if identity["version"] == 3
+            else None
+        )
         sealed = AESGCM(self.kb).encrypt(
-            nonce(b"f", 3, self.responses), dumps(payload).encode(), None
+            nonce(b"f", 3, self.responses), dumps(payload).encode(), additional
         )
         if self.corrupt_reply:
             sealed = sealed[:-1] + bytes((sealed[-1] ^ 1,))
@@ -256,6 +282,16 @@ class Controller:
         identity, refusal = self.admit(request)
         if refusal is not None:
             return refusal
+        if request.path == "/api/v1/integration/info":
+            info: Frame = {
+                "apiVersion": 1,
+                "name": "Cafe Bar",
+                "firmwareVersion": "1.0.0",
+                "authRequired": self.auth_required,
+            }
+            return self.answer(
+                identity, {**info, "relayFeatures": self.features} if self.features else info
+            )
         raw = await request.read()
         if self.corrupt_body and raw:  # Flip one sealed byte, as a listener on the wire could.
             raw = raw[:-1] + bytes((raw[-1] ^ 1,))
