@@ -565,3 +565,47 @@ def test_the_supervisor_moves_only_to_a_proved_address(
         ("adopted", "nginx", "impostor", "kept", "loopback", "moved"), True
     )
     assert ("192.168.1.66", 80) in asked
+
+
+def test_api_answers_cannot_become_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F-35: HTML from the controller's address never reaches a browser; only known headers do."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            rig.fake.active = CLIENT["X-WebUI-Client"]
+            sealed = rig.fake.answer
+
+            def html(
+                _identity: fake_controller.Identity | None, _payload: object, status: int = 200
+            ) -> web.Response:
+                return web.Response(status=status, text="<script>", content_type="text/html")
+
+            monkeypatch.setattr(rig.fake, "answer", html)
+            reply = await rig.client.get("/api/v1/status/admin", headers=CLIENT)
+            assert reply.status == 502
+            assert "<script>" not in await reply.text()
+
+            def planted(
+                identity: fake_controller.Identity | None, payload: object, status: int = 200
+            ) -> web.Response:
+                answer = sealed(identity, payload, status)
+                answer.headers["Service-Worker-Allowed"] = "/"
+                answer.headers["Clear-Site-Data"] = '"*"'
+                return answer
+
+            monkeypatch.setattr(rig.fake, "answer", planted)
+            reply = await rig.client.get("/api/v1/status/admin", headers=CLIENT)
+            assert reply.status == 200
+            assert "Service-Worker-Allowed" not in reply.headers
+            assert "Clear-Site-Data" not in reply.headers
+            assert reply.headers["X-Content-Type-Options"] == "nosniff"
+            assert reply.headers["Content-Security-Policy"] == "sandbox"
+            assert reply.headers["Cache-Control"] == "no-store"
+
+            reply = await rig.client.get("/api/v1/debug/export", headers=CLIENT)
+            assert reply.status == 200, "a download keeps its name and its encoding"
+            assert "attachment" in reply.headers["Content-Disposition"]
+            assert reply.headers["Content-Encoding"] == "gzip"
+            assert "Content-Security-Policy" not in reply.headers
+
+    asyncio.run(scenario())

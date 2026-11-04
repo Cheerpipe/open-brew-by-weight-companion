@@ -53,17 +53,18 @@ FORWARDED = (
     "X-OTA-Allow-Downgrade",
     "Content-Range",
 )
-HOP_BY_HOP = frozenset(
+# What the controller's API answers may carry to a browser. Nothing else passes, HTML above all.
+API_TYPES = frozenset(
     {
-        "connection",
-        "keep-alive",
-        "proxy-connection",
-        "transfer-encoding",
-        "te",
-        "trailer",
-        "upgrade",
-        "content-length",
+        "application/json",
+        "application/octet-stream",
+        "application/x-tar",
+        "text/csv",
+        "text/plain",
     }
+)
+API_HEADERS = frozenset(
+    {"cache-control", "content-disposition", "content-encoding", "content-type", "etag", "vary"}
 )
 # Sealed values stay out of the hop-by-hop set and of the browser's answer.
 SEALED_RESPONSE_HEADER = "X-OBBW-Enc"
@@ -497,8 +498,13 @@ def _error(data: bytes) -> object:
 
 
 def response_headers(reply: aiohttp.ClientResponse) -> list[tuple[str, str]]:
+    """Only what the Web UI's API answers use, under the companion's trusted origin: a device
+    answering from the controller's address cannot add a header the browser would act on. An answer
+    that is not a download can never become a page."""
+    kept = [(name, value) for name, value in reply.headers.items() if name.lower() in API_HEADERS]
+    attachment = "Content-Disposition" in reply.headers
     return [
-        (name, value)
-        for name, value in reply.headers.items()
-        if name.lower() not in HOP_BY_HOP and name != SEALED_RESPONSE_HEADER
+        *kept,
+        ("X-Content-Type-Options", "nosniff"),
+        *(() if attachment else (("Content-Security-Policy", "sandbox"),)),
     ]
