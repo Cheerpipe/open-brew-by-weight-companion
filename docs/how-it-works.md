@@ -510,7 +510,7 @@ single disk thread as the secrets).
   the budget without a vacuum. Each round then writes `companion.db.backup`
   with SQLite's online backup, on its own connections and thread.
 - **Access.** `GET /__companion/log` (newest-first pages: `?boot=&before=&limit=`
-  taken from the previous answer's opaque `next`, `limit` 1–500, answering
+  taken from the previous answer's opaque `next`, `limit` 1–2000, answering
   `entries`, `next`, `hasMore`; optional `level`, the levels kept as letters
   of `cewid`, `category` (one subsystem) and, on a first page, `at`: wall
   seconds, starting at the newest event at or before it, found through the

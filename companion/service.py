@@ -1172,7 +1172,7 @@ def web_app(companion: Companion) -> web.Application:
         try:
             boot = int(query.get("boot", FIRST_PAGE))
             before = int(query.get("before", FIRST_PAGE))
-            limit = min(max(int(query.get("limit", 100)), 1), 500)
+            limit = min(max(int(query.get("limit", 100)), 1), 2000)
             at = _wall(query.get("at"))
         except ValueError:
             return None
