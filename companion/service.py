@@ -540,6 +540,9 @@ class Companion:
                     "update the companion"
                 )
         elif kind == "cfg":
+            ui, mode = frame.get("ui"), self.relay.mode
+            if (ui is False and mode == "ready") or (ui is True and mode == "disabled"):
+                _ = self.spawn(self.relay.handshake())  # Changed from a direct page.
             self.cfg = {
                 "lm": frame.get("lm") is True,
                 "conn": "api" if frame.get("conn") == "api" else "ws",

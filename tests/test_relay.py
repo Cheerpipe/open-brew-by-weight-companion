@@ -336,6 +336,18 @@ async def relay_scenario(data: Path) -> None:
         ) as reply:
             assert reply.status == 204
 
+        # A switch changed from a direct page reaches an open link as a `cfg` frame.
+        fake.ui = False
+        await companion._on_frame({"t": "cfg", "ui": False})
+        await eventually(lambda: relay.mode == "disabled")
+        fake.ui = True
+        await companion._on_frame({"t": "cfg", "ui": True})
+        await eventually(lambda: relay.mode == "ready")
+        asked = fake.relay_gets
+        await companion._on_frame({"t": "cfg", "ui": True})
+        await asyncio.sleep(0.05)
+        assert fake.relay_gets == asked, "an unchanged switch costs no handshake"
+
         # --- A failed relay handshake while paired: refused, never in clear; the link always on --
         fake.mode = "none"
         assert await relay.handshake() == "passthrough"
