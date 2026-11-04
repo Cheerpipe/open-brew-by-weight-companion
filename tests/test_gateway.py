@@ -165,6 +165,8 @@ def test_certificates_rendering_and_status(monkeypatch: pytest.MonkeyPatch) -> N
         assert "location ^~ /__companion/log {" in plain, "the stored log never goes in clear"
         assert "HTTPS_REQUIRED" in plain, "the stored log never goes in clear"
         assert conf.count("location ^~ /__companion/log {") == 1
+        assert "location ^~ /__companion/push {" in plain, "notifications never go in clear"
+        assert conf.count("location ^~ /__companion/push {") == 1
         assert "location = /__companion/erase {" in plain, "erasing the pairing never goes in clear"
         assert conf.count("location = /__companion/erase {") == 1, (
             "erasing the pairing never goes in clear"

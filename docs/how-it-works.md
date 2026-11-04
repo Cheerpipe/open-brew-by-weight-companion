@@ -733,6 +733,40 @@ mux serves Shots and History from (`companion/mux.py`, `companion/pages.py`).
   dropped the exclusions, so a record one kept out is copied again while the
   controller holds it.
 
+### Notifications
+
+`companion/push.py` delivers Web Push and decides nothing else: the controller
+decides which events exist and when they fire, and the firmware's service worker
+holds all their text. An `ev` link frame's `d` is encrypted and sent unread to the
+subscriptions listing its `topic`, which are opaque strings the Web UI chose. A new
+event or wording needs no change here. The frames are in the firmware's
+`docs/COMPANION_LINK.md`.
+
+- **Keys and devices.** The VAPID key is derived from the companion's identity key, so
+  it needs no file. Up to 16 subscriptions live in `data/secrets/push.json` (0600), and the
+  last 50 events in `data/secrets/push-activity.json`; neither exists until a device
+  subscribes. An endpoint can address its device, so it is never logged or returned;
+  everything names a device by a hash of it. **Forget** erases both files; the erase
+  that keeps your history keeps them too.
+- **Asking.** With a device subscribed, the companion sends `ps` `on:true` on each
+  session's `cfg`, and `on:false` when the last one leaves. With none, the controller
+  sends no `ev`. `ps` waits for the end of a sync hold, like any sync request.
+- **Sending.** Encryption is RFC 8291 and the token RFC 8292, reused for an hour per push
+  service, so no account is needed. Sends go only to `fcm.googleapis.com`,
+  `*.push.apple.com`, `*.push.services.mozilla.com` and `*.notify.windows.com`, checked when
+  subscribing and when sending, with TLS verified and redirects not followed. 404 and 410
+  remove the subscription; 400, 401, 403 and 413 are reported and not retried; 429, 5xx and
+  network failures retry after 5, 30 and 120 s, honoring `Retry-After`, within the event's TTL.
+- **Routes.** Under `/__companion/push/`, HTTPS only (nginx refuses them in clear), JSON
+  only. `status` and `test` need a browser the controller would let open the Web UI. A new
+  device's `subscribe` needs that answer now; a known device refreshes with the controller
+  off. `unsubscribe` and `ack` accept the holder of the endpoint, so turning off works signed
+  out. `remove` (another device) needs Admin unlocked. `test` reaches only the asking
+  device, once within 2 s. `/__companion/status` carries `push`, with the public key only.
+
+A failure here stays here: it is recorded for **Diagnostic → Push** and never affects the
+link or the archive. Only a malformed `ev` closes the link, like any malformed frame.
+
 ### Status page and JSON
 
 `/__companion/` (and `/__companion/pair`) is the status and pairing page.
@@ -814,6 +848,7 @@ name). It asks for the controller's address only when nothing answers.
 | `companion/store.py` | The files in `data/secrets/`. |
 | `companion/logstore.py` | The owner of `data/companion.db`: the controller's log history, migrations, backup and erase. |
 | `companion/archive.py` | The shot and activation archive in the same database, and its sync. |
+| `companion/push.py` | Web Push delivery: keys, subscriptions, encryption and sending. |
 | `companion/index_mirror.py` | The controller's record index as the archive last received it, rebuilt from deltas and checked by `sum`. |
 | `companion/stats.py` | The Stats header over the whole history, ported from the firmware. |
 | `companion/page.html` | Status and pairing page, styled like the setup page. |

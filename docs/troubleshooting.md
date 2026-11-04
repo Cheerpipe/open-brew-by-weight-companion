@@ -199,6 +199,13 @@ controller is newer: the link keeps working with what both know. In both
 cases update the companion (`git pull && ./setup --yes`) and the controller
 to their latest releases.
 
+## A notification does not arrive
+
+Open **Diagnostic → Push** in the Web UI, through the companion. It shows where the
+notification stopped, and can send a sample to the device. The companion needs to reach
+the internet: if your network limits outgoing traffic, allow HTTPS to the push services
+in [how it works](how-it-works.md#notifications).
+
 ## La Marzocco stays on the controller's own connection
 
 The controller switches to the companion only at a quiet moment, never
