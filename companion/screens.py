@@ -163,6 +163,12 @@ class Screens:
         method, uri, path = request.method, request.raw_path, request.path
         client = request.headers.get("X-WebUI-Client", "")
         screen = client if CLIENT_ID.fullmatch(client) else None
+        if (
+            screen is None
+            and method not in ("GET", "HEAD")
+            and (self.relay.mode == "ready" or await self.relay.paired())
+        ):  # It would act under the identity of the session every screen shares.
+            return _error(400, "UI_CLIENT_INVALID", "A valid X-WebUI-Client is required")
         archive = self.companion.archive
         if (
             method == "GET"

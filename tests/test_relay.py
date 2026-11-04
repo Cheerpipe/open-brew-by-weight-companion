@@ -228,6 +228,16 @@ async def relay_scenario(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             "an unclaimed screen's refusal is not a takeover"
         )
 
+        # Without a client id a change is refused here; a read goes as on the controller itself.
+        seen = len(fake.requests)
+        status, _, body = await call("POST", "/api/v1/ui/claim", client="", json={})
+        assert status == 400
+        assert json.loads(body)["error"] == "UI_CLIENT_INVALID"
+        assert len(fake.requests) == seen
+        status, _, _ = await call("GET", "/api/v1/auth", client="")
+        assert status == 200
+        assert relayed(fake)["screen"] == relay.client_id
+
         # Addresses as nginx gives them.
         await call("GET", "/api/v1/auth", real_ip="fe80::1%eth0")
         assert relayed(fake)["addr"] == "fe80::1"

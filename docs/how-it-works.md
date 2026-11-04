@@ -459,7 +459,9 @@ Web UI waits for it: `lastCommand` holds one request, so another screen's change
 would hide the result from the screen that is waiting. A time sync holds nothing,
 since it never reaches `lastCommand`. `/api/v1/control/*`, Stop among them, joins
 no queue and goes at once. A request from a browser that left while it waited is
-dropped. A signed-out screen (a relayed logout or `401 AUTH_REQUIRED`) loses its
+dropped. A change with no valid `X-WebUI-Client` is refused with `400 UI_CLIENT_INVALID` while
+paired, so nothing acts under the session the screens share; such a read still goes
+through. A signed-out screen (a relayed logout or `401 AUTH_REQUIRED`) loses its
 claim and its live updates, closed with `4001`.
 
 **The relay ends.** When the relay session ends for good (a Forget, an erase, the
