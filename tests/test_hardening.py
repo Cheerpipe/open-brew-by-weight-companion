@@ -881,3 +881,41 @@ def test_diagnostic_says_an_older_controller_is_not_verified(tmp_path: Path) -> 
             assert facts["assets"]["legacy"] is True
 
     asyncio.run(scenario())
+
+
+def test_pairing_tells_a_proxied_window_it_keeps_control(tmp_path: Path) -> None:
+    """A window using the companion before pairing is not told another one took over."""
+
+    async def scenario() -> None:
+        async def stream(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.receive()
+            return ws
+
+        app = web.Application()
+        app.router.add_get("/api/v1/ui/ui-stream", stream)
+        server = TestServer(app, host="127.0.0.1")
+        await server.start_server()
+        Store(tmp_path).write("identity", {"id": ID, "key": "11" * 32})
+        async with aiohttp.ClientSession() as http:
+            companion = Companion("Kitchen server", tmp_path, http, Idle)
+            companion.pairing.auto = False
+            companion.set_controller(target_of(server))
+            client = TestClient(TestServer(web_app(companion)))
+            await client.start_server()
+            ws = await client.ws_connect("/api/v1/ui/ui-stream")
+            for _ in range(100):
+                if companion.screens.plain:
+                    break
+                await asyncio.sleep(0.01)
+            companion.screens.end_plain_streams()
+            closing = await ws.receive(timeout=3)
+            assert closing.type is aiohttp.WSMsgType.CLOSE
+            assert (closing.data, closing.extra) == (4001, "paired")
+            await ws.close()
+            await client.close()
+            await companion.relay.close()
+        await server.close()
+
+    asyncio.run(scenario())
