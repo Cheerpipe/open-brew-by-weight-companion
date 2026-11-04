@@ -14,6 +14,20 @@ services:
     image: openbrewbyweight-companion:local
     container_name: openbrewbyweight-companion
     restart: unless-stopped
+    # Only what nginx and the supervisor use: binding 80 and 443, starting nginx's workers as
+    # their own user, signalling them, and managing /data whoever owns it on the server.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
     environment:
       # The log's clock matches the controller's, so the two interleave.
       TZ: ${COMPANION_TZ:-UTC}

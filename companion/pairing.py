@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 PATH = "/api/v1/companion/pair"
 POLL_S = 1
+REQUEST_S = 600  # How long a request stays open, as the controller allows at most.
 REFUSALS = {
     "COMPANION_IGNORED": "ignored",
     "ALREADY_PAIRED": "already_paired",
@@ -41,7 +42,11 @@ class Pairing:
 
         False if none was sent.
         """
-        if self.companion.controller is None or (self.task and not self.task.done()):
+        if (
+            self.companion.controller is None
+            or self.state == "paired"  # A working pairing ends only by Forget in Admin.
+            or (self.task and not self.task.done())
+        ):
             return False
         if not manual and (not self.auto or self.state != "unpaired"):
             return False
@@ -63,12 +68,15 @@ class Pairing:
 
     async def _run(self) -> None:
         """Commit, then reveal: the key goes out only after the controller's key arrived; the code
-        after that."""
+        after that. Each attempt makes its own key: a key seen in an earlier attempt would let
+        someone in the middle search for a controller key that gives the code they need."""
         companion = self.companion
         if companion.controller is None:  # start() spawns this only for a known controller.
             return
         url = companion.base_url() + PATH
         self.state, self.code, key = "requesting", None, None
+        private = crypto.new_key()
+        public = crypto.public_point(private)
         request = {
             "id": companion.id,
             "name": companion.name,
@@ -76,7 +84,7 @@ class Pairing:
             "protocol": PROTOCOL,
         }
         status, reply = await companion.controller_request(
-            "POST", url, {**request, "commitment": crypto.b64(crypto.commitment(companion.public))}
+            "POST", url, {**request, "commitment": crypto.b64(crypto.commitment(public))}
         )
         if status != 202:
             self._refused(status, reply)
@@ -84,8 +92,10 @@ class Pairing:
             return
         self.state = "pending"
         expires = reply.get("expiresInS")
-        self.expires_at = time.monotonic() + int(
-            expires if isinstance(expires, int | float | str) and expires else 600
+        self.expires_at = time.monotonic() + (
+            min(expires, REQUEST_S)
+            if isinstance(expires, int | float) and expires > 0
+            else REQUEST_S
         )
         log(
             f"pairing requested from {companion.controller[0]};"
@@ -95,10 +105,10 @@ class Pairing:
             key = key or self._controller_key(reply)
             if key and self.code is None:
                 status, reply = await companion.controller_request(
-                    "POST", url, {**request, "publicKey": crypto.b64(companion.public)}
+                    "POST", url, {**request, "publicKey": crypto.b64(public)}
                 )
                 if status == 202:
-                    self.code = crypto.sas(companion.public, key)
+                    self.code = crypto.sas(public, key)
                 elif status is not None:
                     self._refused(status, reply)
                     return
@@ -114,9 +124,7 @@ class Pairing:
                 and self._controller_key(reply) in (None, key)
             ):
                 try:
-                    await companion.paired(
-                        crypto.pairing_secret(companion.key, companion.public, key)
-                    )
+                    await companion.paired(crypto.pairing_secret(private, public, key))
                 except OSError as error:
                     self.state = "error"
                     log(

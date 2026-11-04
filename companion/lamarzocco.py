@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import clip, crypto, dashboard, log
+from .relay import read_capped
 from .store import Account, Store, offload
 
 if TYPE_CHECKING:
@@ -30,6 +31,7 @@ API_ROOT = "https://lion.lamarzocco.io/api/customer-app"
 WS_URL = "wss://lion.lamarzocco.io/ws/connect"
 STOMP_HOST = "lion.lamarzocco.io"
 HTTP_TIMEOUT_S = 10
+MAX_ANSWER_BYTES = 1 << 20  # Far above any answer or STOMP frame the cloud sends.
 RENEW_AFTER_S = 50 * 60  # Tokens live 60 minutes; renewing at 50 keeps far more than 210 s in hand.
 RENEW_RETRY_S = 60
 PROBE_S = 5 * 60  # While reads are refused, one probe read this often, whatever the route.
@@ -346,12 +348,18 @@ class LaMarzocco:
             except AuthRejectedError:
                 self._reject()
                 return
+            # Whatever a malformed answer raises ends this connection, never the following.
             except (
                 TransportError,
                 aiohttp.ClientError,
                 TimeoutError,
                 ValueError,
                 OSError,
+                ArithmeticError,
+                AttributeError,
+                LookupError,
+                RecursionError,
+                TypeError,
             ) as error:
                 self._set_subscribed(False)
                 delay = RETRY_S[min(attempt, len(RETRY_S) - 1)]
@@ -399,7 +407,9 @@ class LaMarzocco:
                 allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S),
             ) as reply:
-                return reply.status, await reply.text()
+                return reply.status, (await read_capped(reply, MAX_ANSWER_BYTES)).decode(
+                    errors="replace"
+                )
         except (aiohttp.ClientError, TimeoutError, OSError) as error:
             why = clip(f"{type(error).__name__}: {error}")
             raise TransportError(f"{method} {path.rsplit('/', 1)[-1]}: {why}") from None
@@ -627,6 +637,8 @@ class LaMarzocco:
                         message.data if isinstance(message.data, str) else message.data.decode()
                     )
                     *frames, buffer = buffer.split("\0")
+                    if len(buffer) > MAX_ANSWER_BYTES:
+                        raise TransportError("La Marzocco sent an endless STOMP frame")
                     for frame in frames:
                         await self._stomp(ws, frame, destination, subscription)
             finally:

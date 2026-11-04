@@ -749,9 +749,11 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             verdict: dict[str, bool | None] = {"value": True}
             admin = {"value": True}
 
-            # (signed in, Admin unlocked for that screen), None when unreachable
-            async def allows(_headers: Mapping[str, str]) -> tuple[bool, bool] | None:
-                return None if verdict["value"] is None else (verdict["value"], admin["value"])
+            # (signed in, Admin unlocked for that screen, login off), None when unreachable
+            async def allows(_headers: Mapping[str, str]) -> tuple[bool, bool, bool] | None:
+                return (
+                    None if verdict["value"] is None else (verdict["value"], admin["value"], False)
+                )
 
             monkeypatch.setattr(companion, "_web_ui_allows", allows)
             pages = TestServer(web_app(companion), host="127.0.0.1")
@@ -999,7 +1001,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
                 patch.setattr(companion, "controller", ("Kitchen", ("127.0.0.1", 9)))
                 assert await Companion._web_ui_allows(
                     companion, {"X-WebUI-Client": "0123456789abcdef"}
-                ) == (True, False)
+                ) == (True, False, True)
             assert 30 in await ids(companion, "shots")
 
             # --- Access: reads keep a remembered grant; changes need the controller now --

@@ -77,6 +77,14 @@ configuration and reloads it without dropping connections. When the
 controller goes away, the last known address is kept, because a restarting
 controller announces itself again.
 
+mDNS and the network search are not authenticated, so an answer alone never
+moves a paired companion. Before adopting a new address, the service asks the
+device there to prove the pairing secret, the same proof a relay handshake
+uses, with a few tries for a controller still starting up. A device that cannot
+is ignored, and the log says so. Answers naming this host or another network
+are ignored too. Before pairing there is no secret to prove, so discovery
+decides; the verification code protects that step.
+
 ### Network traffic
 
 The controller shares one 2.4 GHz radio between Wi-Fi and the Bluetooth
@@ -205,9 +213,11 @@ controller's address when it starts and on every mDNS announcement.
 
 ### Pairing
 
-On first start the service creates its id and a P-256 pairing key in
-`data/secrets/`. They are independent of the certificate authority, so a new
-`COMPANION_HOSTNAME` keeps the pairing.
+On first start the service creates its id in `data/secrets/`. It is
+independent of the certificate authority, so a new `COMPANION_HOSTNAME` keeps
+the pairing. Each pairing attempt makes its own P-256 key, kept only in memory:
+a key already seen in an earlier attempt would let a device in the middle
+search for a key of its own that shows matching codes.
 
 1. When it knows a controller it is not paired with, it sends one
    `POST /api/v1/companion/pair` with its id, name, version and a
@@ -217,11 +227,13 @@ On first start the service creates its id and a P-256 pairing key in
    answer.
 2. While the request is pending, it asks for its state about once a second.
    Once the controller answers with the key it made for this request, the
-   service sends the same request again with its public key (the reveal).
+   service sends the same request again with this attempt's public key (the
+   reveal).
    Only when the controller accepts the reveal does it compute the
    six-digit code from the two public keys and show it on the page. Both
    keys are fixed before either side sees the other's, so a device in the
    middle cannot search for keys that would show matching codes.
+   While a pairing works, **Pair** does nothing: only Forget in Admin ends it.
 3. On approval both sides derive the pairing secret with ECDH and HKDF.
    Nothing secret crosses the network. The service keeps it in
    `secrets/pairing.json`.

@@ -68,6 +68,9 @@ HOP_BY_HOP = frozenset(
 # Sealed values stay out of the hop-by-hop set and of the browser's answer.
 SEALED_RESPONSE_HEADER = "X-OBBW-Enc"
 READ_LIMIT = 64 * 1024  # JSON answers are read whole: claims, commands and errors are small.
+# Sealed answers remembered per session: more than can ever be in flight, so one arriving
+# below them is old, not late.
+ANSWER_WINDOW = 256
 # Every relayed request is bounded (an OTA chunk is one 64 KiB POST, far under
 # this), matching nginx's own 5-minute proxy_read_timeout. The total does not
 # reach the two WebSockets: aiohttp drops the timer on upgrade, by design.
@@ -81,6 +84,16 @@ def address(text: str | None) -> str:
         return str(ipaddress.ip_address((text or "").split("%")[0]))
     except ValueError:
         return NO_ADDRESS
+
+
+async def read_capped(reply: aiohttp.ClientResponse, limit: int = READ_LIMIT) -> bytes:
+    """The whole body, or ValueError past `limit`, whatever the answer claims its length is."""
+    body = await reply.content.read(limit + 1)
+    while len(body) <= limit and (more := await reply.content.read(limit + 1)):
+        body += more
+    if len(body) > limit:
+        raise ValueError("the answer is too large")
+    return body
 
 
 class Reply(aiohttp.ClientResponse):
@@ -101,6 +114,8 @@ class Relay:
         self.key: bytes | None = None
         self.body_key: bytes | None = None
         self.counter, self.generation = 0, 0
+        self.answers: set[int] = set()
+        self.answers_floor = 0
         self.lock = asyncio.Lock()
         self.http: aiohttp.ClientSession | None = None
         self.reported: str | None = None
@@ -143,6 +158,39 @@ class Relay:
             log(state)
 
     # --- Handshake -------------------------------------------------------------
+    async def proves(self, base: str) -> bool:
+        """Whether the device at `base` holds the pairing secret, by the handshake's own proof (a
+        signed `erase` from a controller that forgot this companion counts). It changes nothing
+        here; a success only makes the controller start a new relay session."""
+        pairing = await offload(self.companion.store.pairing)
+        if pairing is None:
+            return True
+        url, secret, nonce = base + PATH, pairing["secret"], os.urandom(16)
+        status, reply = await self.companion.controller_request("GET", url)
+        forgot = status == 404 and reply.get("error") == "COMPANION_NOT_PAIRED"
+        try:
+            if not forgot and (status != 200 or reply.get("protocol") != PROTOCOL):
+                return False
+            challenge = bytes(16) if forgot else crypto.unb64(reply.get("challenge"), 16)
+            status, reply = await self.companion.controller_request(
+                "POST",
+                url,
+                {
+                    "id": self.companion.id,
+                    "nonce": crypto.b64(nonce),
+                    "mac": crypto.b64(crypto.mac(secret, b"R", challenge, nonce)),
+                },
+            )
+            if status == 200:
+                expected = crypto.mac(secret, b"Q", challenge, nonce)
+                return hmac.compare_digest(crypto.unb64(reply.get("mac"), 32), expected)
+            erase = reply.get("erase") if status == 404 else None
+            return bool(erase) and hmac.compare_digest(
+                crypto.unb64(erase, 32), crypto.mac(secret, b"E", nonce)
+            )
+        except ValueError:
+            return False
+
     async def handshake(self) -> Mode:
         """A new relay session; callers waiting at the same time share one."""
         generation = self.generation
@@ -221,6 +269,7 @@ class Relay:
                 return
             key = crypto.relay_key(secret, challenge, nonce)
             self.key, self.body_key, self.counter = key, crypto.relay_body_key(key), 0
+            self.answers, self.answers_floor = set(), 0
             self.renew_at = float("-inf")
             self._set_mode("disabled" if reply.get("ui") is False else "ready")
             self._set_link(reply.get("link") is True)
@@ -366,21 +415,42 @@ class Relay:
         if self.body_key is body_key:
             self.key, self.body_key = None, None
 
+    def _fresh(self, body_key: bytes, counter: int) -> bool:
+        """Each sealed answer opens once, so a recorded one replayed from the controller's address
+        is refused. An answer from the session before this one is not tracked: it was asked for."""
+        if body_key is not self.body_key:
+            return True
+        if counter <= self.answers_floor or counter in self.answers:
+            return False
+        self.answers.add(counter)
+        if len(self.answers) > ANSWER_WINDOW:
+            self.answers_floor = min(self.answers)
+            self.answers.discard(self.answers_floor)
+        return True
+
     async def _open(self, reply: Reply, body_key: bytes) -> None:
-        """Open a sealed answer; a seal that does not open is never delivered."""
+        """Open a sealed answer; a seal that does not open is never delivered. The controller seals
+        every whole JSON answer it sends to a relayed request, so one that claims success without a
+        seal did not come from it. Refusals grant nothing and may come before admission, and
+        streamed JSON (a list too long to seal) is never read here."""
         counter = reply.headers.get(SEALED_RESPONSE_HEADER)
-        if counter is None:
+        if counter is None and (reply.data is None or reply.status >= 400):
             return
         sealed = (
             reply.data
             if reply.data is not None
-            else (await reply.read() if (reply.content_length or 0) <= READ_LIMIT else None)
+            else (await read_capped(reply) if reply.content_length is not None else None)
         )
         reply.release()
         try:
+            if counter is None:
+                raise ValueError("a successful answer without a seal")
             if sealed is None:  # Too large to read whole, so it cannot open either.
                 raise ValueError("the sealed answer is too large")
-            reply.data = crypto.relay_open(body_key, int(counter), sealed)
+            number = int(counter)
+            reply.data = crypto.relay_open(body_key, number, sealed)
+            if not self._fresh(body_key, number):
+                raise ValueError("a sealed answer seen before")
         except (InvalidTag, ValueError, TypeError) as error:
             log("the controller's sealed answer did not open; starting a new relay session")
             self.forget(body_key)  # The next request makes a new session.
@@ -408,7 +478,8 @@ class Relay:
         reply.data = None
         if (
             reply.content_type == "application/json"
-            and (reply.content_length or 0) <= READ_LIMIT
+            and reply.content_length is not None  # Without a length it is a stream.
+            and reply.content_length <= READ_LIMIT
             and not any(
                 name in reply.headers for name in ("Content-Encoding", "Content-Disposition")
             )
