@@ -79,7 +79,7 @@ class Store:
         except OSError, ValueError:
             return None
 
-    def write(self, name: str, value: Mapping[str, object]) -> None:
+    def write(self, name: str, value: Mapping[str, object] | list[object]) -> None:
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.dir.chmod(0o700)
         temporary = self.dir / f".{name}.tmp"

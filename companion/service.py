@@ -19,7 +19,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, TypeGuard, overload
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, TypeGuard, cast, overload
 
 import aiohttp
 from aiohttp import web
@@ -31,6 +31,10 @@ from .lamarzocco import LaMarzocco
 from .link import ErasedError, LinkClosedError, open_link
 from .logstore import EXPORT_VERSION, FIRST_PAGE, FORMAT, LogStore
 from .pairing import Pairing
+from .push import MAX_EVENT_BYTES as PUSH_MAX_EVENT_BYTES
+from .push import MAX_KEY as PUSH_MAX_KEY
+from .push import MAX_TEST_DELAY_S as PUSH_MAX_TEST_DELAY_S
+from .push import Push, device_id, parse_subscription, parse_topics
 from .relay import CLIENT_ID, Relay, address
 from .screens import Screens
 from .store import Store, offload
@@ -47,7 +51,7 @@ RETRY_LATER_S = (
     15  # The controller is busy with its scale: a steady short retry, never a longer one.
 )
 FROM_CONTROLLER = frozenset(
-    {"cfg", "creds", "route", "hold", "cmd", "dev", "log", "rs", "rec", "trc"}
+    {"cfg", "creds", "route", "hold", "cmd", "dev", "log", "rs", "rec", "trc", "ev"}
 )
 RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT = 30, 50
 RETENTION_S = 24 * 3600
@@ -184,6 +188,7 @@ class Companion:
         self.log_unreachable = 0.0  # When the controller last could not answer that question.
         self.retention = (RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT)
         self.archive = Archive(self)  # The shot and activation archive, in the same store.
+        self.push = Push(self.store, self.key, http, self.spawn, self.post_sync)
         # Sync requests waiting for the end of a sync hold, and the hold the controller's `hold`
         # frames name: True during a shot (nothing crosses the link), None until the session's
         # first one.
@@ -272,6 +277,8 @@ class Companion:
         pairing the controller no longer recognizes keeps both: pairing that controller again
         reattaches to them (S4)."""
         await offload(self.store.erase_pairing)
+        if history:
+            await self.push.erase()
         self.lm.erase()
         self.creds_gen = None
         self.device_name = None  # It named the pairing, not this controller.
@@ -564,6 +571,11 @@ class Companion:
                     log(f"the log store could not keep the archive switch ({error})")
             await self._log_subscribe()
             self._report(force=True)
+            if self.push.saved["subscriptions"]:  # No `ps` in a session means none wanted.
+                self.push.announce()
+        elif kind == "ev":
+            if not self.push.on_event(frame):
+                raise LinkClosedError("PROTOCOL", "a malformed event")
         elif kind == "creds":
             await self._on_credentials(frame)
         elif kind == "route":
@@ -1054,6 +1066,7 @@ class Companion:
             },
             "log": log_facts,
             "archive": archive_facts,
+            "push": self.push.status_facts(),
             "relay": self.relay.mode,
             **self.screens.mux.status(),
         }
@@ -1601,6 +1614,112 @@ def web_app(companion: Companion) -> web.Application:
         await answer.write_eof()
         return answer
 
+    def _push_json_refused(request: web.Request) -> web.Response | None:
+        if request.content_type != "application/json":
+            return web.json_response({"error": "UNSUPPORTED_MEDIA_TYPE"}, status=415)
+        return None
+
+    async def _push_body(request: web.Request) -> dict[str, object]:
+        try:
+            body = await request.json()
+        except ValueError:
+            return {}
+        return cast("dict[str, object]", body) if isinstance(body, dict) else {}
+
+    async def _push_session_refused(
+        request: web.Request, live: bool = False, admin: bool = False
+    ) -> web.Response | None:
+        """Exactly who the controller lets open the Web UI (as the stored log asks); `live` and
+        `admin` need the controller's answer now."""
+        answer = await companion.ui_access(request.headers, live or admin)
+        if answer is None:
+            return web.json_response({"error": "CONTROLLER_UNREACHABLE"}, status=503)
+        if not (answer[0] if isinstance(answer, tuple) else answer):
+            return web.json_response({"error": "AUTH_REQUIRED"}, status=401)
+        if admin and isinstance(answer, tuple) and not answer[1]:
+            return web.json_response({"error": "ADMIN_LOCKED"}, status=401)
+        return None
+
+    async def push_status(request: web.Request) -> web.Response:
+        if answer := await _push_session_refused(request):
+            return answer
+        return web.json_response(companion.push.status(), headers=no_store)
+
+    async def push_subscribe(request: web.Request) -> web.Response:
+        """A new device needs a live sign-in; one the companion knows (the holder of its endpoint)
+        refreshes with the controller off."""
+        if answer := _push_json_refused(request):
+            return answer
+        body = await _push_body(request)
+        parsed = parse_subscription(body.get("subscription"))
+        topics = parse_topics(body.get("topics"))
+        label, old = body.get("label"), body.get("old")
+        if parsed is None or topics is None or not isinstance(label, str):
+            return web.json_response({"error": "BAD_SUBSCRIPTION"}, status=400)
+        known = companion.push.knows(parsed[0]) or companion.push.knows(old)
+        if not known and (answer := await _push_session_refused(request, live=True)):
+            return answer
+        ident = await companion.push.subscribe(parsed, topics, label, old)
+        if ident is None:
+            return web.json_response({"error": "TOO_MANY_DEVICES"}, status=409)
+        return web.json_response({"id": ident}, headers=no_store)
+
+    async def push_unsubscribe(request: web.Request) -> web.Response:
+        """Holding the endpoint is the proof: it works signed out and with the controller off."""
+        if answer := _push_json_refused(request):
+            return answer
+        endpoint = (await _push_body(request)).get("endpoint")
+        if isinstance(endpoint, str):
+            await companion.push.remove(device_id(endpoint))
+        return web.json_response({}, headers=no_store)
+
+    async def push_remove(request: web.Request) -> web.Response:
+        if answer := _push_json_refused(request):
+            return answer
+        if answer := await _push_session_refused(request, admin=True):
+            return answer
+        ident = (await _push_body(request)).get("id")
+        found = isinstance(ident, str) and await companion.push.remove(ident)
+        return web.json_response({"removed": found}, headers=no_store)
+
+    async def push_test(request: web.Request) -> web.Response:
+        if answer := _push_json_refused(request):
+            return answer
+        if answer := await _push_session_refused(request):
+            return answer
+        body = await _push_body(request)
+        endpoint, topic, data = body.get("endpoint"), body.get("topic"), body.get("d")
+        delay = body.get("delayS", 0)
+        if (
+            not isinstance(endpoint, str)
+            or not companion.push.knows(endpoint)
+            or not isinstance(topic, str)
+            or not isinstance(data, dict)
+            or len(json.dumps(data)) > PUSH_MAX_EVENT_BYTES
+            or type(delay) is not int
+            or not 0 <= delay <= PUSH_MAX_TEST_DELAY_S
+        ):
+            return web.json_response({"error": "BAD_REQUEST"}, status=400)
+        refused = await companion.push.test(endpoint, topic, cast("dict[str, object]", data), delay)
+        if refused:
+            return web.json_response({"error": refused}, status=429)
+        return web.json_response({"delayS": delay}, status=202, headers=no_store)
+
+    async def push_ack(request: web.Request) -> web.Response:
+        """The worker's receipt carries the device's own endpoint: its proof, as for unsubscribe."""
+        if answer := _push_json_refused(request):
+            return answer
+        body = await _push_body(request)
+        endpoint, mid, key = body.get("endpoint"), body.get("mid"), body.get("key")
+        if (
+            isinstance(endpoint, str)
+            and companion.push.knows(endpoint)
+            and isinstance(mid, str)
+            and isinstance(key, str)
+        ):
+            await companion.push.ack(mid, key[:PUSH_MAX_KEY], device_id(endpoint))
+        return web.json_response({}, headers=no_store)
+
     app = web.Application(client_max_size=2 << 20)  # An OTA chunk is 64 KiB; nginx allows 1 MiB.
     app.router.add_get("/__companion/", show)
     app.router.add_get("/__companion/ui-gate", gate)
@@ -1620,6 +1739,12 @@ def web_app(companion: Companion) -> web.Application:
     app.router.add_post("/__companion/archive/delete", archive_delete)
     app.router.add_post("/__companion/pair", pair)
     app.router.add_post("/__companion/erase", erase)
+    app.router.add_get("/__companion/push/status", push_status)
+    app.router.add_post("/__companion/push/subscribe", push_subscribe)
+    app.router.add_post("/__companion/push/unsubscribe", push_unsubscribe)
+    app.router.add_post("/__companion/push/remove", push_remove)
+    app.router.add_post("/__companion/push/test", push_test)
+    app.router.add_post("/__companion/push/ack", push_ack)
     return app
 
 

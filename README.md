@@ -20,6 +20,11 @@ controller does everything on its own, and the companion takes work off it.
   companion goes away, the controller quietly goes back to its own
   connection.
 
+- **Notifications when a shot ends.** An app installed from the secure address can
+  show a shot's time, yield and result with the app closed. Turn it on in the Web
+  UI's **Settings → This device**. The controller decides what to say; the companion
+  only delivers it.
+
 The companion does the fiddly parts for you:
 
 - **Finds the controller by itself** over mDNS, even after you rename it or
@@ -340,8 +345,10 @@ live only in memory and change every time it starts.
 - The pairing secret never crosses the network: the controller and the
   companion each work it out from the keys they exchanged. Your La Marzocco
   password crosses your network only encrypted with it.
-- The only connection to the internet is the one to La Marzocco's own
-  servers, and only while the La Marzocco switch is on.
+- The only connections to the internet are to La Marzocco's own servers, while
+  the La Marzocco switch is on, and, once a device turns on notifications, to
+  that device's notification service (Apple, Google, Mozilla or Microsoft). No
+  account is needed, and the message is encrypted so that service cannot read it.
 - The log never shows passwords, tokens, keys or pairing codes.
 - The companion's pages show its state and, while a request is open, the
   pairing code. Like the setup page, anyone on your network can open them;

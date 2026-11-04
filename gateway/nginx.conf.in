@@ -70,6 +70,11 @@ http {
       default_type application/json;
       return 403 '{"error":"HTTPS_REQUIRED","message":"Open the companion over HTTPS to read the archive"}';
     }
+    # Notifications need a page whose origin is proven, and a subscription is a secret.
+    location ^~ /__companion/push {
+      default_type application/json;
+      return 403 '{"error":"HTTPS_REQUIRED","message":"Open the companion over HTTPS to use notifications"}';
+    }
     # Erasing the pairing deletes secrets: only from a page whose origin is proven.
     location = /__companion/erase {
       default_type application/json;

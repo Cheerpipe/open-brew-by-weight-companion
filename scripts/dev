@@ -91,6 +91,7 @@ RISK_PATHS = {
         "companion/lamarzocco.py",
         "companion/logstore.py",
         "companion/mux.py",
+        "companion/push.py",
         "companion/relay.py",
         "companion/screens.py",
         "companion/service.py",
