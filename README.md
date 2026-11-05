@@ -11,7 +11,7 @@ controller does everything on its own, and the companion takes work off it.
   controller is back. The controller's own address keeps working as before.
 - **Every screen live at once.** Once paired, a phone, a tablet and a computer
   can all use the Web UI through the companion at the same time, each on its
-  own page, while the controller serves a single one: the companion's.
+  own page, while the controller serves the companion a single stream.
 - **The La Marzocco cloud, handled for the controller** (Linea Micra). Once
   you pair the companion and turn this on, the companion keeps the
   connection to La Marzocco's servers. The controller stops encrypting and
@@ -105,9 +105,10 @@ time: opening it on another device takes it over, and the first one offers
 - Each screen keeps its own Admin unlock: unlocking Admin on one screen locks
   it on the screen that had it, so only one screen at a time can change
   protected settings.
-- Opening the Web UI at the controller's own address still takes it over:
-  every companion screen then offers **Reload**, which brings that screen
-  back and hands the Web UI back to the companion.
+- Opening the Web UI at the controller's own address doesn't interrupt these
+  screens: both work side by side, once the controller's firmware is up to date.
+  With older firmware, it still takes over: every companion screen then offers
+  **Reload**, which brings that screen back and hands the Web UI back to the companion.
 
 **Web UI through the companion**, in **Admin → Companion**, is on by default.
 Turn it off to keep every device on the controller's own address: the
