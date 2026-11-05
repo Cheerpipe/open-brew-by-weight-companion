@@ -216,7 +216,7 @@ The API, live readings and firmware updates are never cached. Every cached
 response carries an `X-Gateway-Cache` header (`HIT`, `MISS`, `REVALIDATED`,
 `STALE`…) that shows where it came from. The cache lives in
 `/run/gateway/assets` inside the container, holds at most 16 MB, drops files
-unused for 30 days, and starts empty when the container is recreated.
+unused for a year, and starts empty when the container is recreated.
 
 When the gateway restarts, it serves the controller it last found, over
 mDNS or by searching the network, right away, from `data/controller.json`,
