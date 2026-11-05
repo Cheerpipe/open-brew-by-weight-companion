@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 NGINX = "/usr/sbin/nginx"  # The image's nginx, run against the rendered configuration.
 
 TAG = "abcd1234"
-ASSETS = {"/app.js", "/js/launch.js", "/js/runtime.js", "/js/settings.js"}
+ASSETS = {"/app.js", "/icons/icon-512.png", "/js/launch.js", "/js/runtime.js", "/js/settings.js"}
 SHELLS = {"/", "/stats"}
 
 
@@ -351,9 +351,19 @@ def test_web_ui_cache(monkeypatch: pytest.MonkeyPatch) -> None:
                 assert [get(path)[1]["x-gateway-cache"] for _ in range(2)] == ["MISS", "MISS"]
                 assert len(upstream("/app.js")) == before + 2
 
-            # Anything else goes to the Web UI, and nothing reaches the controller for it.
-            status, headers, _ = get("/evil.js")
-            assert (status, headers["location"]) == (302, "/")
+            # A file only the controller's list names is kept like any other.
+            path = f"/icons/icon-512.png?v={TAG}"
+            assert [get(path)[1]["x-gateway-cache"] for _ in range(2)] == ["MISS", "HIT"]
+            assert len(upstream("/icons/icon-512.png")) == 1
+
+            # Anything else goes to the Web UI each time, and nothing reaches the controller for it.
+            for _ in range(2):
+                status, headers, _ = get("/evil.js")
+                assert (status, headers["location"], headers["x-gateway-cache"]) == (
+                    302,
+                    "/",
+                    "MISS",
+                )
             assert not upstream("/evil.js")
 
             # A changed file never reaches a browser, nor the cache.

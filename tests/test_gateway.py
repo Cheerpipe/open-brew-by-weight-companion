@@ -182,7 +182,8 @@ def test_certificates_rendering_and_status(monkeypatch: pytest.MonkeyPatch) -> N
         assert "Open Brew by Weight Companion · Kitchen server" in page
         assert 'fetch("https://openbrewbyweight-secure.local/__companion/ping"' in page
         assert f"proxy_cache_path {run}/assets " in conf
-        api = conf.split("    location / {", 1)[1].split("\n    }", 1)[0]
+        assert "inactive=365d" in conf, "a screen's service worker leaves the cache unused"
+        api = conf.split("    location ^~ /api/ {", 1)[1].split("\n    }", 1)[0]
         assert "proxy_pass" in api, "API and WebSocket traffic is never cached"
         assert "proxy_cache" not in api, "API and WebSocket traffic is never cached"
         assert conf.count("proxy_cache webui;") == 2
