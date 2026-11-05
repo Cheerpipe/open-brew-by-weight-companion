@@ -892,6 +892,8 @@ def test_nothing_passes_before_pairing(tmp_path: Path) -> None:
 
             page = await (await rig.client.get("/__companion/?pair=1")).text()
             assert "Open the controller's Admin" in page
+            assert 'id="copy"' in page, "the code copies with one tap"
+            assert "#companionPanel" in page, "Admin opens at its Companion section"
             facts = await (await rig.client.get("/__companion/status")).json()
             assert facts["pairingRequired"] is True, "an open tab reads this to come here"
 
