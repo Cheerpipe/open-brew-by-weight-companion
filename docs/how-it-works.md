@@ -393,11 +393,12 @@ The service never logs passwords, tokens, keys or pairing codes.
 
 ### Screens and the relay
 
-The controller holds one Web UI claim and one live-update session. The
-service holds both on behalf of every screen that opens the secure address,
-so the controller's work does not grow with the number of screens. The
-controller stays in charge of sign-in, Admin unlock, lockouts and every
-safety gate; the direct address works as before.
+The controller keeps one Web UI claim and one live-update session for the
+companion, apart from those of a browser at its own address. The service holds
+both on behalf of every screen that opens the secure address, so the
+controller's work does not grow with the number of screens. The controller stays
+in charge of sign-in, Admin unlock, lockouts and every safety gate; the direct
+address works as before, and neither interrupts the other.
 
 **Relay session.** It needs no clock and stores nothing. At start, on each
 controller announcement and when the controller answers `RELAY_STALE`, the
@@ -525,9 +526,10 @@ Web UI through the companion turned off), the claims go, every screen is closed
 with `4001` and the shared session closes. A controller that is busy or does not
 answer a handshake (5xx, no reply) ends nothing: the session stays.
 
-**Takeover and loss.** When a browser opens the Web UI at the controller's
-own address, the controller closes the shared session with `4001`; every
-screen is closed with `4001` (reason `direct`) and offers **Reload**. Losing
+**Takeover and loss.** A controller whose firmware predates a separate claim for
+the companion closes the shared session with `4001` when a browser opens the Web
+UI at its own address; every screen is closed with `4001` (reason `direct`) and
+offers **Reload**. Current firmware sends this only when every session is revoked. Losing
 the controller closes the screens plainly, so they show the out-of-reach
 notice and reconnect. A screen that falls 1 MiB behind is closed with
 `4002` and reconnects quietly.
