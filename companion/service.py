@@ -76,6 +76,7 @@ WATCHDOG_S = 10
 STALL_BREACH_S = 20
 CONFIRM_S = 5
 FULL_RETRY_S = (1, 2, 5, 10, 30)
+EARLY_MAX = 16  # Pushes kept while their full frame is read; the read takes seconds at most.
 HTTP_TIMEOUT_S = 10
 # The controller's list filters (docs/INTEGRATION_API.md): at most eight values each.
 FILTER_MAX = 8
@@ -202,6 +203,7 @@ class Companion:
         self.creds_gen: int | None = None
         self.full_ep: int | None = None
         self.full_task: asyncio.Task[None] | None = None
+        self.early: list[Frame] = []  # Pushes waiting for their subscription's full frame.
         self.expect: tuple[str, int | None] | None = None
         self.confirm_timer: asyncio.TimerHandle | None = None
         self.command_lock = asyncio.Lock()
@@ -661,6 +663,7 @@ class Companion:
         self.route = route
         self.ping_now.set()
         log(f"La Marzocco route: {route}")
+        self.early = []  # They wait for a full frame of this route, never of an earlier one.
         if route == "companion":
             self.full_ep = None
             self._start_full()
@@ -1008,8 +1011,16 @@ class Companion:
         frame: Frame = {"t": "st", "k": kind, "ep": self.lm.ep if ep is None else ep, "d": reduced}
         if kind != "push":  # Pushes take their order from when the controller receives them.
             frame["ac"] = ac
-        if kind != "full" and self.hold:  # The latest of each kind, in observation order.
-            self.held = [held for held in self.held if held["k"] != kind] + [frame]
+        if kind == "push" and frame["ep"] != self.full_ep:
+            # The controller drops pushes until the full frame of their subscription; one that
+            # arrives while that read is taken (the machine coming online) follows it instead.
+            self.early = [*self.early[1 - EARLY_MAX :], frame]
+            return True
+        return self._send(frame)
+
+    def _send(self, frame: Frame) -> bool:
+        if frame["k"] != "full" and self.hold:  # The latest of each kind, in observation order.
+            self.held = [held for held in self.held if held["k"] != frame["k"]] + [frame]
             return True
         return self.post(frame)
 
@@ -1035,6 +1046,10 @@ class Companion:
                 and self._forward("full", data, ac, ep)
             ):
                 self.full_ep = ep
+                early, self.early = self.early, []
+                for frame in early:
+                    if frame["ep"] == ep:  # An older subscription says nothing new.
+                        self._send(frame)
                 return
             if index + 1 < len(FULL_RETRY_S):
                 await asyncio.sleep(

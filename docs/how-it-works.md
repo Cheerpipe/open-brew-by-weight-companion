@@ -382,7 +382,10 @@ while the controller has set the route to the companion:
   reads (after a token renewal, a `refresh` command, API polling, or to check
   a command no push confirmed within 5 seconds). While the controller reports
   a shot with a scale, pushes and reads wait out the shot: only the latest of
-  each goes, in the order observed, once it ends.
+  each goes, in the order observed, once it ends. The controller drops
+  pushes until it has the `full` frame of their subscription, so a push that
+  arrives while that read is taken (the machine coming online right then)
+  waits and follows it.
 - `full` and `read` frames carry the id of the last command sent to La
   Marzocco before the observation was taken, so an older observation never
   undoes a newer power command. Pushes do not need it: the controller

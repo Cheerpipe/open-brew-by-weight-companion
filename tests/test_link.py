@@ -72,6 +72,7 @@ class Upstream:
         self.configured: list[tuple[str | None, str, bool]] = []
         self.last_command, self.command_status = 0, 200
         self.confirm: dict[str, object] | None = None
+        self.during_read: Callable[[], None] | None = None
 
     def configure(self, account: Account | None, conn: str, observe: bool) -> None:
         self.configured.append((account["email"] if account else None, conn, observe))
@@ -120,6 +121,9 @@ class Upstream:
 
     async def read(self) -> tuple[int, dict[str, object] | None, int]:
         self.reads += 1
+        if self.during_read:  # Something La Marzocco pushes while the read is in flight.
+            await asyncio.sleep(0)
+            self.during_read()
         return 200, D["read"], self.last_command
 
     async def command(self, command_id: int, op: str, value: int | None = None) -> int:
@@ -629,6 +633,19 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             upstream.subscribe()
             assert (await session.next("lm"))["ep"] == 3
             assert (await session.next("st"))["k"] == "full"
+
+            # --- A push that arrives while `full` is read follows it ----------------
+            # The controller drops pushes until it has their subscription's full frame, so
+            # the machine coming online during that read must not be sent, and lost, first.
+            upstream.during_read = lambda: upstream.events.pushed(D["pushes"]["standby"], 0)
+            upstream.subscribe()
+            assert (await session.next("lm"))["ep"] == 4
+            full = await session.next("st")
+            assert (full["k"], full["ep"]) == ("full", 4)
+            push = await session.next("st")
+            assert (push["k"], push["ep"]) == ("push", 4)
+            upstream.during_read = None
+            await session.quiet(0.3)
 
             # --- A loop stall is named before the ping it delayed ----------------
             lines.lines.clear()
