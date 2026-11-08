@@ -94,6 +94,7 @@ RENEW_BEFORE_S = 30 * 86400
 CERT_CHECK_S = 12 * 3600
 INFO_TIMEOUT_MS = 10000  # A controller in Wi-Fi power save can answer late.
 RETRY_S = (30, 60, 120, 300, 600)  # Fresh mDNS queries only while no controller is confirmed.
+HEARD_WAKE_S = 60  # A manual controller's mDNS records wake a link that is down at most this often.
 CONTROLLER_FILE = "controller.json"
 # Network search, when mDNS finds no controller: the controller's unauthenticated identity route.
 SCAN_PATH = "/api/v1/integration/info"
@@ -179,7 +180,7 @@ class CompanionStatus(TypedDict):
 
 
 type Event = (
-    tuple[Literal["tick", "companion"]]
+    tuple[Literal["tick", "companion", "heard"]]
     | tuple[Literal["found"], Target]
     | tuple[Literal["skip"], str, bool, str]
     | tuple[Literal["scanned"], list[Found]]
@@ -295,6 +296,32 @@ def match_controller(
     if not ipv4:
         return None, "no IPv4 address"
     return (instance, (ipv4[0], port)), None
+
+
+class AddressHeard:
+    """mDNS address records of a manual controller's IP.
+
+    A manual address runs no service browser, so nothing tells the companion that a restarted
+    controller is back. Any record of that address (its boot announcement, its answer to another
+    device's query) says it is on the network now. It only wakes a link that is down, never moves
+    the address, so an unauthenticated record can do no more than bring an attempt forward.
+    """
+
+    def __init__(self, ip: str) -> None:
+        self.packed = socket.inet_aton(ip)
+        self.woke_at: float | None = None
+
+    def due(self, records: Iterable[RecordUpdate], now: float) -> bool:
+        """Whether these records name the address and no wake was due within HEARD_WAKE_S."""
+        if not any(
+            isinstance(record.new, DNSAddress) and record.new.address == self.packed
+            for record in records
+        ):
+            return False
+        if self.woke_at is not None and now - self.woke_at < HEARD_WAKE_S:
+            return False
+        self.woke_at = now
+        return True
 
 
 def controller_identity(body: str | bytes) -> Identity | None:
@@ -1036,6 +1063,7 @@ def main() -> None:
     zc = Zeroconf(interfaces=[cfg["ip"]], ip_version=IPVersion.V4Only)
     heard: set[str] = set()  # Devices whose mDNS address records reached the companion.
     heard_lock = threading.Lock()
+    manual = AddressHeard(target[1][0]) if target and source == "manual" else None
 
     class Heard(RecordUpdateListener):
         @override
@@ -1046,6 +1074,8 @@ def main() -> None:
                 for record in records:
                     if isinstance(record.new, DNSAddress) and len(heard) < DISCOVERY_MAX:
                         heard.add(record.new.name)
+                if manual and manual.due(records, time.monotonic()):
+                    events.put(("heard",))
 
     zc.add_listener(Heard(), None)
     if cfg["mdns_publish"]:
@@ -1176,6 +1206,9 @@ def main() -> None:
                     log("the companion service stopped")
                     status = 1
                     break
+                if event[0] == "heard":
+                    companion.heard()  # The manual controller is on the network: reopen now.
+                    continue
                 if event[0] == "skip" and note(*event[1:]):
                     log(f"skipping {event[1]}: {event[3]}")
                     status_changed = True

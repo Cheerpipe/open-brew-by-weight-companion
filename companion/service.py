@@ -76,6 +76,7 @@ WATCHDOG_S = 10
 STALL_BREACH_S = 20
 CONFIRM_S = 5
 FULL_RETRY_S = (1, 2, 5, 10, 30)
+EARLY_MAX = 16  # Pushes kept while their full frame is read; the read takes seconds at most.
 HTTP_TIMEOUT_S = 10
 # The controller's list filters (docs/INTEGRATION_API.md): at most eight values each.
 FILTER_MAX = 8
@@ -202,6 +203,7 @@ class Companion:
         self.creds_gen: int | None = None
         self.full_ep: int | None = None
         self.full_task: asyncio.Task[None] | None = None
+        self.early: list[Frame] = []  # Pushes waiting for their subscription's full frame.
         self.expect: tuple[str, int | None] | None = None
         self.confirm_timer: asyncio.TimerHandle | None = None
         self.command_lock = asyncio.Lock()
@@ -268,10 +270,8 @@ class Companion:
         if moved and self.ws is not None:
             log("the controller has a new address; reopening the link")
             _ = self.spawn(self.ws.close())
-        elif self.ws is not None:
-            self.poke()  # It announced itself: a socket that died with a restart is found now.
-        if self.ws is None:
-            self.wake.set()  # Reconnect now instead of waiting out the backoff.
+        else:
+            self.poke()  # It announced itself: check an open link, or reopen a closed one now.
         self.pairing.start()
         _ = self.spawn(self.relay.handshake())  # Also how a forgotten companion learns it.
 
@@ -367,9 +367,20 @@ class Companion:
         ping at once, so a link whose socket died with its restart — a reboot sends no
         FIN or RST — is found now, not at the next ping cadence. Also during a sync hold: a
         controller that restarted mid-shot never sends the `hold` that ends it, so this ping
-        is the only one that finds its dead socket."""
+        is the only one that finds its dead socket. With the link down it reopens now
+        instead of waiting out the backoff: a manual address hears no announcement, so the
+        relay handshake a restarted controller answers is the first sign that it is back."""
         if self.ws is not None:
             self.post({"t": "ping", "up": self.lm.up})
+        else:
+            self.wake.set()
+
+    def heard(self) -> None:
+        """The manual controller's address was heard on mDNS: a link that is down reopens now
+        instead of waiting out the backoff. An open link is left alone: those records also come
+        during a shot, when nothing crosses the link."""
+        if self.ws is None:
+            self.wake.set()
 
     # --- Link ----------------------------------------------------------------
     async def run_link(self) -> None:
@@ -652,6 +663,7 @@ class Companion:
         self.route = route
         self.ping_now.set()
         log(f"La Marzocco route: {route}")
+        self.early = []  # They wait for a full frame of this route, never of an earlier one.
         if route == "companion":
             self.full_ep = None
             self._start_full()
@@ -999,8 +1011,16 @@ class Companion:
         frame: Frame = {"t": "st", "k": kind, "ep": self.lm.ep if ep is None else ep, "d": reduced}
         if kind != "push":  # Pushes take their order from when the controller receives them.
             frame["ac"] = ac
-        if kind != "full" and self.hold:  # The latest of each kind, in observation order.
-            self.held = [held for held in self.held if held["k"] != kind] + [frame]
+        if kind == "push" and frame["ep"] != self.full_ep:
+            # The controller drops pushes until the full frame of their subscription; one that
+            # arrives while that read is taken (the machine coming online) follows it instead.
+            self.early = [*self.early[1 - EARLY_MAX :], frame]
+            return True
+        return self._send(frame)
+
+    def _send(self, frame: Frame) -> bool:
+        if frame["k"] != "full" and self.hold:  # The latest of each kind, in observation order.
+            self.held = [held for held in self.held if held["k"] != frame["k"]] + [frame]
             return True
         return self.post(frame)
 
@@ -1026,6 +1046,10 @@ class Companion:
                 and self._forward("full", data, ac, ep)
             ):
                 self.full_ep = ep
+                early, self.early = self.early, []
+                for frame in early:
+                    if frame["ep"] == ep:  # An older subscription says nothing new.
+                        self._send(frame)
                 return
             if index + 1 < len(FULL_RETRY_S):
                 await asyncio.sleep(
@@ -1840,6 +1864,10 @@ class Handle:
     def controller(self, target: Target | None) -> None:
         if self.loop and self.companion:
             self.loop.call_soon_threadsafe(self.companion.set_controller, target)
+
+    def heard(self) -> None:
+        if self.loop and self.companion:
+            self.loop.call_soon_threadsafe(self.companion.heard)
 
     def prove(self, target: Target, done: Callable[[bool], object]) -> None:
         """Ask whether `target` may replace the controller; `done` runs on the service's thread."""
