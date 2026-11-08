@@ -765,6 +765,33 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             session = await asyncio.wait_for(fake.sessions.get(), 3)
             await eventually(lambda: companion.link == "open")
             assert companion.relay.mode == "ready"
+
+            # --- ...and a relay handshake reopens a link that is backing off ----------
+            # A restarted controller refuses the old relay session; the new handshake is the
+            # first sign it is back, and with a manual address the only one before the backoff.
+            monkeypatch.setattr(service, "BACKOFF_S", (30,) * 5)
+            await session.ws.close()
+            await eventually(lambda: companion.link == "retry")
+            await asyncio.sleep(0.3)
+            assert fake.sessions.empty()
+            # It answers `link` as before the restart, so only the poke wakes the link.
+            assert await companion.relay.handshake() == "ready"
+            session = await asyncio.wait_for(fake.sessions.get(), 3)
+            await eventually(lambda: companion.link == "open")
+
+            # --- ...and so does the manual controller's address heard on mDNS ---------
+            # With no screen open nothing asks the relay; the controller's boot announcement
+            # reaches the gateway, which tells the companion it heard that address.
+            await session.next("ping", skip=())  # The one as the link opens.
+            companion.heard()  # An open link is left alone: those records also come mid-shot.
+            await session.quiet(0.3, skip=())
+            await session.ws.close()
+            await eventually(lambda: companion.link == "retry")
+            await asyncio.sleep(0.3)
+            assert fake.sessions.empty()
+            companion.heard()
+            session = await asyncio.wait_for(fake.sessions.get(), 3)
+            await eventually(lambda: companion.link == "open")
             monkeypatch.setattr(service, "BACKOFF_S", (0.2, 30, 30, 30, 30))
 
             # --- Erasing the account keeps the installation -------------------------

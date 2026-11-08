@@ -135,8 +135,10 @@ The companion is fine but cannot reach the controller. The machine may be off,
 or its address changed. The companion follows address changes that the
 controller announces; with `OBBW_CONTROLLER_URL` set to an IP address it does
 not, so update the setting. When the machine was simply off, nothing is
-needed: the companion keeps trying (after 5, 15 and 60 seconds, then every
-5 minutes) and connects once the controller answers.
+needed: the companion connects as soon as the controller announces itself
+over mDNS (also with an IP address in `OBBW_CONTROLLER_URL`) or a screen
+reaches it through the companion, and otherwise keeps trying (after 5, 15 and
+60 seconds, then every 5 minutes).
 
 ## Ports 80 or 443 are busy
 

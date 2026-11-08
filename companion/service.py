@@ -268,10 +268,8 @@ class Companion:
         if moved and self.ws is not None:
             log("the controller has a new address; reopening the link")
             _ = self.spawn(self.ws.close())
-        elif self.ws is not None:
-            self.poke()  # It announced itself: a socket that died with a restart is found now.
-        if self.ws is None:
-            self.wake.set()  # Reconnect now instead of waiting out the backoff.
+        else:
+            self.poke()  # It announced itself: check an open link, or reopen a closed one now.
         self.pairing.start()
         _ = self.spawn(self.relay.handshake())  # Also how a forgotten companion learns it.
 
@@ -367,9 +365,20 @@ class Companion:
         ping at once, so a link whose socket died with its restart — a reboot sends no
         FIN or RST — is found now, not at the next ping cadence. Also during a sync hold: a
         controller that restarted mid-shot never sends the `hold` that ends it, so this ping
-        is the only one that finds its dead socket."""
+        is the only one that finds its dead socket. With the link down it reopens now
+        instead of waiting out the backoff: a manual address hears no announcement, so the
+        relay handshake a restarted controller answers is the first sign that it is back."""
         if self.ws is not None:
             self.post({"t": "ping", "up": self.lm.up})
+        else:
+            self.wake.set()
+
+    def heard(self) -> None:
+        """The manual controller's address was heard on mDNS: a link that is down reopens now
+        instead of waiting out the backoff. An open link is left alone: those records also come
+        during a shot, when nothing crosses the link."""
+        if self.ws is None:
+            self.wake.set()
 
     # --- Link ----------------------------------------------------------------
     async def run_link(self) -> None:
@@ -1840,6 +1849,10 @@ class Handle:
     def controller(self, target: Target | None) -> None:
         if self.loop and self.companion:
             self.loop.call_soon_threadsafe(self.companion.set_controller, target)
+
+    def heard(self) -> None:
+        if self.loop and self.companion:
+            self.loop.call_soon_threadsafe(self.companion.heard)
 
     def prove(self, target: Target, done: Callable[[bool], object]) -> None:
         """Ask whether `target` may replace the controller; `done` runs on the service's thread."""

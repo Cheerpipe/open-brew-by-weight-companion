@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from zeroconf import RecordUpdate, const
+from zeroconf._dns import DNSAddress
 
 import companion
 import gateway
@@ -83,6 +85,22 @@ def test_controller_url() -> None:
     assert gateway.static_controller(named) is None
     with pytest.raises(SystemExit):
         gateway.load_config({**BASE, "OBBW_CONTROLLER_URL": "https://192.168.1.50"})
+
+
+def test_manual_address_heard() -> None:
+    """A manual controller's address records wake the link, at most once every HEARD_WAKE_S."""
+    heard = gateway.AddressHeard("192.168.1.50")
+
+    def update(name: str, ip: str) -> RecordUpdate:
+        record = DNSAddress(name, const._TYPE_A, const._CLASS_IN, 120, socket.inet_aton(ip))
+        return RecordUpdate(record, None)
+
+    other = update("kitchen.local.", "192.168.1.51")
+    controller = update("openbrewbyweight.local.", "192.168.1.50")
+    assert not heard.due([other], 0), "another device's address says nothing"
+    assert heard.due([other, controller], 10), "the boot announcement wakes at once"
+    assert not heard.due([controller], 10 + gateway.HEARD_WAKE_S - 1), "an answer soon after"
+    assert heard.due([controller], 10 + gateway.HEARD_WAKE_S)
 
 
 def test_match_controller() -> None:

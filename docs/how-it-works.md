@@ -312,10 +312,15 @@ counted, and the page asks you to update the companion.
   the 30-second timeout at the latest, instead of at the next ping
   interval.
 - **Reconnection:** after 5, 15 and 60 seconds, then every 5 minutes, and at
-  once when the controller announces itself over mDNS. A relay handshake that
+  once when the controller announces itself over mDNS or answers a relay
+  handshake (a screen's request after the controller restarted starts one).
+  A manual address runs no service browser, so any mDNS record of that
+  address (the controller's boot announcement, its answer to another
+  device) reopens a link that is down, at most once a minute; it never
+  moves the address and leaves an open link alone. A relay handshake that
   nobody answered (the controller was off when the companion started) is
-  asked again on the same schedule before each attempt, so a manual address,
-  which hears no announcement, still reconnects. `RETRY_LATER` (a shot
+  asked again on the same schedule before each attempt, so a manual address
+  that mDNS does not reach still reconnects. `RETRY_LATER` (a shot
   with a scale or a scale connection in progress) retries every 15 seconds,
   however often it comes. An unexpected error in one session is logged with
   its traceback and counts as a failed attempt; the gateway keeps serving.
