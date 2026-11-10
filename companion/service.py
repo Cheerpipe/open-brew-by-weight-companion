@@ -1279,9 +1279,8 @@ def web_app(companion: Companion) -> web.Application:
         controller, so they answer while it is off (the firmware's docs/schemas/README.md).
         Public by design, like the machines they stand in for; the Host check keeps a
         rebinding page away."""
-        name, address, _ = companion.address
-        host = (request.host or "").rsplit(":", 1)[0].strip("[]").lower()
-        if host not in {companion.name, companion.name + ".local", name, address} - {""}:
+        own = companion.address[0].removesuffix(".local")
+        if not beanconqueror.host_allowed(request.headers.get("Host", ""), own):
             return web.json_response({"error": "HOST_NOT_ALLOWED"}, status=403)
         missing = web.json_response({"error": "NOT_FOUND"}, status=404)
         served = companion.beanconqueror
@@ -1292,7 +1291,7 @@ def web_app(companion: Companion) -> web.Application:
             return web.json_response({} if served == "gaggiuino" else {"mode": 0}, headers=no_store)
         prefix = "/api/shots/" if served == "gaggiuino" else "/api/history/"
         item = path.removeprefix(prefix) if path.startswith(prefix) else ""
-        shape = re.fullmatch(r"(\d+)(\.slog|\.json)?", item)
+        shape = re.fullmatch(r"(\d{1,18})(\.slog|\.json)?", item)  # an id SQLite can hold
         rows = companion.archive.store.beanconqueror_rows
 
         def octets(data: bytes) -> web.Response:
@@ -1307,9 +1306,9 @@ def web_app(companion: Companion) -> web.Application:
                 return web.json_response(answer, headers=no_store)
             if served == "gaggimate" and item in ("index.bin", "recent.bin"):
                 limit = -1
-                if item == "recent.bin":
-                    asked = request.query.get("limit", "8")
-                    limit = min(50, max(1, int(asked))) if asked.isdigit() else 8
+                if item == "recent.bin":  # GaggiMate's toInt(): a leading integer, else 0
+                    asked = re.match(r"\s*[+-]?\d{1,9}", request.query.get("limit", "8"))
+                    limit = min(50, max(1, int(asked[0]) if asked else 0))
                 shots = [
                     s
                     for _, s in beanconqueror.good_shots(

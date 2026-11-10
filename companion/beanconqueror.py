@@ -16,6 +16,17 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
 FORMATS = ("off", "gaggiuino", "gaggimate")
+_HOME_SUFFIXES = ("", ".local", ".lan", ".home.arpa", ".internal")
+
+
+def host_allowed(host: str, own: str) -> bool:
+    """The firmware's Host rule (webAccessHostAllowed) for the companion's own name: an IP
+    literal cannot be rebound, and a name must be `own`, bare or under a home-network suffix
+    that no public DNS answers. The port is ignored; no Host (never a browser) passes."""
+    name = host.lower().split(":", 1)[0]
+    if host.startswith("[") or not name.strip("0123456789."):
+        return True
+    return bool(own) and any(name == own + suffix for suffix in _HOME_SUFFIXES)
 
 
 @dataclass(frozen=True)
