@@ -24,7 +24,7 @@ SERVED = [case for case in VECTORS["cases"] if case["served"]]
 
 
 def test_cases_match_the_controller() -> None:
-    assert len(SERVED) >= 4
+    assert len(SERVED) >= 6
     assert any(not case["served"] for case in VECTORS["cases"])
     for case in VECTORS["cases"]:
         row, shot = case["shot"], beanconqueror.shot_of(case["shot"])
@@ -36,7 +36,7 @@ def test_cases_match_the_controller() -> None:
         for (tenths, hundredths), expected in zip(rates, case["flowGS"], strict=True):
             value = expected or 0
             assert tenths == math.floor(value * 10 + 0.5), case["name"]
-            assert hundredths == math.floor(value * 100 + 0.5), case["name"]
+            assert hundredths == min(32767, math.floor(value * 100 + 0.5)), case["name"]
         assert beanconqueror.gaggiuino_shot(row, shot) == case["gaggiuino"]["shot"]
         gaggimate = case["gaggimate"]
         assert beanconqueror.index_entry(shot) == base64.b64decode(gaggimate["indexEntry"])
@@ -54,6 +54,18 @@ def test_indexes_are_newest_first() -> None:
     assert beanconqueror.index(newest[:2], 0) == base64.b64decode(
         VECTORS["gaggimate"]["recentLimit2"]
     )
+
+
+def test_the_host_names_the_companion_or_is_an_address() -> None:
+    """The firmware's rule: an IP literal cannot be rebound; a name is the companion's own."""
+    allowed = "192.168.1.20 10.0.0.7:8080 [fe80::1] kitchen-server.local Kitchen-Server"
+    allowed += " kitchen-server.lan:8080 kitchen-server.home.arpa"
+    refused = "evil.test kitchen-server.evil.test 192.168.1.20.evil.test kitchen-server2.local"
+    for host in ["", *allowed.split()]:
+        assert beanconqueror.host_allowed(host, "kitchen-server"), host
+    for host in [".local", *refused.split()]:
+        assert not beanconqueror.host_allowed(host, "kitchen-server"), host
+    assert not beanconqueror.host_allowed(".local", "")
 
 
 CURVE = ("wD", "wBreakBefore", "wHeld", "dropS", "endS", "atmS", "atmClearedS")
@@ -114,6 +126,16 @@ def test_endpoints_answer_from_the_archive_alone(tmp_path: Path) -> None:
                     "/beanconqueror/api/history/recent.bin?limit=2", headers=host
                 )
                 assert await recent.read() == base64.b64decode(VECTORS["gaggimate"]["recentLimit2"])
+                # A limit that is no number reads as GaggiMate's toInt(): 0, so the least, 1.
+                for limit, entries in (("%C2%B2", 1), ("-5", 1), ("2abc", 2), ("999999999999", 6)):
+                    odd = await client.get(
+                        f"/beanconqueror/api/history/recent.bin?limit={limit}", headers=host
+                    )
+                    assert (odd.status, len(await odd.read())) == (200, 32 + 128 * entries), limit
+                huge = await client.get(
+                    "/beanconqueror/api/history/" + "9" * 30 + ".slog", headers=host
+                )
+                assert huge.status == 404
                 newest = VECTORS["newestFirstIds"][0]
                 case = next(c for c in SERVED if c["shot"]["id"] == newest)
                 shot = await client.get(

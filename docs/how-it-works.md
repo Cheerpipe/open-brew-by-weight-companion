@@ -821,8 +821,11 @@ the controller: `/beanconqueror/` reads the open generation's good shots,
 newest first, with the controller's ids (`companion/beanconqueror.py`, pinned
 by `tests/fixtures/beanconqueror-v1.vectors.json`, byte-identical to the
 firmware's). nginx passes it on both ports, without the Web UI gate and with
-the request's `Host`, which must name the companion (its name, `.local` name or
-IP): the address is public by design, like the machines it stands in for. The
+the request's `Host`, checked as the controller checks its own: an IP address,
+or the companion's host name, bare or under a home-network suffix (`.local`,
+`.lan`, `.home.arpa`, `.internal`), so a page from elsewhere cannot read it
+through a rebound name. The address is public by design, like the machines it
+stands in for. The
 status JSON gives `beanconqueror`, `ip` and `httpPort` for the address the
 Settings section shows.
 
