@@ -180,10 +180,13 @@ def _ints(value: object) -> list[int]:
     return [int(v) for v in value] if isinstance(value, list) else []
 
 
-def _samples(row: Mapping[str, object]) -> list[tuple[int, int, int]]:
-    """Each non-held reading in order: (index, ms, cg)."""
+def _samples(row: Mapping[str, object], shot: Shot) -> list[tuple[int, int, int]]:
+    """Each non-held reading in order: (index, ms, cg). A shot without one gets a single
+    closing reading (its time and yield, index -1: no flow), since Beanconqueror cannot
+    import a shot with no samples."""
     held = set(_ints(row.get("wHeld")))
-    return [(i, t, cg) for i, (t, cg) in enumerate(points(row)) if i not in held]
+    readings = [(i, t, cg) for i, (t, cg) in enumerate(points(row)) if i not in held]
+    return readings or [(-1, min(65535, shot.duration_ds * 100), min(32767, shot.yield_cg))]
 
 
 def _dg(cg: int) -> int:
@@ -191,12 +194,12 @@ def _dg(cg: int) -> int:
 
 
 def gaggiuino_shot(row: Mapping[str, object], shot: Shot) -> dict[str, object]:
-    rates, samples, temp = flow(row, shot), _samples(row), shot.temp_deci_c
+    rates, samples, temp = flow(row, shot), _samples(row, shot), shot.temp_deci_c
     answer: dict[str, object] = {"id": shot.id}
     if shot.start:
         answer["timestamp"] = shot.start
     answer["duration"] = shot.duration_ds
-    tenths = [rates[i][0] for i, _, _ in samples]
+    tenths = [(rates[i][0] if i >= 0 else 0) for i, _, _ in samples]
     zeros = [0] * len(samples)
     answer["datapoints"] = {
         "timeInShot": [(t + 50) // 100 for _, t, _ in samples],
@@ -253,7 +256,7 @@ def index(shots: Sequence[Shot], next_id: int) -> bytes:
 
 
 def slog(row: Mapping[str, object], shot: Shot) -> bytes:
-    rates, samples = flow(row, shot), _samples(row)
+    rates, samples = flow(row, shot), _samples(row, shot)
     head = (
         struct.pack(
             "<IBBHHHIIII",
@@ -275,7 +278,7 @@ def slog(row: Mapping[str, object], shot: Shot) -> bytes:
     body = b"".join(
         struct.pack("<IH", t, shot.temp_deci_c)
         + bytes(12)
-        + struct.pack("<hH", rates[i][1], min(0xFFFF, _dg(cg)))
+        + struct.pack("<hH", rates[i][1] if i >= 0 else 0, min(0xFFFF, _dg(cg)))
         + bytes(8)
         for i, t, cg in samples
     )
