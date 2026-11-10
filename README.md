@@ -24,6 +24,11 @@ controller does everything on its own, and the companion takes work off it.
   show a shot's time, yield and result with the app closed. Turn it on in the Web
   UI's **Settings → This device**. The controller decides what to say; the companion
   only delivers it.
+- **Beanconqueror, even with the machine off.** With **Settings → Coffee apps →
+  Beanconqueror** on, the companion answers Beanconqueror from its own copy of your
+  shots at `http://openbrewbyweight-secure.local/beanconqueror`, without asking the
+  controller. Like the controller's, that address has no password; the Settings
+  section shows it with the steps.
 
 The companion does the fiddly parts for you:
 

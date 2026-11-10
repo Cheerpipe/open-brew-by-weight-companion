@@ -25,7 +25,7 @@ import aiohttp
 from aiohttp import web
 from cryptography.exceptions import InvalidTag
 
-from . import VERSION, crypto, dashboard, log, logger, stats
+from . import VERSION, beanconqueror, crypto, dashboard, log, logger, stats
 from .archive import FETCH_MAX, Archive, UnavailableError
 from .assets import Assets
 from .lamarzocco import LaMarzocco
@@ -99,6 +99,9 @@ class Config(TypedDict):
     name: str
     log_retention_days: int
     log_retention_mb: int
+    hostname: str  # the companion's own .local name, its IP and HTTP port (the Beanconqueror
+    ip: str  # address the Settings help box shows)
+    http_port: int
 
 
 class ControllerCfg(TypedDict):
@@ -176,6 +179,10 @@ class Companion:
         self.unknown_frames = 0
         self.unknown_kinds: set[str] = set()
         self.cfg: ControllerCfg = {"lm": False, "conn": "ws", "observe": True}
+        # The Beanconqueror format cfg names (off without the archive and its switch), kept so
+        # the endpoints answer with the controller off; the companion's own address.
+        self.beanconqueror = "off"
+        self.address: tuple[str, str, int] = ("", "", 80)
         self.logs = LogStore(data)
         self.log_on, self.log_subscribed, self.log_identified, self.configured = (
             False,
@@ -621,6 +628,15 @@ class Companion:
                     await self.logs.set_meta("archive", json.dumps(frame.get("archive")))
                 except sqlite3.Error as error:
                     log(f"the log store could not keep the archive switch ({error})")
+            bc = frame.get("bc")
+            self.beanconqueror = (
+                bc if isinstance(bc, str) and bc in beanconqueror.FORMATS else "off"
+            )
+            if self._log_usable():
+                try:
+                    await self.logs.set_meta("beanconqueror", self.beanconqueror)
+                except sqlite3.Error as error:
+                    log(f"the log store could not keep the Beanconqueror format ({error})")
             await self._log_subscribe()
             self._report(force=True)
             if self.push.saved["subscriptions"]:  # No `ps` in a session means none wanted.
@@ -720,6 +736,8 @@ class Companion:
             self.device_id = await self.logs.meta("device")
             switch = await self.logs.meta("archive")
             self.archive.available, self.archive.on = switch in ("true", "false"), switch == "true"
+            kept = await self.logs.meta("beanconqueror")
+            self.beanconqueror = kept if kept in beanconqueror.FORMATS else "off"
             self.log_grants = await self.logs.grants()
         except (sqlite3.Error, OSError) as error:
             # A store that cannot open disables only the log history: the
@@ -735,6 +753,7 @@ class Companion:
             except sqlite3.Error as error:
                 log(f"the log history could not be erased ({error})")
         self.device_id, self.log_grants, self.log_denials = None, {}, {}
+        self.beanconqueror = "off"
 
     async def _log_subscribe(self, resync: bool = False) -> None:
         """`logsub` with the stored cursor, once per session after cfg turned the
@@ -1157,6 +1176,9 @@ class Companion:
             "push": self.push.status_facts(),
             "relay": self.relay.mode,
             "relayFeatures": self.relay.features,
+            "beanconqueror": self.beanconqueror,
+            "ip": self.address[1],
+            "httpPort": self.address[2],
             "assets": self.assets.facts() if pairing else None,
             **self.screens.mux.status(),
         }
@@ -1251,6 +1273,70 @@ def web_app(companion: Companion) -> web.Application:
             content_type="text/html",
             headers=page_headers,
         )
+
+    async def beanconqueror_route(request: web.Request) -> web.Response:
+        """Beanconqueror's machine endpoints from the archive alone: no request reaches the
+        controller, so they answer while it is off (the firmware's docs/schemas/README.md).
+        Public by design, like the machines they stand in for; the Host check keeps a
+        rebinding page away."""
+        name, address, _ = companion.address
+        host = (request.host or "").rsplit(":", 1)[0].strip("[]").lower()
+        if host not in {companion.name, companion.name + ".local", name, address} - {""}:
+            return web.json_response({"error": "HOST_NOT_ALLOWED"}, status=403)
+        missing = web.json_response({"error": "NOT_FOUND"}, status=404)
+        served = companion.beanconqueror
+        if served == "off" or await offload(companion.store.pairing) is None:
+            return missing
+        path = "/" + request.match_info["tail"]
+        if path == ("/api/system/status" if served == "gaggiuino" else "/api/status"):
+            return web.json_response({} if served == "gaggiuino" else {"mode": 0}, headers=no_store)
+        prefix = "/api/shots/" if served == "gaggiuino" else "/api/history/"
+        item = path.removeprefix(prefix) if path.startswith(prefix) else ""
+        shape = re.fullmatch(r"(\d+)(\.slog|\.json)?", item)
+        rows = companion.archive.store.beanconqueror_rows
+
+        def octets(data: bytes) -> web.Response:
+            return web.Response(
+                body=data, content_type="application/octet-stream", headers=no_store
+            )
+
+        try:
+            if served == "gaggiuino" and item == "latest":
+                newest = beanconqueror.good_shots(await rows(companion.device_id, limit=1))
+                answer = [{"lastShotId": newest[0][1].id}] if newest else []
+                return web.json_response(answer, headers=no_store)
+            if served == "gaggimate" and item in ("index.bin", "recent.bin"):
+                limit = -1
+                if item == "recent.bin":
+                    asked = request.query.get("limit", "8")
+                    limit = min(50, max(1, int(asked))) if asked.isdigit() else 8
+                shots = [
+                    s
+                    for _, s in beanconqueror.good_shots(
+                        await rows(companion.device_id, limit=limit)
+                    )
+                ]
+                next_id = shots[0].id + 1 if item == "index.bin" and shots else 0
+                return octets(beanconqueror.index(shots, next_id))
+            # A Gaggiuino shot is its bare id; GaggiMate's are `<id>.slog` and `<id>.json`.
+            accepted = {"": served == "gaggiuino", ".slog": served == "gaggimate"}
+            accepted[".json"] = accepted[".slog"]
+            if shape is None or not accepted[shape[2] or ""]:
+                return missing
+            found = beanconqueror.good_shots(
+                await rows(companion.device_id, record_id=int(shape[1]))
+            )
+        except sqlite3.Error:
+            return web.json_response({"error": "ARCHIVE_UNAVAILABLE"}, status=503)
+        if not found:
+            return missing
+        row, shot = found[0]
+        if shape[2] == ".json":
+            notes = beanconqueror.notes(shot)
+            return web.json_response(notes, headers=no_store) if notes else missing
+        if served == "gaggimate":
+            return octets(beanconqueror.slog(row, shot))
+        return web.json_response(beanconqueror.gaggiuino_shot(row, shot), headers=no_store)
 
     async def status(_request: web.Request) -> web.Response:
         return web.json_response(await companion.status(), headers=no_store)
@@ -1832,6 +1918,7 @@ def web_app(companion: Companion) -> web.Application:
     app.router.add_routes(companion.screens.routes())
     app.router.add_get("/__companion/pair", show)
     app.router.add_get("/__companion/status", status)
+    app.router.add_get("/beanconqueror/{tail:.*}", beanconqueror_route)
     app.router.add_get("/__companion/log", log_page)
     app.router.add_get("/__companion/log/boots", log_boots)
     app.router.add_get("/__companion/log/export", log_export)
@@ -1912,6 +1999,7 @@ async def _serve(
             cfg.get("log_retention_days", RETENTION_DAYS_DEFAULT),
             cfg.get("log_retention_mb", RETENTION_MB_DEFAULT),
         )
+        companion.address = (cfg.get("hostname", ""), cfg.get("ip", ""), cfg.get("http_port", 80))
         await companion.open_log()
         runner = web.AppRunner(web_app(companion), access_log=None)
         await runner.setup()
