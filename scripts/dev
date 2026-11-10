@@ -153,6 +153,7 @@ COMPOSE_STACKS = (
 )
 # The firmware's own files that tests/fixtures copies, path in the firmware repository.
 FIRMWARE_FIXTURES = {
+    "tests/fixtures/beanconqueror-v1.vectors.json": "docs/schemas/beanconqueror-v1.vectors.json",
     "tests/fixtures/companion-link-v1.vectors.json": "docs/schemas/companion-link-v1.vectors.json",
     "tests/fixtures/companion-records-v1.vectors.json": (
         "docs/schemas/companion-records-v1.vectors.json"

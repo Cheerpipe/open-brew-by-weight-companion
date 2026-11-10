@@ -267,6 +267,15 @@ MERGED = (
     "order by generation desc, id desc"
 )
 
+# The Beanconqueror endpoints' rows: the open generation's good shots, newest first; one with
+# its curve, or a list without curves.
+_BEANCONQUEROR_ROWS = (
+    "from archive_records where device_id = ? and store = 'shots' and generation = ? "
+    "and bad = 0 and (? is null or id = ?) order by id desc limit ?"
+)
+BEANCONQUEROR_SHOT = "select body " + _BEANCONQUEROR_ROWS
+BEANCONQUEROR_LIST = "select json_remove(body, '$.wD') as body " + _BEANCONQUEROR_ROWS
+
 # A fetched page's records: (fields, curve), the curve empty for an activation.
 type Fetched = list[tuple[dict[str, object], dict[str, object]]]
 # A record to store: (id, ident, rev, fields, curve).
@@ -616,6 +625,21 @@ class ArchiveStore:
                 (device, self._open(device, "shots"), limit),
             ).fetchall()
             return [(row["id"], *map(int, row["ident"].split(":"))) for row in rows]
+
+        return await self._call(read)
+
+    async def beanconqueror_rows(
+        self, device: str | None, record_id: int | None = None, limit: int = -1
+    ) -> list[dict[str, object]]:
+        """The open generation's good shots, newest first, as the Beanconqueror endpoints read
+        them: one by id with its curve, or a list without curves (an index needs none)."""
+
+        def read() -> list[dict[str, object]]:
+            rows = self.connection.execute(
+                BEANCONQUEROR_SHOT if record_id is not None else BEANCONQUEROR_LIST,
+                (device, self._open(device, "shots"), record_id, record_id, limit),
+            ).fetchall()
+            return [json.loads(row["body"]) for row in rows]
 
         return await self._call(read)
 

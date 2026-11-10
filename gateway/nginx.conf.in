@@ -69,6 +69,14 @@ http {
       proxy_http_version 1.1;
     }
 
+    # Beanconqueror's machine endpoints: public by design and the only API in clear, like the machines they stand in
+    # for, and answered from the archive alone. The companion checks the forwarded Host.
+    location ^~ /beanconqueror/ {
+      proxy_pass http://unix:@RUN@/companion.sock;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+    }
+
     # The stored log is read with the browser's Web UI session: never in clear.
     location ^~ /__companion/log {
       default_type application/json;
@@ -177,6 +185,14 @@ http {
       proxy_pass http://unix:@RUN@/companion.sock;
       proxy_http_version 1.1;
       proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Beanconqueror's machine endpoints: public by design, like the machines they stand in
+    # for, and answered from the archive alone. The companion checks the forwarded Host.
+    location ^~ /beanconqueror/ {
+      proxy_pass http://unix:@RUN@/companion.sock;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
     }
 
     # The rest of the API; firmware updates send 64 KiB chunks.

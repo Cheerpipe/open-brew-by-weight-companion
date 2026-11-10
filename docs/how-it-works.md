@@ -809,6 +809,23 @@ mux serves Shots and History from (`companion/mux.py`, `companion/pages.py`).
   dropped the exclusions, so a record one kept out is copied again while the
   controller holds it.
 
+### Beanconqueror
+
+The firmware's [Beanconqueror machine endpoints](https://github.com/Cheerpipe/Open-Brew-by-Weight/blob/main/docs/schemas/README.md#beanconqueror-machine-endpoints-v1)
+are served here too, from the archive alone. The controller's `cfg` names the
+format (`bc`: `gaggiuino`, `gaggimate` or `off`, which it sends only while the
+archive and **Beanconqueror through the companion** switches are on); the
+companion keeps it in the log store, so it answers after its own restart with
+the controller off, and forgets it with the pairing. A request never reaches
+the controller: `/beanconqueror/` reads the open generation's good shots,
+newest first, with the controller's ids (`companion/beanconqueror.py`, pinned
+by `tests/fixtures/beanconqueror-v1.vectors.json`, byte-identical to the
+firmware's). nginx passes it on both ports, without the Web UI gate and with
+the request's `Host`, which must name the companion (its name, `.local` name or
+IP): the address is public by design, like the machines it stands in for. The
+status JSON gives `beanconqueror`, `ip` and `httpPort` for the address the
+Settings section shows.
+
 ### Notifications
 
 `companion/push.py` delivers Web Push and decides nothing else: the controller
