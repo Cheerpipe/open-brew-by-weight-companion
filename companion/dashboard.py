@@ -15,6 +15,8 @@ WIDGETS = {
     "CMMachineStatus": ("mode",),
     "CMCoffeeBoiler": ("status", "targetTemperature", "readyStartTime"),
     "CMSteamBoilerLevel": ("status", "targetLevel", "readyStartTime"),
+    # The Linea Mini's steam boiler: the controller reads no steam temperature.
+    "CMSteamBoilerTemperature": ("status", "readyStartTime"),
     "CMBackFlush": ("status",),  # Only from pushes, as the direct decoder enforces.
 }
 CONSUMED = {"connected", "widgets", "removedWidgets", "code", "output"}.union(*WIDGETS.values())

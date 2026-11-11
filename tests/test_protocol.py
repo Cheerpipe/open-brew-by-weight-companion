@@ -183,6 +183,30 @@ def test_dashboard_filter() -> None:
         "removedWidgets": ["CMSteamBoilerLevel"]
     }
     assert dashboard.reduce(pushes["offline"], push=True) == {"connected": False}
+    # A Linea Mini reports steam by temperature: its target is not forwarded.
+    mini_steam = {
+        "code": "CMSteamBoilerTemperature",
+        "index": 1,
+        "output": {
+            "status": "HeatingUp",
+            "enabled": True,
+            "targetTemperature": 128.0,
+            "targetTemperatureSupported": True,
+            "readyStartTime": 1760000820500,
+        },
+    }
+    for push in (False, True):
+        assert dashboard.reduce({"widgets": [mini_steam]}, push=push) == {
+            "widgets": [
+                {
+                    "code": "CMSteamBoilerTemperature",
+                    "output": {"status": "HeatingUp", "readyStartTime": 1760000820500},
+                }
+            ]
+        }
+        assert dashboard.reduce({"removedWidgets": ["CMSteamBoilerTemperature"]}, push=push) == {
+            "removedWidgets": ["CMSteamBoilerTemperature"]
+        }
     assert dashboard.reduce({}, push=True) is None
     # Values pass through untouched: the controller's decoder keeps its own strictness.
     odd = {
