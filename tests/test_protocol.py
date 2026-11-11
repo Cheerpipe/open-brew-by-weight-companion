@@ -207,6 +207,17 @@ def test_dashboard_filter() -> None:
         assert dashboard.reduce({"removedWidgets": ["CMSteamBoilerTemperature"]}, push=push) == {
             "removedWidgets": ["CMSteamBoilerTemperature"]
         }
+    # Both steam widgets in one event are both forwarded: the controller decides
+    # which one is the machine's steam boiler, the companion never does.
+    both = dashboard.reduce(
+        {"widgets": [mini_steam, {"code": "CMSteamBoilerLevel", "output": {"status": "Ready"}}]},
+        push=True,
+    )
+    assert both is not None
+    assert [widget["code"] for widget in both["widgets"]] == [
+        "CMSteamBoilerTemperature",
+        "CMSteamBoilerLevel",
+    ]
     assert dashboard.reduce({}, push=True) is None
     # Values pass through untouched: the controller's decoder keeps its own strictness.
     odd = {
