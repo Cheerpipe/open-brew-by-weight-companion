@@ -13,7 +13,14 @@ if TYPE_CHECKING:
 
 WIDGETS = {
     "CMMachineStatus": ("mode",),
-    "CMCoffeeBoiler": ("status", "targetTemperature", "readyStartTime"),
+    "CMCoffeeBoiler": (
+        "status",
+        "targetTemperature",
+        # The machine's own brew range: the controller accepts targets inside it.
+        "targetTemperatureMin",
+        "targetTemperatureMax",
+        "readyStartTime",
+    ),
     "CMSteamBoilerLevel": ("status", "targetLevel", "readyStartTime"),
     # The Linea Mini's steam boiler: the controller reads no steam temperature.
     "CMSteamBoilerTemperature": ("status", "readyStartTime"),
