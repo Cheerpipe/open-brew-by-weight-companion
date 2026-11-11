@@ -1,6 +1,6 @@
 """La Marzocco's dashboard reduced to exactly what the controller's decoder reads.
 
-The controller runs decodeMicraDashboard on the reduced object, so the filter
+The controller runs decodeLaMarzoccoDashboard on the reduced object, so the filter
 keeps La Marzocco's own shape and values and only drops keys: values are never
 checked or converted here, and each event is filtered on its own (no diffing).
 """
