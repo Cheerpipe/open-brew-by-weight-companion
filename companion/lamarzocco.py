@@ -1,8 +1,8 @@
 """La Marzocco cloud client: the same minimal client the controller has.
 
-It mirrors src/machine/OpenBrewByWeightMicraService.cpp (installation key and
+It mirrors src/machine/OpenBrewByWeightLaMarzoccoService.cpp (installation key and
 id, /auth/init, sign-in, token refresh, signed headers, dashboard, the two
-commands) and OpenBrewByWeightMicraWebSocket.inc (STOMP over the WebSocket,
+commands) and OpenBrewByWeightLaMarzoccoWebSocket.inc (STOMP over the WebSocket,
 WebSocket ping every 15 s, 30 s pong timeout, the socket's instant-first
 reconnect ladder). The companion owns its own installation, so the
 controller's key never leaves the controller.

@@ -136,6 +136,8 @@ def test_dashboard_filter() -> None:
                 "output": {
                     "status": "HeatingUp",
                     "targetTemperature": 93.0,
+                    "targetTemperatureMin": 80,
+                    "targetTemperatureMax": 100,
                     "readyStartTime": 1760000460000,
                 },
             },
@@ -154,7 +156,7 @@ def test_dashboard_filter() -> None:
     assert as_push["widgets"][-1] == {"code": "CMBackFlush", "output": {"status": "Off"}}, (
         "CMBackFlush only in pushes"
     )
-    assert len(json.dumps(read)) < 400 < len(json.dumps(D["read"]))
+    assert len(json.dumps(read)) < 470 < len(json.dumps(D["read"]))
     pushes = D["pushes"]
     assert dashboard.reduce(pushes["standby"], push=True) == {
         "connected": True,

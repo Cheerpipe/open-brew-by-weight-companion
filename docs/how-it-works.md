@@ -374,8 +374,9 @@ while the controller has set the route to the companion:
 
 - **Only what the controller reads.** Each La Marzocco event is reduced to
   La Marzocco's own dashboard shape with only `connected`, the machine mode,
-  the coffee and steam boiler status, target and ready time (a steam boiler
-  set by temperature sends its status and ready time only), and, in pushes
+  the coffee and steam boiler status, target and ready time (with the range
+  the machine accepts for the coffee target; a steam boiler set by
+  temperature sends its status and ready time only), and, in pushes
   only, the backflush status. An event that carries none of them is
   dropped; one that does is sent even when nothing changed.
 - **`full`** when the route starts and after every new La Marzocco

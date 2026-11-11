@@ -1,5 +1,5 @@
 {
-  "description": "La Marzocco customer-app payloads for a Linea Micra, shaped like the firmware's micra host-test payloads (src/tests/micra_*_host_test.cpp) with the other keys the cloud sends around them. Identifiers are fictitious.",
+  "description": "La Marzocco customer-app payloads for a Linea Micra, shaped like the firmware's La Marzocco host-test payloads (src/tests/la_marzocco_*_host_test.cpp) with the other keys the cloud sends around them. Identifiers are fictitious.",
   "read": {
     "serialNumber": "MR012345",
     "type": "CoffeeMachine",
