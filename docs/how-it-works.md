@@ -738,7 +738,7 @@ while the controller is off still reports it and answers the reads below.
   session the controller accepts, remembered while it is off). Forget erases
   the archive with the log.
 - **Stats over the whole history.** `GET /__companion/archive/stats?window=
-  10|50|100|500|1000&active=<preset of the "This preset" chart>&epoch=<the
+  10|50|100|500|1000&active=<the preset the charts follow, 0 All>&epoch=<the
   controller's shot epoch the screen saw>` (and the list's `result`,
   `preset`, `scale`) answers `{"stats","good","epoch"}`: `stats` is the
   header the firmware's `formatStatsHeader` builds, over every stored shot
@@ -746,7 +746,9 @@ while the controller is off still reports it and answers the reads below.
   port held to the firmware's golden vectors
   `tests/fixtures/stats-header-v1.vectors.json`, checksum-pinned), and `good`
   the good shots the filters keep, from which the browser offers the window
-  choices. When the copy is behind `epoch`, the companion syncs the shots at
+  choices. The header's preset chart, its consistency guard flags (`cons.g`)
+  and its cut accuracy series (`cut`) follow `active`, as the controller's
+  follow a page's `preset`. When the copy is behind `epoch`, the companion syncs the shots at
   once and waits up to 8 s; it also syncs as soon as the live Stats frames a
   screen receives show a new shot. While the controller holds sync (or a
   request waits for it), the newest complete header answers at once with its
@@ -784,7 +786,9 @@ mux serves Shots and History from (`companion/mux.py`, `companion/pages.py`).
   comes from the replica: the whole history, the controller's records and
   the ones only the companion keeps, filtered, ordered and sliced as the
   controller does, with `total`, `hasMore`, `good` and, for Stats, the
-  header over the whole history for the active preset in Home's model. The
+  header over the whole history for the preset the page names (its
+  `preset`, forwarded upstream with its window; without one, the active
+  preset in Home's model). The
   frames match the controller's member for member (`tests/test_link_vectors.py`
   replays the firmware's `page_*` golden cases) except `tag`, `seq` and
   `request`, which the companion assigns; a screen that resubscribes with

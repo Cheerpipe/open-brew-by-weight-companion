@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = ROOT / "tests/fixtures/stats-header-v1.vectors.json"
-SHA256 = "ad46e4e9d0acc434d37a72b3f60e2dc2f4b7a1b713f37c0410f316d8188de547"
+SHA256 = "402823758e72dd876c61ae73f13188a3c1dd8346a480de839096ffb10602a78a"
 
 
 class VectorRow(stats.Row, TypedDict):

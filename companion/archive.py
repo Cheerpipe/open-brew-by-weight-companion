@@ -1555,7 +1555,7 @@ class Archive:
         self.wake.set()
 
     # --- Stats over the whole history ------------------------------------------------
-    async def header(self, window: int, active: object, epoch: int, filters: Filters) -> Header:
+    async def header(self, window: int, active: int, epoch: int, filters: Filters) -> Header:
         """The Stats header the firmware would build over the merged history, and how many good
         shots the filters keep, once the mirror is at the controller's `epoch`. While the
         controller holds sync (or a request waits for it), the newest complete header answers at

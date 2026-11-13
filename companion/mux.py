@@ -52,7 +52,7 @@ FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
 type Frame = Mapping[str, object]
 # A History or a Stats group: its parameters in View.key's order.
 type HistoryKey = tuple[int, int, str, tuple[str, ...]]
-type StatsKey = tuple[int, int, str, str, str, int]
+type StatsKey = tuple[int, int, str, str, str, int, int]
 type Group = HistoryKey | StatsKey
 
 
@@ -73,6 +73,7 @@ class Params(TypedDict, total=False):
     sort: str
     filter: str  # Canonical JSON (_filter).
     window: int
+    preset: int  # The preset the Stats charts follow: 0 All, -1 the active one (none named).
 
 
 class Parked(TypedDict):
@@ -101,6 +102,7 @@ DEFAULTS: dict[str, Params] = {
         "dir": "desc",
         "filter": "{}",
         "window": 10,
+        "preset": -1,
     },
 }
 ROWS: dict[str, Literal["records", "rows"]] = {"history": "records", "stats": "rows"}
@@ -423,6 +425,7 @@ class View:
             params["dir"],
             params["filter"],
             params["window"],
+            params["preset"],
         )
 
     def op(self, key: Group, request: int, fetch: bool = False) -> dict[str, object]:
@@ -431,18 +434,25 @@ class View:
             op["fetch"] = True
         # The whole history may page past the controller's own records; it answers those empty.
         key = (min(key[0], CAPACITY[self.kind]), *key[1:])
-        if len(key) == 4:  # History's group; Stats' has six parameters.
+        if len(key) == 4:  # History's group; Stats' has seven parameters.
             offset, limit, direction, types = key
             op.update(request=request, offset=offset, limit=limit, dir=direction)
             if types or fetch:
                 op["types"] = list(types)
         else:
-            offset, limit, sort, direction, criteria, window = key
+            offset, limit, sort, direction, criteria, window, preset = key
             op.update(request=request, offset=offset, limit=limit, sort=sort, dir=direction)
             if criteria != "{}" or fetch:
                 op["filter"] = json.loads(criteria)
             if window != 10 or fetch:  # A fetch names its window: its header follows it [D3].
                 op["window"] = window
+            # And its chosen preset, as the subscription does. A fetch without one takes the
+            # standing subscription's, so one that follows the active preset names it while the
+            # standing one chose another (never towards a controller that predates `preset`).
+            if preset < 0 and fetch and self.standing is not None and self.standing[-1] != -1:
+                preset = self.mux.active_preset()
+            if preset >= 0:
+                op["preset"] = preset
         return op
 
     def standing_op(self, standing: Group) -> dict[str, object]:
@@ -522,9 +532,11 @@ class View:
                     "filter",
                     "window",
                     "tag",
+                    "preset",
                 },
             )
             window = _number(message, "window", 0, U32)
+            preset = _number(message, "preset", 0, 255)
             if window is not None and window not in STATS_WINDOWS:
                 raise InvalidOpError
             sort, criteria = _choice(message, "sort", ("date", "rating")), _filter(message)
@@ -536,7 +548,9 @@ class View:
                 given["filter"] = criteria
             if window is not None:
                 given["window"] = window
-            replaced = {"filter": "{}", "window": 10}
+            if preset is not None:
+                given["preset"] = preset
+            replaced = {"filter": "{}", "window": 10, "preset": -1}
         if not on:
             if set(message) - {"op", "on"}:
                 raise InvalidOpError
@@ -544,22 +558,22 @@ class View:
         elif (
             fetch
         ):  # Without a view of its own it is Home's rows-only Stats fetch, as on the controller.
-            if offset is None or tag is not None or (self.kind == "stats" and "window" in given):
+            if (
+                offset is None
+                or tag is not None
+                or (self.kind == "stats" and {"window", "preset"} & set(given))
+            ):
                 raise InvalidOpError
             self.fetch(screen, request or 0, {**record.params, **given})
         elif (
             self.kind == "stats"
             and record.group is not None
-            and set(given) == {"window"}
+            and given
+            and set(given) <= {"window", "preset"}
             and request is None
             and tag is None
         ):
-            self.subscribe(
-                screen,
-                record.request,
-                {**record.params, "window": given["window"]},
-                window_only=True,
-            )
+            self.subscribe(screen, record.request, {**record.params, **given}, window_only=True)
         else:
             self.subscribe(
                 screen, request or 0, {**record.params, **replaced, **given}, tag=tag or 0
@@ -617,7 +631,10 @@ class View:
                 if self.kind == "stats" and (not fetch or record.group is not None):
                     header = (
                         await archive.header(
-                            params["window"], self.mux.active_preset(), page["epoch"], ((), (), ())
+                            params["window"],
+                            params["preset"] if params["preset"] >= 0 else self.mux.active_preset(),
+                            page["epoch"],
+                            ((), (), ()),
                         )
                     )[0]
             except (sqlite3.Error, UnavailableError, ValueError) as error:
@@ -699,7 +716,14 @@ class View:
             self._subscribe_upstream(group)
         elif window_only and old == self.standing and alone:
             self.standing = group  # The header follows; the held rows stay [Stats window-only].
-            self.mux.up({"op": "stats", "on": True, "window": params["window"]})
+            self.mux.up(
+                {
+                    "op": "stats",
+                    "on": True,
+                    "window": params["window"],
+                    **({"preset": params["preset"]} if params["preset"] >= 0 else {}),
+                }
+            )
         elif group == self.standing:
             record.synced = False
             self._replay(screen)
@@ -1136,14 +1160,18 @@ class Mux:
             if store in (None, STORE[kind]):
                 view.refresh()
 
-    def active_preset(self) -> object:
-        """The active preset, from Home's model: the Stats header's "This preset" chart follows
-        it."""
+    def active_preset(self) -> int:
+        """The active preset, from Home's model: the Stats charts follow it until a page names
+        its own."""
         changes = self.home.changes
-        if "presets.activeId" in changes:
-            return changes["presets.activeId"]
-        presets = changes.get("presets")
-        return presets.get("activeId", 0) if isinstance(presets, dict) else 0
+        value = (
+            changes["presets.activeId"]
+            if "presets.activeId" in changes
+            else presets.get("activeId", 0)
+            if isinstance(presets := changes.get("presets"), dict)
+            else 0
+        )
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
     def unpark(self, notice: Frame | None = None) -> None:
         """Drop the parked pages (Forget, a link reset), or with an `rs` notice those whose store

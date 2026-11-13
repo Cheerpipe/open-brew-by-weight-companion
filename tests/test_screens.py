@@ -462,6 +462,14 @@ async def scenario() -> None:
             # The owner alone changes its window: the header refresh, not a new subscription.
             await a.send({"op": "stats", "on": True, "window": 100})
             assert (await ops_after(session, 4))[-1] == {"op": "stats", "on": True, "window": 100}
+            # So does its preset choice, with the window it holds.
+            await a.send({"op": "stats", "on": True, "preset": 2})
+            assert (await ops_after(session, 5))[-1] == {
+                "op": "stats",
+                "on": True,
+                "window": 100,
+                "preset": 2,
+            }
             # Home's rows-only fetch, from a screen with no Stats view: its rows, not a 4003.
             c = await screen(2).open()
             await c.next("home")
@@ -479,7 +487,9 @@ async def scenario() -> None:
                     "filter": {},
                 }
             )
-            ops = await ops_after(session, 5)
+            ops = await ops_after(session, 6)
+            # Following the active preset (none in Home's model here) while the standing window
+            # chose preset 2, the fetch names it: its header would follow the standing choice.
             assert ops[-1] == {
                 "op": "stats",
                 "on": True,
@@ -491,6 +501,7 @@ async def scenario() -> None:
                 "dir": "desc",
                 "filter": {},
                 "window": 10,
+                "preset": 0,
             }
             assert (await c.next("stats"))["request"] == 11
             assert (await c.next("stats"))["rowBase"] == 1
