@@ -1333,6 +1333,9 @@ def web_app(companion: Companion) -> web.Application:
         if shape[2] == ".json":
             notes = beanconqueror.notes(shot)
             return web.json_response(notes, headers=no_store) if notes else missing
+        # A served shot is an export people look for in the log, as on the controller.
+        name = "GaggiMate" if served == "gaggimate" else "Gaggiuino"
+        log(f"Beanconqueror: shot {shot.id} sent as a {name} shot")
         if served == "gaggimate":
             return octets(beanconqueror.slog(row, shot))
         return web.json_response(beanconqueror.gaggiuino_shot(row, shot), headers=no_store)

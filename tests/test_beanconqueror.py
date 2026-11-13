@@ -8,16 +8,19 @@ import json
 import math
 import struct
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
 from test_hardening import dead_target
 from test_relay import ID, SECRET, Idle
 
-from companion import beanconqueror
+from companion import beanconqueror, service
 from companion.service import Companion, web_app
 from companion.store import Store
+
+if TYPE_CHECKING:
+    import pytest
 
 VECTORS = json.loads((Path(__file__).parent / "fixtures/beanconqueror-v1.vectors.json").read_text())
 SERVED = [case for case in VECTORS["cases"] if case["served"]]
@@ -93,9 +96,13 @@ def test_archive_rows_decode_their_curve() -> None:
     assert beanconqueror.slog(row, shot) == base64.b64decode(SERVED[1]["gaggimate"]["slog"])
 
 
-def test_endpoints_answer_from_the_archive_alone(tmp_path: Path) -> None:
+def test_endpoints_answer_from_the_archive_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """With the controller unreachable, the archive answers both formats; Off, an unknown Host
-    and a bad shot do not."""
+    and a bad shot do not. Each served shot, and only a served shot, is logged."""
+    lines: list[str] = []
+    monkeypatch.setattr(service, "log", lines.append)
 
     async def scenario() -> None:
         store = Store(tmp_path)
@@ -150,6 +157,10 @@ def test_endpoints_answer_from_the_archive_alone(tmp_path: Path) -> None:
                 assert await latest.json() == [{"lastShotId": newest}]
                 served = await client.get(f"/beanconqueror/api/shots/{newest}", headers=host)
                 assert await served.json() == case["gaggiuino"]["shot"]
+                assert lines == [
+                    f"Beanconqueror: shot {newest} sent as a GaggiMate shot",
+                    f"Beanconqueror: shot {newest} sent as a Gaggiuino shot",
+                ]
             finally:
                 await client.close()
                 await companion.logs.close()

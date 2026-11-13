@@ -827,7 +827,9 @@ the request's `Host`, checked as the controller checks its own: an IP address,
 or the companion's host name, bare or under a home-network suffix (`.local`,
 `.lan`, `.home.arpa`, `.internal`), so a page from elsewhere cannot read it
 through a rebound name. The address is public by design, like the machines it
-stands in for. The
+stands in for. Each
+served shot is logged at INFO (`Beanconqueror: shot <id> sent as a Gaggiuino
+shot`, or `GaggiMate`), as the controller logs its own. The
 status JSON gives `beanconqueror`, `ip` and `httpPort` for the address the
 Settings section shows.
 
