@@ -1,7 +1,8 @@
 """The Web UI Stats header over the whole history: a port of the firmware's formatStatsHeader.
 
 The firmware builds the header (the aggregate, both density charts, the
-consistency series and the filter facets) over its newest 1000 shots; the
+consistency series, the filter facets, the chosen preset and its cut series)
+over its newest 1000 shots; the
 companion builds the same header over the merged history and the browser
 draws it with the same renderer. The port follows the firmware line for line
 (`OpenBrewByWeightStatsHeader.inc`, `OpenBrewByWeightStatsJson.inc`,
@@ -22,7 +23,7 @@ and is held to the shared golden vectors (`stats-header-v1.vectors.json`):
 import math
 import struct
 import zlib
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Sequence
@@ -32,6 +33,13 @@ MISSING = None
 # Looked up with a row's verdict, which may be missing (None).
 VERDICTS: dict[str | None, int] = {"on_recipe": 0, "fast": 1, "slow": 2}
 BBW_STOPS = frozenset({"normal_target", "extended_max_weight", "slow_min_weight"})
+# statsGuardStop: 1 the fast-shot guard extended the shot, 2 the slow-shot guard shortened it.
+GUARD_STOPS = {
+    "extended_max_weight": 1,
+    "extended_min_time": 1,
+    "slow_max_time": 2,
+    "slow_min_weight": 2,
+}
 # Every row field the header reads (Record below), so callers can leave the rest, the curve above
 # all.
 FIELDS = (
@@ -97,6 +105,13 @@ class Density(TypedDict):
 class Consistency(TypedDict):
     t: list[int | None]
     p: int | list[int]
+    g: NotRequired[list[int]]
+
+
+class Cut(TypedDict):
+    t: int | list[int]
+    e: list[int]
+    g: NotRequired[list[int]]
 
 
 class Facets(TypedDict):
@@ -108,6 +123,13 @@ class Header(Aggregate):
     dens: list[Density | bool | None]
     cons: Consistency
     facets: Facets
+    preset: int
+
+
+class CutHeader(Header):
+    """A header whose chosen preset has weight cuts: their series."""
+
+    cut: Cut
 
 
 def f32(value: float) -> float:
@@ -153,6 +175,7 @@ class Record:
         "fast",
         "flow",
         "goal",
+        "guard",
         "local",
         "preset",
         "preset_name",
@@ -178,6 +201,7 @@ class Record:
         timed = self.arrival is not None and self.arrival != 0
         self.result = VERDICTS.get(row.get("verdict"), 3) if timed else 3
         self.auto, self.bbw_stop = row.get("shotType") == "auto", row.get("stopDetail") in BBW_STOPS
+        self.guard = GUARD_STOPS.get(str(row.get("stopDetail")), 0)
         self.preset, self.preset_name = row.get("presetId") or 0, row.get("presetName") or ""
         self.scale = row.get("scaleName") or ""
         self.wall, self.local = bool(row.get("hasWallTime")), row.get("endedAtLocalSec") or 0
@@ -299,9 +323,9 @@ def density(shots: Sequence[Record]) -> Density:
     }
 
 
-def header(rows: Iterable[Row], window: int, active: object) -> Header:
-    """formatStatsHeader over `rows` (Stats rows, newest first) for `window` and the active
-    preset, as the controller sent it (only ever compared with a record's preset)."""
+def header(rows: Iterable[Row], window: int, active: int) -> Header:
+    """formatStatsHeader over `rows` (Stats rows, newest first) for `window` and the chosen
+    preset (0 All): its density chart and cut series."""
     records = [Record(row) for row in rows]
     built = aggregate(records, window)
     timed, own, found = [], 0, 0
@@ -314,11 +338,11 @@ def header(rows: Iterable[Row], window: int, active: object) -> Header:
         if record.result > 2:
             continue
         timed.append(record)
-        own += record.preset == active
+        own += bool(active) and record.preset == active
     one_preset = all(record.preset == timed[0].preset for record in timed)
     dens: list[Density | bool | None] = [
         density(timed) if timed else None,
-        density([r for r in timed if r.preset == active])
+        density([r for r in timed if active and r.preset == active])
         if 0 < own < len(timed)
         else bool(own) or None,
     ]
@@ -328,6 +352,8 @@ def header(rows: Iterable[Row], window: int, active: object) -> Header:
         if one_preset
         else [record.preset for record in reversed(timed)],
     }
+    if any(record.guard for record in timed):
+        cons["g"] = [record.guard for record in reversed(timed)]
     presets: list[list[int | str]] = []
     scales: list[list[int | str]] = []
     for record in records:
@@ -346,7 +372,36 @@ def header(rows: Iterable[Row], window: int, active: object) -> Header:
             and key not in [k for k, _ in scales]
         ):
             scales.append([key, record.scale])
-    return {**built, "dens": dens, "cons": cons, "facets": {"presets": presets, "scales": scales}}
+    built_header: Header = {
+        **built,
+        "dens": dens,
+        "cons": cons,
+        "facets": {"presets": presets, "scales": scales},
+        "preset": active,
+    }
+    # The chosen preset's newest `window` weight cuts with a settled yield, oldest first.
+    cuts = [
+        record
+        for record in records
+        if active
+        and record.preset == active
+        and record.eligible()
+        and record.auto
+        and record.goal > 0
+        and record.bbw_stop
+    ][:window][::-1]
+    if cuts:
+        cut: Cut = {
+            "t": cuts[0].goal
+            if all(record.goal == cuts[0].goal for record in cuts)
+            else [record.goal for record in cuts],
+            "e": [known(record.actual) - 10 * record.goal for record in cuts],
+        }
+        if any(record.guard for record in cuts):
+            cut["g"] = [record.guard for record in cuts]
+        with_cut: CutHeader = {**built_header, "cut": cut}
+        return with_cut
+    return built_header
 
 
 def good(

@@ -163,7 +163,8 @@ controller's history fills up:
   sorting and scrolling cover both. Older shots carry a grey number, since
   numbers start again after a factory reset.
 - **Stats** opened through the companion count your whole history too: the
-  averages, the arrival and consistency charts and the filters cover every
+  averages, the shot time, consistency and cut accuracy charts and the
+  filters cover every
   shot it keeps, and you can choose 500 shots or all of them besides 10, 50
   and 100 once you have that many. Until the companion has the controller's
   newest shot, Stats show the controller's own figures and say so.
