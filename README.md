@@ -5,7 +5,9 @@ controller, on a computer at home that is always on. It is optional: the
 controller does everything on its own, and the companion takes work off it.
 
 - **A secure address for the Web UI:**
-  **`https://openbrewbyweight-secure.local`**. Over HTTPS your phone keeps a
+  **`https://openbrewbyweight-secure.local`**, named after your controller
+  (a controller called `Cafe Bar` gives `https://cafe-bar-secure.local`), or
+  the companion's IP address, such as `https://192.168.1.240`. Over HTTPS your phone keeps a
   full copy of the Web UI. It opens instantly, shows up even while the
   espresso machine is off, and reconnects on its own as soon as the
   controller is back. The controller's own address keeps working as before.
@@ -293,7 +295,9 @@ Get the latest version, then rebuild and check it:
 git pull && ./setup --yes
 ```
 
-Your settings and the `data` folder are kept, so devices stay set up.
+Your settings and the `data` folder are kept, so devices stay set up. The one
+exception is the first update whose certificate also covers the companion's IP
+address: every device needs the new certificate once, from the setup page.
 
 ### Stop
 
@@ -323,7 +327,7 @@ hand, edit `.env`, leave a value empty to use its default, and run
 | `LAN_NETWORK` | empty | A macvlan or ipvlan network that already exists on the server, to join instead of creating one; see [examples](examples/README.md#a-lan-network-that-already-exists). |
 | `COMPANION_NAME` | this server's name | The name the companion shows on its pages. |
 | `COMPANION_TZ` | `UTC` | Timezone of the companion's log lines (for example `America/Santiago`), so they line up with the controller's log. |
-| `COMPANION_HOSTNAME` | `openbrewbyweight-secure` | The name devices open, followed by `.local`. Changing it means setting up every device again. |
+| `COMPANION_HOSTNAME` | empty | Empty: the controller's name followed by `-secure`, which follows the controller when you rename it. Set a name to keep one that never changes. A new name means setting up every device again. |
 | `COMPANION_MDNS_PUBLISH` | `true` | Turn off if your own DNS already points the name at the companion. |
 | `COMPANION_HTTP_PORT` / `COMPANION_HTTPS_PORT` | `80` / `443` | Ports for the setup page and the secure Web UI. |
 | `OBBW_CONTROLLER_URL` | empty | Empty finds the controller by itself. `http://<ip>` or `http://<name>.local` uses that one controller only. |
@@ -383,11 +387,19 @@ live only in memory and change every time it starts.
 
 - **Keep the `data` folder.** It holds the certificate your devices trust
   and the companion's pairing. If you delete it, every device has to be set
-  up again and the companion paired again. Changing `COMPANION_HOSTNAME`
-  also means setting up every device again, but keeps the pairing. Routine
-  renewals happen by themselves and need nothing from your devices.
-- **The certificate only works for the companion's name.** A device that trusts
-  it cannot be fooled into trusting any other website with it.
+  up again and the companion paired again. Routine renewals happen by
+  themselves and need nothing from your devices.
+- **The address follows the controller's name.** Rename the controller in
+  the Web UI and the companion moves to the new `-secure.local` name on its
+  own. The certificate is made for one name and one IP address, so a new
+  controller name, a new `COMPANION_HOSTNAME` or a new IP address for the
+  companion means setting up every device again; the pairing stays. Give the
+  companion a fixed address in your router so its IP does not change.
+- **The certificate only works for the companion's name and IP address.** A
+  device that trusts it cannot be fooled into trusting any other website with it.
+- **The name and the IP address are two separate sites for your browser.**
+  An app added to the Home Screen, the sign-in and shot notifications belong
+  to the address you used; pick one and stay with it.
 - **The server cannot open the companion itself** because the companion has its
   own address. Every other device on the network can.
 - **Each device signs in on its own.** A paired companion tells the controller

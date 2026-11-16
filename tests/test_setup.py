@@ -71,15 +71,20 @@ def test_env_migration(tmp_path: Path, bash: str) -> None:
     result = run()
     assert result.returncode == 1, result
     assert "cannot use Docker" in result.stderr, result
-    assert "Renamed the settings" in result.stdout
+    assert "Updated the settings" in result.stdout
     assert (folder / ".env").read_text() == NEW
     assert (folder / ".env.bak").read_text() == OLD, "the earlier file is kept"
 
     (folder / ".env.bak").unlink()
     result = run()
-    assert "Renamed" not in result.stdout
+    assert "Updated" not in result.stdout
     assert (folder / ".env").read_text() == NEW
     assert not (folder / ".env.bak").exists(), "an already migrated .env is left alone"
+
+    # The earlier default name gives way to the one that follows the controller's name.
+    (folder / ".env").write_text("COMPANION_HOSTNAME=openbrewbyweight-secure\n")
+    assert "Updated the settings" in run().stdout
+    assert (folder / ".env").read_text() == "COMPANION_HOSTNAME=\n"
 
 
 # The controller search, against a fake Docker whose companion finds nothing over mDNS.

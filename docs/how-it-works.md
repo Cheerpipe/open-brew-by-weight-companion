@@ -116,7 +116,14 @@ scale, so the gateway avoids generating traffic toward it:
 ## Publishing the name
 
 The supervisor registers an `_https._tcp` service whose host is the gateway's
-name (`openbrewbyweight-secure.local` by default) at `COMPANION_IP`. That also
+name at `COMPANION_IP`. Without `COMPANION_HOSTNAME`, the name is the paired
+controller's own mDNS name followed by `-secure`, derived from the `dev` frame
+it sends over the pairing link when the link opens and after every rename
+(never from discovery, which is unauthenticated). It is kept in
+`data/hostname` across restarts; before any controller names itself it is
+`openbrewbyweight-secure.local`. After a rename the supervisor sends a goodbye
+for the old name, publishes the new one, issues the certificates for it and
+reloads nginx. That also
 publishes the name's address record, so any device that understands mDNS can
 open it. python-zeroconf shares the mDNS port with other responders on the
 same host, such as Avahi or Home Assistant. On shutdown, the gateway sends
@@ -128,16 +135,18 @@ On first start, the supervisor creates a private certificate authority (CA)
 in the `data` folder, with Python's `cryptography` library:
 
 - ECDSA P-256, valid for ten years.
-- **Name-constrained** to the gateway's name only (`permitted;DNS:<name>`),
-  so even a stolen CA key cannot produce a trusted certificate for any other
-  site.
+- **Name-constrained** to the gateway's name and IP address only
+  (`permitted;DNS:<name>`, `permitted;IP:<ip>/32`), so even a stolen CA key
+  cannot produce a trusted certificate for any other site.
 
-It then issues the server certificate for the gateway's name. That
+It then issues the server certificate for the gateway's name and IP address
+(`subjectAltName` `DNS:<name>, IP:<ip>`). That
 certificate is valid for 397 days, the maximum Apple accepts, and is renewed
 30 days before it expires. The supervisor checks twice a day and reloads
 nginx after a renewal. Devices trust the CA, not the server certificate, so
-renewals need nothing from them. If the gateway's name changes, the existing
-CA cannot cover it and a new one is created.
+renewals need nothing from them. If the gateway's name or IP address changes,
+the existing CA cannot cover it and a new one is created; a CA from an earlier
+version, constrained to the name alone, is replaced the same way.
 
 The setup page offers the CA as a `.crt` file (Mac, Windows, Android) and as
 an Apple configuration profile (`.mobileconfig`, iPhone and iPad). The

@@ -462,6 +462,8 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             controller = (await companion.status())["controller"]
             assert isinstance(controller, dict)
             assert controller["name"] == "Cafe Bar", "falls back to discovery"
+            named: list[str] = []
+            companion.on_name = named.append
             await session.send({"t": "dev", "name": "Cafe Bar 2"})
             await eventually(lambda: companion.device_name == "Cafe Bar 2")
             status = await companion.status()
@@ -476,6 +478,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             await session.send({"t": "dev", "name": "Bar"})  # A rename reaches the page.
             await eventually(lambda: companion.device_name == "Bar")
             assert (await companion.status())["pairedWith"] == "Bar"
+            assert named == ["Cafe Bar 2", "Bar"], "the supervisor follows each valid name once"
             await session.send({"t": "cfg", "lm": True, "conn": "ws", "observe": True})
             assert await session.next("lm") == {"q": 2, "t": "lm", "sub": False, "ep": 0, "tok": 0}
             assert upstream.configured == [(None, "ws", True)], "no account yet"

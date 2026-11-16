@@ -78,8 +78,8 @@ OBBW_CONTROLLER_NAME=Cafe Bar
 ```
 
 For a second controller, run a second copy of this folder with its own
-`COMPANION_IP`, `COMPANION_HOSTNAME` (for example `cafe-bar-secure`),
-`OBBW_CONTROLLER_NAME` and `COMPANION_DATA`.
+`COMPANION_IP`, `OBBW_CONTROLLER_NAME` and `COMPANION_DATA`. Each copy takes
+its name from its own controller, for example `cafe-bar-secure.local`.
 
 ## A different name
 
@@ -87,8 +87,9 @@ For a second controller, run a second copy of this folder with its own
 COMPANION_HOSTNAME=espresso
 ```
 
-Devices then open `https://espresso.local`. Changing the name later creates a
-new certificate authority, and every device has to be set up again.
+Devices then open `https://espresso.local`, and renaming the controller no
+longer changes it. Changing the name later creates a new certificate
+authority, and every device has to be set up again.
 
 ## Your own DNS instead of mDNS
 

@@ -108,9 +108,13 @@ set by hand the companion does not look for it any more.
 
 ## `openbrewbyweight-secure.local` does not open
 
-- Open `http://<COMPANION_IP>` instead. If that works, the device cannot open
-  `.local` names: on Android update to 12 or newer, or point the name at
-  `COMPANION_IP` in your router's DNS and set `COMPANION_MDNS_PUBLISH=false`.
+- If you renamed the controller, the companion moved with it: a controller
+  called `Cafe Bar` is at `cafe-bar-secure.local`. Every device needs the new
+  certificate, so open `http://cafe-bar-secure.local` and set it up again.
+- Open `https://<COMPANION_IP>` instead. If that works, the device cannot open
+  `.local` names: keep using the IP address, update Android to 12 or newer, or
+  point the name at `COMPANION_IP` in your router's DNS and set
+  `COMPANION_MDNS_PUBLISH=false`.
 - If the companion's address does not answer either, the container may not be
   on the network. Check `LAN_INTERFACE`, `LAN_SUBNET` and `LAN_ROUTER`, and
   that `COMPANION_IP` is free. Some hypervisors and NAS systems need

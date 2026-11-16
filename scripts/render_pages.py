@@ -20,6 +20,7 @@ SAMPLE = {
     "NAME": "Kitchen server",
     "VERSION": "1.0.0+0123abc",
     "HOSTNAME": "openbrewbyweight-secure.local",
+    "IP": "192.168.1.240",
     "CA_NAME": gateway.CA_NAME,
     "FINGERPRINT": ":".join(["AB"] * 32),
     "QR": gateway.qr_svg(SETUP_URL),

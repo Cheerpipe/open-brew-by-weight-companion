@@ -163,6 +163,7 @@ class Companion:
         self.id, self.key = self.store.identity()
         self.controller: Target | None = None  # From the supervisor.
         self.device_name: str | None = None  # The controller's own name, from its `dev` frame.
+        self.on_name: Callable[[str], object] = lambda _: None  # The supervisor follows it.
         # Its stable id (the webhook's deviceId), the log store's key, kept there.
         self.device_id: str | None = None
         self.tasks: set[asyncio.Task[Any]] = set()
@@ -709,6 +710,7 @@ class Companion:
         ):
             log(f"the controller is named '{name}'")
             self.device_name = name
+            self.on_name(name)
 
     async def _device_id(self, value: object) -> None:
         """The controller's stable id (its MAC text): the log store's key, kept across
@@ -1969,6 +1971,12 @@ class Handle:
         else:
             done(False)
 
+    def rename(self, hostname: str) -> None:
+        """The companion's own .local name changed with the controller's."""
+        if self.loop and self.companion:
+            address = (hostname, *self.companion.address[1:])  # Its IP and port stay.
+            self.loop.call_soon_threadsafe(setattr, self.companion, "address", address)
+
     def stop(self) -> None:
         if self.loop and self.stopping:
             self.loop.call_soon_threadsafe(self.stopping.set)
@@ -1991,7 +1999,12 @@ async def _retention(companion: Companion) -> None:
 
 
 async def _serve(
-    cfg: Config, data: Path, socket_path: Path, handle: Handle, ready: threading.Event
+    cfg: Config,
+    data: Path,
+    socket_path: Path,
+    handle: Handle,
+    ready: threading.Event,
+    on_name: Callable[[str], object],
 ) -> None:
     # One connection per request: the controller has few sockets.
     async with (
@@ -2006,6 +2019,7 @@ async def _serve(
             cfg.get("log_retention_mb", RETENTION_MB_DEFAULT),
         )
         companion.address = (cfg.get("hostname", ""), cfg.get("ip", ""), cfg.get("http_port", 80))
+        companion.on_name = on_name
         await companion.open_log()
         runner = web.AppRunner(web_app(companion), access_log=None)
         await runner.setup()
@@ -2051,13 +2065,20 @@ async def _loop_watchdog() -> None:
             log(f"the event loop stood still {late:.0f} s")
 
 
-def start(cfg: Config, data: Path, run: Path, on_exit: Callable[[], object]) -> Handle:
-    """Run the companion on its own thread; on_exit runs if it ever stops."""
+def start(
+    cfg: Config,
+    data: Path,
+    run: Path,
+    on_exit: Callable[[], object],
+    on_name: Callable[[str], object] = lambda _: None,
+) -> Handle:
+    """Run the companion on its own thread; on_exit runs if it ever stops, on_name (on its
+    thread) whenever the paired controller tells its name."""
     handle, ready = Handle(), threading.Event()
 
     def main() -> None:
         try:
-            asyncio.run(_serve(cfg, data, run / "companion.sock", handle, ready))
+            asyncio.run(_serve(cfg, data, run / "companion.sock", handle, ready, on_name))
         except Exception:
             logger.info("stopped after an error:", exc_info=True)
         finally:
