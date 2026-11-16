@@ -666,8 +666,12 @@ class Companion:
             command_id, op, value = frame.get("id"), frame.get("op"), frame.get("v")
             if type(command_id) is not int or command_id < 1:
                 raise LinkClosedError("PROTOCOL", "command without an id")
-            if op == "temp" and type(value) is int and 0 < value < 2000:
-                _ = self.spawn(self._command(command_id, "temp", value))
+            if type(value) is int and (
+                (op == "temp" and 0 < value < 2000)
+                or (op == "steam" and value in (0, 1))
+                or (op == "steamlevel" and 1 <= value <= 3)
+            ):
+                _ = self.spawn(self._command(command_id, op, value))
             elif isinstance(op, str) and op in ("standby", "on", "refresh"):
                 _ = self.spawn(self._command(command_id, op, None))  # These carry no value.
             else:

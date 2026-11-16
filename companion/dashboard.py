@@ -21,9 +21,10 @@ WIDGETS = {
         "targetTemperatureMax",
         "readyStartTime",
     ),
-    "CMSteamBoilerLevel": ("status", "targetLevel", "readyStartTime"),
+    # `enabled` is the steam switch a preset turns on or off.
+    "CMSteamBoilerLevel": ("status", "enabled", "targetLevel", "readyStartTime"),
     # The Linea Mini's steam boiler: the controller reads no steam temperature.
-    "CMSteamBoilerTemperature": ("status", "readyStartTime"),
+    "CMSteamBoilerTemperature": ("status", "enabled", "readyStartTime"),
     "CMBackFlush": ("status",),  # Only from pushes, as the direct decoder enforces.
 }
 CONSUMED = {"connected", "widgets", "removedWidgets", "code", "output"}.union(*WIDGETS.values())
@@ -104,6 +105,18 @@ def confirms(dashboard: Mapping[str, object], op: str, value: int | None) -> boo
                 and round(target * 10) == value
             ):
                 return True
+        if (
+            op == "steam"
+            and str(widget.get("code")).startswith("CMSteamBoiler")
+            and output.get("enabled") is (value == 1)
+        ):
+            return True
+        if (
+            op == "steamlevel"
+            and widget.get("code") == "CMSteamBoilerLevel"
+            and output.get("targetLevel") == f"Level{value}"
+        ):
+            return True
         if (
             op in ("standby", "on")
             and widget.get("code") == "CMMachineStatus"

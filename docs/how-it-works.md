@@ -345,8 +345,8 @@ counted, and the page asks you to update the companion.
 The service has its own La Marzocco client, the same minimal client the
 controller has: it registers its own installation key (`/auth/init`), signs
 in, signs every request with the installation key, renews the token after
-50 minutes, reads the dashboard and sends the two commands the controller
-uses (boiler temperature and mode). With the WebSocket connection type it
+50 minutes, reads the dashboard and sends the commands the controller uses
+(brew temperature, steam boiler on/off, steam level and mode). With the WebSocket connection type it
 subscribes over STOMP to the machine's dashboard and pings every 15 seconds,
 reconnecting after 30 seconds without an answer; with the API type it reads
 the dashboard every 30 seconds. Only its renewal loop refreshes a valid
@@ -375,8 +375,8 @@ while the controller has set the route to the companion:
 - **Only what the controller reads.** Each La Marzocco event is reduced to
   La Marzocco's own dashboard shape with only `connected`, the machine mode,
   the coffee and steam boiler status, target and ready time (with the range
-  the machine accepts for the coffee target; a steam boiler set by
-  temperature sends its status and ready time only), and, in pushes
+  the machine accepts for the coffee target), whether the steam boiler is
+  on (a steam boiler set by temperature sends no target), and, in pushes
   only, the backflush status. An event that carries none of them is
   dropped; one that does is sent even when nothing changed.
 - **`full`** when the route starts and after every new La Marzocco

@@ -145,6 +145,7 @@ def test_dashboard_filter() -> None:
                 "code": "CMSteamBoilerLevel",
                 "output": {
                     "status": "HeatingUp",
+                    "enabled": True,
                     "targetLevel": "Level3",
                     "readyStartTime": 1760000820500,
                 },
@@ -202,7 +203,11 @@ def test_dashboard_filter() -> None:
             "widgets": [
                 {
                     "code": "CMSteamBoilerTemperature",
-                    "output": {"status": "HeatingUp", "readyStartTime": 1760000820500},
+                    "output": {
+                        "status": "HeatingUp",
+                        "enabled": True,
+                        "readyStartTime": 1760000820500,
+                    },
                 }
             ]
         }
@@ -228,7 +233,7 @@ def test_dashboard_filter() -> None:
             {"code": "CMMachineStatus", "output": "broken"},
             "note",
             {"code": 7},
-            {"code": "CMSteamBoilerLevel", "output": {"enabled": True}},
+            {"code": "CMSteamBoilerLevel", "output": {"enabledSupported": True}},
         ],
         "removedWidgets": "x",
     }
@@ -256,3 +261,11 @@ def test_dashboard_filter() -> None:
     assert dashboard.confirms(pushes["standby"], "standby", None)
     assert not dashboard.confirms(pushes["standby"], "on", None)
     assert not dashboard.confirms(pushes["commandsOnly"], "on", None)
+    steam_off = {"widgets": [{"code": "CMSteamBoilerLevel", "output": {"enabled": False}}]}
+    assert dashboard.confirms(steam_off, "steam", 0)
+    assert not dashboard.confirms(steam_off, "steam", 1)
+    assert dashboard.confirms({"widgets": [mini_steam]}, "steam", 1)
+    level2 = {"widgets": [{"code": "CMSteamBoilerLevel", "output": {"targetLevel": "Level2"}}]}
+    assert dashboard.confirms(level2, "steamlevel", 2)
+    assert not dashboard.confirms(level2, "steamlevel", 3)
+    assert not dashboard.confirms({"widgets": [mini_steam]}, "steamlevel", 3)

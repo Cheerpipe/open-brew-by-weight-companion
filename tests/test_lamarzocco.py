@@ -325,6 +325,8 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             assert await lm.command(7, "temp", 935) == 200
             assert await lm.command(8, "standby") == 200
             assert await lm.command(9, "on") == 200
+            assert await lm.command(10, "steam", 0) == 200
+            assert await lm.command(11, "steamlevel", 2) == 200
             assert cloud.commands == [
                 (
                     "CoffeeMachineSettingCoffeeBoilerTargetTemperature",
@@ -333,6 +335,16 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
                 ),
                 ("CoffeeMachineChangeMode", '{"mode":"StandBy"}', "application/json"),
                 ("CoffeeMachineChangeMode", '{"mode":"BrewingMode"}', "application/json"),
+                (
+                    "CoffeeMachineSettingSteamBoilerEnabled",
+                    '{"boilerIndex":1,"enabled":false}',
+                    "application/json",
+                ),
+                (
+                    "CoffeeMachineSettingSteamBoilerTargetLevel",
+                    '{"boilerIndex":1,"targetLevel":"Level2"}',
+                    "application/json",
+                ),
             ]
             await cloud.push(D["pushes"]["temperature"])
             await events.wait(
@@ -341,11 +353,11 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
                     and events.log[-1][1] == D["pushes"]["temperature"]
                 )
             )
-            assert events.log[-1] == ("pushed", D["pushes"]["temperature"], 9)
-            assert (await lm.read())[2] == 9
+            assert events.log[-1] == ("pushed", D["pushes"]["temperature"], 11)
+            assert (await lm.read())[2] == 11
             cloud.command_status = 409
-            assert await lm.command(10, "temp", 1001) == 409
-            assert lm.last_command == 10
+            assert await lm.command(12, "temp", 1001) == 409
+            assert lm.last_command == 12
 
             # WebSocket pings keep it alive; a missing pong ends the subscription, then it
             # resubscribes.

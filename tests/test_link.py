@@ -626,7 +626,26 @@ async def scenario(monkeypatch: pytest.MonkeyPatch, lines: Lines) -> None:
             assert (await session.next("res"))["r"] == "accepted"
             await session.send({"t": "cmd", "id": 11, "op": "temp", "v": "93.5"})
             assert (await session.next("res"))["http"] == 0
-            assert [c[:2] for c in upstream.commands] == [(7, "temp"), (8, "standby"), (9, "on")]
+            for bad in ({"op": "steam", "v": 2}, {"op": "steamlevel", "v": 4}, {"op": "steam"}):
+                await session.send({"t": "cmd", "id": 12, **bad})
+                assert (await session.next("res"))["http"] == 0
+            upstream.command_status = 200
+            for command_id, op, value, output in (
+                (13, "steam", 0, {"enabled": False}),
+                (14, "steamlevel", 2, {"targetLevel": "Level2"}),
+            ):
+                upstream.confirm = {"widgets": [{"code": "CMSteamBoilerLevel", "output": output}]}
+                await session.send({"t": "cmd", "id": command_id, "op": op, "v": value})
+                assert (await session.next("st"))["k"] == "push"
+                assert (await session.next("res"))["r"] == "accepted"
+            upstream.confirm = None
+            assert [c[:3] for c in upstream.commands] == [
+                (7, "temp", 935),
+                (8, "standby", None),
+                (9, "on", None),
+                (13, "steam", 0),
+                (14, "steamlevel", 2),
+            ]
             await session.quiet(0.6)
 
             # --- A new La Marzocco subscription epoch sends `full` again ---------

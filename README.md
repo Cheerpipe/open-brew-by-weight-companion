@@ -205,8 +205,8 @@ account to the companion, encrypted with a key only the two of them know.
   phone. It follows your **Settings** for the connection type (WebSocket or
   API) and **Show power state**.
 - At a quiet moment, never during a shot, the controller switches to the
-  companion. You see the same machine state, temperature and power commands
-  keep working, the scale and paddle still wake the machine, and backflush
+  companion. You see the same machine state, preset machine settings and
+  power commands keep working, the scale and paddle still wake the machine, and backflush
   supervision is unchanged.
 - When the companion stops, restarts or loses the network, the controller
   goes back to its own connection by itself, waiting until a shot with a

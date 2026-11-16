@@ -51,6 +51,8 @@ RETRY_S = (
 POLICY_PENDING = "USER_MUST_ACCEPT_POLICY"  # The 403 code while the latest terms are not accepted.
 COMMANDS = {
     "temp": "CoffeeMachineSettingCoffeeBoilerTargetTemperature",
+    "steam": "CoffeeMachineSettingSteamBoilerEnabled",
+    "steamlevel": "CoffeeMachineSettingSteamBoilerTargetLevel",
     "standby": "CoffeeMachineChangeMode",
     "on": "CoffeeMachineChangeMode",
 }
@@ -524,10 +526,16 @@ class LaMarzocco:
         """Send one command; returns its HTTP status (0 for a transport failure)."""
         if self.account is None or not self._usable():
             return 0
-        if op == "temp":
+        if op in ("temp", "steam", "steamlevel"):
             if value is None:
-                raise TypeError("a temp command needs its value")
-            body = f'{{"boilerIndex":1,"targetTemperature":{value // 10}.{value % 10}}}'
+                raise TypeError(f"a {op} command needs its value")
+            body = (
+                f'{{"boilerIndex":1,"targetTemperature":{value // 10}.{value % 10}}}'
+                if op == "temp"
+                else f'{{"boilerIndex":1,"enabled":{"true" if value else "false"}}}'
+                if op == "steam"
+                else f'{{"boilerIndex":1,"targetLevel":"Level{value}"}}'
+            )
         else:
             body = '{"mode":"StandBy"}' if op == "standby" else '{"mode":"BrewingMode"}'
         self.last_command = command_id
