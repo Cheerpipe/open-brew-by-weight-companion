@@ -32,7 +32,7 @@ services:
       # The log's clock matches the controller's, so the two interleave.
       TZ: ${COMPANION_TZ:-UTC}
       COMPANION_NAME: ${COMPANION_NAME:-}
-      COMPANION_HOSTNAME: ${COMPANION_HOSTNAME:-${GATEWAY_HOSTNAME:-openbrewbyweight-secure}}
+      COMPANION_HOSTNAME: ${COMPANION_HOSTNAME:-${GATEWAY_HOSTNAME:-}}
       COMPANION_IP: ${COMPANION_IP:-${GATEWAY_IP:-}}
       COMPANION_HTTP_PORT: ${COMPANION_HTTP_PORT:-${HTTP_PORT:-80}}
       COMPANION_HTTPS_PORT: ${COMPANION_HTTPS_PORT:-${HTTPS_PORT:-443}}

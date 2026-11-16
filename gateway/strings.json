@@ -13,7 +13,7 @@
     "qr_download": "Reading this on a computer? Scan this code with the phone's camera to download the file straight onto it, then continue from step 2.",
     "setup_title": "Set up each device once",
     "setup_intro": "Each phone, tablet or computer needs to trust the companion's certificate one time. Pick your device and follow the steps.",
-    "only_name": "The certificate only works for <code>@HOSTNAME@</code>; it cannot be used to impersonate any other website.",
+    "only_name": "The certificate only works for <code>@HOSTNAME@</code> and <code>https://@IP@</code>; it cannot be used to impersonate any other website.",
     "ios": "iPhone and iPad",
     "ios_steps": [
       "Open this page in <strong>Safari</strong> and tap <a href=\"/@CA_NAME@.mobileconfig\">Download the profile</a>. Choose <strong>Allow</strong>.",

@@ -489,6 +489,8 @@ def test_the_supervisor_moves_only_to_a_proved_address(
     asked: list[tuple[str, int]] = []
     infos: dict[str, Info | Exception] = {}
     handlers: list[Callable[..., None]] = []
+    named: list[Callable[[str], object]] = []
+    renamed: list[str] = []
     type_name = "_http._tcp.local."
 
     class Handle:
@@ -498,6 +500,9 @@ def test_the_supervisor_moves_only_to_a_proved_address(
         def prove(self, target: Target, done: Callable[[bool], object]) -> None:
             asked.append(target[1])
             done(target[1][0] != "192.168.1.66")
+
+        def rename(self, hostname: str) -> None:
+            renamed.append(hostname)
 
         def stop(self) -> None: ...
 
@@ -525,7 +530,12 @@ def test_the_supervisor_moves_only_to_a_proved_address(
     run.mkdir()
     monkeypatch.setattr(gateway, "DATA", data)
     monkeypatch.setattr(gateway, "RUN", run)
-    monkeypatch.setattr(gateway, "start_companion", lambda *_: Handle())
+
+    def start(*args: Any) -> Handle:
+        named.append(args[4])  # The supervisor's on_name callback.
+        return Handle()
+
+    monkeypatch.setattr(gateway, "start_companion", start)
     monkeypatch.setattr(gateway, "Zeroconf", Zeroconf)
     monkeypatch.setattr(gateway, "ServiceBrowser", Browser)
     monkeypatch.setattr(gateway, "lan_network", lambda _ip: None)
@@ -556,6 +566,19 @@ def test_the_supervisor_moves_only_to_a_proved_address(
         announce(BadTypeInNameException("x._ipp._tcp.local."))
         announce("192.168.1.51")
         checks["moved"] = told[-1] == ("Micra", ("192.168.1.51", 80))
+        named[0]("Cafe Bar")  # The paired controller's `dev` frame, as the companion hears it.
+        time.sleep(0.2)
+        cert = x509.load_pem_x509_certificate((data / "server.crt").read_bytes())
+        checks["renamed"] = (
+            json.loads(upstream())["hostname"]
+            == (data / gateway.HOSTNAME_FILE).read_text()
+            == "cafe-bar-secure.local"
+            and renamed == ["cafe-bar-secure.local"]
+            and cert.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName
+            ).value.get_values_for_type(x509.DNSName)
+            == ["cafe-bar-secure.local"]
+        )
         os.kill(os.getpid(), signal.SIGTERM)
 
     checks: dict[str, bool] = {}
@@ -567,7 +590,7 @@ def test_the_supervisor_moves_only_to_a_proved_address(
     finally:
         signal.signal(signal.SIGTERM, previous)
     assert checks == dict.fromkeys(
-        ("adopted", "nginx", "impostor", "kept", "loopback", "moved"), True
+        ("adopted", "nginx", "impostor", "kept", "loopback", "moved", "renamed"), True
     )
     assert ("192.168.1.66", 80) in asked
 

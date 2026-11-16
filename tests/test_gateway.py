@@ -26,7 +26,7 @@ TXT = {b"obbw": b"1"}
 
 def test_load_config() -> None:
     cfg = gateway.load_config(BASE)
-    assert cfg["hostname"] == "openbrewbyweight-secure.local"
+    assert (cfg["hostname"], cfg["hostname_fixed"]) == ("openbrewbyweight-secure.local", False)
     assert cfg["ip"] == "192.168.1.240"
     assert (cfg["http_port"], cfg["https_port"], cfg["mdns_publish"]) == (80, 443, True)
     assert (
@@ -139,9 +139,10 @@ def test_match_controller() -> None:
 
 
 def verify(ca: Path, leaf: Path, host: str) -> bool:
+    check = "-verify_ip" if host[0].isdigit() else "-verify_hostname"
     return (
         subprocess.run(
-            [OPENSSL, "verify", "-CAfile", str(ca), "-verify_hostname", host, str(leaf)],
+            [OPENSSL, "verify", "-CAfile", str(ca), check, host, str(leaf)],
             capture_output=True,
             check=False,
         ).returncode
@@ -159,7 +160,9 @@ def test_certificates_rendering_and_status(monkeypatch: pytest.MonkeyPatch) -> N
         assert gateway.ensure_certificates(cfg, data) is True
         assert gateway.ensure_certificates(cfg, data) is False, "valid certificates must be kept"
         assert verify(ca, leaf, cfg["hostname"])
+        assert verify(ca, leaf, "192.168.1.240"), "the companion's IP opens it too"
         assert not verify(ca, leaf, "other.local")
+        assert not verify(ca, leaf, "192.168.1.241")
         assert (data / "server.key").stat().st_mode & 0o077 == 0
         ca_pem = ca.read_text()
 
@@ -248,6 +251,31 @@ def test_certificates_rendering_and_status(monkeypatch: pytest.MonkeyPatch) -> N
         assert ca.read_text() != ca_pem, "a new name needs a CA constrained to it"
         assert verify(ca, leaf, "brew.local")
         assert not verify(ca, leaf, cfg["hostname"])
+        renamed_ca = ca.read_text()
+
+        moved: gateway.Config = {**renamed, "ip": "192.168.1.241"}
+        assert gateway.ensure_certificates(moved, data) is True
+        assert ca.read_text() != renamed_ca, "a new IP needs a CA constrained to it"
+        assert verify(ca, leaf, "192.168.1.241")
+        assert not verify(ca, leaf, "192.168.1.240")
+
+
+def test_the_secure_name_follows_the_controller(tmp_path: Path) -> None:
+    """The firmware's rule for its own mDNS name, plus -secure; COMPANION_HOSTNAME wins."""
+    assert gateway.secure_host("Cafe Bar") == "cafe-bar-secure.local"
+    assert gateway.secure_host("openbrewbyweight") == gateway.DEFAULT_HOST
+    assert gateway.secure_host(" -Brew  -- Bar- ") == "brew-bar-secure.local"
+    assert gateway.secure_host("Café") == "caf-secure.local"
+    assert gateway.secure_host("☕") == gateway.DEFAULT_HOST
+    env = {**BASE, "COMPANION_DATA_DIR": str(tmp_path)}
+    cfg = gateway.load_config(env)
+    assert (cfg["hostname"], cfg["hostname_fixed"]) == (gateway.DEFAULT_HOST, False)
+    (tmp_path / gateway.HOSTNAME_FILE).write_text("cafe-bar-secure.local\n")
+    assert gateway.load_config(env)["hostname"] == "cafe-bar-secure.local", "kept across restarts"
+    fixed = gateway.load_config({**env, "COMPANION_HOSTNAME": "espresso"})
+    assert (fixed["hostname"], fixed["hostname_fixed"]) == ("espresso.local", True)
+    (tmp_path / gateway.HOSTNAME_FILE).write_text("../other")
+    assert gateway.load_config(env)["hostname"] == gateway.DEFAULT_HOST
 
 
 def test_persistent_log() -> None:

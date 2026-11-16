@@ -8,8 +8,12 @@ trusts the companion, opens the steps for that device, and offers the right
 download. Opened on a computer, the iPhone and Android steps also
 show a QR code that downloads the file straight onto the phone.
 
-The steps below are the same as on that page, for reference. If you changed
-`COMPANION_HOSTNAME`, use your name instead of `openbrewbyweight-secure`.
+The steps below are the same as on that page, for reference. The companion's
+name comes from your controller's: a controller called `Cafe Bar` gives
+`cafe-bar-secure.local`, so use that instead of `openbrewbyweight-secure.local`
+(or the name you set in `COMPANION_HOSTNAME`). The companion's IP address works
+as well, for example `https://192.168.1.240`, once the device trusts the
+certificate.
 
 ## iPhone and iPad
 

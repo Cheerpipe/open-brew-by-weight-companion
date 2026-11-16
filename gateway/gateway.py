@@ -89,6 +89,8 @@ DATA = Path(setting(os.environ, "DATA_DIR") or "/data")
 RUN = Path(setting(os.environ, "RUN_DIR") or "/run/gateway")
 HTTP_SERVICE = "_http._tcp.local."
 CA_NAME = "openbrewbyweight-ca"
+DEFAULT_HOST = "openbrewbyweight-secure.local"  # The controller's default name, plus -secure.
+HOSTNAME_FILE = "hostname"  # The name taken from the paired controller, kept across restarts.
 LEAF_DAYS = 397  # Apple rejects TLS server certificates valid for more than 398 days.
 RENEW_BEFORE_S = 30 * 86400
 CERT_CHECK_S = 12 * 3600
@@ -121,6 +123,7 @@ type Target = tuple[str, Address]  # (name, (ip, port))
 class Config(TypedDict):
     name: str
     hostname: str
+    hostname_fixed: bool  # COMPANION_HOSTNAME is set: the controller's name does not change it.
     ip: str
     http_port: int
     https_port: int
@@ -182,6 +185,7 @@ class CompanionStatus(TypedDict):
 type Event = (
     tuple[Literal["tick", "companion", "heard"]]
     | tuple[Literal["found"], Target]
+    | tuple[Literal["named"], str]
     | tuple[Literal["skip"], str, bool, str]
     | tuple[Literal["scanned"], list[Found]]
     | tuple[Literal["proved"], bool, tuple[str, int], Event]
@@ -216,8 +220,28 @@ def enabled(value: str) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def secure_host(device_name: str) -> str:
+    """The companion's name for a controller name, by the firmware's rule for its own mDNS name
+    (deviceNameToMdnsHost): 'Cafe Bar' is cafe-bar.local, so its companion is
+    cafe-bar-secure.local."""
+    label = re.sub(r"[^a-z0-9-]", "", device_name.lower().replace(" ", "-"))
+    label = re.sub(r"-{2,}", "-", label).strip("-")
+    return f"{label}-secure.local" if label else DEFAULT_HOST
+
+
+def saved_hostname(data: Path) -> str:
+    """The name taken from the paired controller, or "" when there is none yet."""
+    try:
+        host = (data / HOSTNAME_FILE).read_text().strip()
+    except OSError:
+        return ""
+    return host if re.fullmatch(r"[a-z0-9-]{1,63}\.local", host) else ""
+
+
 def load_config(env: Mapping[str, str]) -> Config:
-    host = (setting(env, "HOSTNAME") or "openbrewbyweight-secure").lower().rstrip(".")
+    fixed = setting(env, "HOSTNAME").lower().rstrip(".")
+    data = Path(setting(env, "DATA_DIR") or "/data")
+    host = fixed or saved_hostname(data) or DEFAULT_HOST
     controller = None
     if url := (env.get("OBBW_CONTROLLER_URL") or "").strip():
         parts = urlsplit(url if "://" in url else "http://" + url)
@@ -229,6 +253,7 @@ def load_config(env: Mapping[str, str]) -> Config:
     return {
         "name": instance_name(env.get("COMPANION_NAME") or ""),
         "hostname": host.removesuffix(".local") + ".local",
+        "hostname_fixed": bool(fixed),
         "ip": setting(env, "IP") or local_ip(),
         "http_port": int(setting(env, "HTTP_PORT") or 80),
         "https_port": int(setting(env, "HTTPS_PORT") or 443),
@@ -547,22 +572,33 @@ def save(
         temporary.replace(target)
 
 
-def covers(ca: x509.Certificate, host: str) -> bool:
-    """Whether the CA's name constraints permit host."""
+def secure_names(cfg: Config) -> tuple[x509.DNSName, x509.IPAddress]:
+    """The two names the server certificate carries: the companion's .local name and its IP."""
+    return x509.DNSName(cfg["hostname"]), x509.IPAddress(ipaddress.ip_address(cfg["ip"]))
+
+
+def covers(ca: x509.Certificate, cfg: Config) -> bool:
+    """Whether the CA is constrained to exactly the companion's name and IP."""
     try:
         constraints = ca.extensions.get_extension_for_class(x509.NameConstraints).value
     except x509.ExtensionNotFound:
         return False
-    return x509.DNSName(host) in (constraints.permitted_subtrees or [])
+    return set(constraints.permitted_subtrees or []) == set(permitted(cfg))
 
 
-def leaf_current(ca: x509.Certificate, leaf: Path, host: str) -> bool:
-    """Whether the server certificate chains to the CA for host and is not due for renewal."""
+def permitted(cfg: Config) -> list[x509.GeneralName]:
+    """The CA's name constraints: the companion's name and its IP as a single-address network."""
+    dns, ip = secure_names(cfg)
+    return [dns, x509.IPAddress(ipaddress.ip_network(ip.value))]
+
+
+def leaf_current(ca: x509.Certificate, leaf: Path, cfg: Config) -> bool:
+    """Whether the server certificate chains to the CA for the name and the IP and is not due for
+    renewal."""
     try:
         cert = x509.load_pem_x509_certificate(leaf.read_bytes())
-        PolicyBuilder().store(Store([ca])).build_server_verifier(x509.DNSName(host)).verify(
-            cert, []
-        )
+        for name in secure_names(cfg):
+            PolicyBuilder().store(Store([ca])).build_server_verifier(name).verify(cert, [])
     except OSError, ValueError, VerificationError:
         return False
     renew_at = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=RENEW_BEFORE_S)
@@ -598,14 +634,15 @@ def read_ca(path: Path) -> x509.Certificate | None:
 def ensure_certificates(cfg: Config, data: Path) -> bool:
     """Create or renew the CA and server certificate; return True when files changed."""
     host, ca_path, ca_key_path = cfg["hostname"], data / f"{CA_NAME}.crt", data / f"{CA_NAME}.key"
+    dns, ip = secure_names(cfg)
     leaf, leaf_key = data / "server.crt", data / "server.key"
     data.mkdir(parents=True, exist_ok=True)
     changed = False
     ca = read_ca(ca_path)
-    if ca is None or not covers(ca, host):
+    if ca is None or not covers(ca, cfg):
         if ca is not None:
             log(
-                f"the CA does not cover {host}; creating a new one, "
+                f"the CA does not cover {host} at {cfg['ip']}; creating a new one, "
                 "so every device must be set up again"
             )
         ca_key = ec.generate_private_key(ec.SECP256R1())
@@ -629,12 +666,12 @@ def ensure_certificates(cfg: Config, data: Path) -> bool:
                     ),
                     True,
                 ),
-                (x509.NameConstraints([x509.DNSName(host)], None), True),
+                (x509.NameConstraints(permitted(cfg), None), True),
             ],
         )
         save(ca_key, ca_key_path, ca, ca_path)
         changed = True
-    if changed or not leaf_current(ca, leaf, host) or not leaf_matches(leaf, leaf_key):
+    if changed or not leaf_current(ca, leaf, cfg) or not leaf_matches(leaf, leaf_key):
         signer = serialization.load_pem_private_key(ca_key_path.read_bytes(), None)
         if not isinstance(signer, ec.EllipticCurvePrivateKey):
             raise TypeError(f"{ca_key_path} does not hold the CA's elliptic-curve key")
@@ -644,7 +681,7 @@ def ensure_certificates(cfg: Config, data: Path) -> bool:
             key,
             LEAF_DAYS,
             [
-                (x509.SubjectAlternativeName([x509.DNSName(host)]), False),
+                (x509.SubjectAlternativeName([dns, ip]), False),
                 (x509.BasicConstraints(ca=False, path_length=None), True),
                 (
                     x509.KeyUsage(
@@ -665,7 +702,7 @@ def ensure_certificates(cfg: Config, data: Path) -> bool:
             (ca, signer),
         )
         save(key, leaf_key, cert, leaf)
-        log(f"issued the server certificate for {host}")
+        log(f"issued the server certificate for {host} and {cfg['ip']}")
         changed = True
     for key_path in (ca_key_path, leaf_key):
         key_path.chmod(0o600)
@@ -759,6 +796,7 @@ def write_site(cfg: Config, data: Path, run: Path, target: Target | None) -> Non
         "NAME": html.escape(cfg["name"]),
         "VERSION": html.escape(VERSION),
         "HOSTNAME": html.escape(cfg["hostname"]),
+        "IP": html.escape(cfg["ip"]),
         "CA_NAME": CA_NAME,
         "FINGERPRINT": ":".join(fingerprint[i : i + 2] for i in range(0, len(fingerprint), 2)),
         "QR": qr_svg(setup),
@@ -1057,7 +1095,9 @@ def main() -> None:
         raise SystemExit(0)
     events: queue.Queue[Event] = queue.Queue()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    companion = start_companion(cfg, DATA, RUN, lambda: events.put(("companion",)))
+    companion = start_companion(
+        cfg, DATA, RUN, lambda: events.put(("companion",)), lambda name: events.put(("named", name))
+    )
     companion.controller(target)
 
     zc = Zeroconf(interfaces=[cfg["ip"]], ip_version=IPVersion.V4Only)
@@ -1078,19 +1118,40 @@ def main() -> None:
                     events.put(("heard",))
 
     zc.add_listener(Heard(), None)
-    if cfg["mdns_publish"]:
-        zc.register_service(
-            ServiceInfo(
-                "_https._tcp.local.",
-                f"{cfg['hostname'].removesuffix('.local')}._https._tcp.local.",
-                addresses=[socket.inet_aton(cfg["ip"])],
-                port=cfg["https_port"],
-                server=cfg["hostname"] + ".",
-                properties={"path": "/"},
-            ),
-            allow_name_change=True,
+    published: ServiceInfo | None = None
+
+    def publish() -> None:
+        """Announce the companion's name, after a goodbye for the name it replaces."""
+        nonlocal published
+        if not cfg["mdns_publish"]:
+            return
+        if published:
+            zc.unregister_service(published)
+        published = ServiceInfo(
+            "_https._tcp.local.",
+            f"{cfg['hostname'].removesuffix('.local')}._https._tcp.local.",
+            addresses=[socket.inet_aton(cfg["ip"])],
+            port=cfg["https_port"],
+            server=cfg["hostname"] + ".",
+            properties={"path": "/"},
         )
+        zc.register_service(published, allow_name_change=True)
         log(f"publishing {cfg['hostname']} at {cfg['ip']}")
+
+    def rename(device_name: str) -> bool:
+        """Follow the paired controller's name; return True when the companion's name changed."""
+        host = secure_host(device_name)
+        if cfg["hostname_fixed"] or host == cfg["hostname"]:
+            return False
+        log(f"the controller is named '{device_name}': the secure address is now https://{host}")
+        cfg["hostname"] = host
+        (DATA / HOSTNAME_FILE).write_text(host)
+        ensure_certificates(cfg, DATA)
+        publish()
+        companion.rename(host)
+        return True
+
+    publish()
 
     def on_change(
         zeroconf: Zeroconf, service_type: str, name: str, state_change: ServiceStateChange
@@ -1252,7 +1313,9 @@ def main() -> None:
                         site_changed = True
                     status_changed |= source != "scan"
                     target, source = found, "scan"
-                elif event[0] == "tick" and ensure_certificates(cfg, DATA):
+                elif (event[0] == "tick" and ensure_certificates(cfg, DATA)) or (
+                    event[0] == "named" and rename(event[1])
+                ):
                     site_changed = True
                 if (event[0] == "found" and event[1] == target) or (
                     event[0] == "scanned" and source == "scan"

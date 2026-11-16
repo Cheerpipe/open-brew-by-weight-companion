@@ -64,19 +64,20 @@ in_use() { # answers ping or ARP, or already belongs to a container on the netwo
 }
 check() { docker compose exec -T companion python3 /opt/gateway/gateway.py check "$@" 2>&1; }
 running() { [[ -n $(docker compose ps -q --status running companion 2>/dev/null) ]]; }
-migrate_env() { # gives settings from the HTTPS gateway era their companion names
+migrate_env() { # gives earlier settings their current names and defaults
 	local tmp
 	[[ -f .env ]] || return 0
 	tmp=$(mktemp)
 	sed -E -e 's/^(# ?)?GATEWAY_(HOSTNAME|IP|DATA)=/\1COMPANION_\2=/' \
-		-e 's/^(# ?)?(HTTPS?_PORT|MDNS_PUBLISH)=/\1COMPANION_\2=/' .env >"$tmp"
+		-e 's/^(# ?)?(HTTPS?_PORT|MDNS_PUBLISH)=/\1COMPANION_\2=/' \
+		-e 's/^COMPANION_HOSTNAME=openbrewbyweight-secure$/COMPANION_HOSTNAME=/' .env >"$tmp"
 	if cmp -s .env "$tmp"; then
 		rm -f "$tmp"
 		return 0
 	fi
 	cp .env .env.bak
 	mv "$tmp" .env
-	say "Renamed the settings in .env to the companion's names (the earlier file is .env.bak)."
+	say "Updated the settings in .env for this companion version (the earlier file is .env.bak)."
 }
 
 migrate_env
