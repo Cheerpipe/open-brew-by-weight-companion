@@ -1203,6 +1203,11 @@ class Archive:
             self.wanted.add(store)
             self.wake.set()
 
+    def _arrived(self, store: str, rows: list[Record]) -> None:
+        """Stored shots go on to the Mahlkönig grinder, which may be waiting for one."""
+        if store == "shots" and rows:
+            self.companion.gbs.on_shots(row[3] for row in rows)
+
     def on_rec(self, frame: Mapping[str, object]) -> None:
         inner = frame.get("f")
         if not isinstance(inner, dict):
@@ -1460,11 +1465,13 @@ class Archive:
         await self.store.put(
             device, store, generation, found
         )  # An ambiguous old record is set aside.
+        self._arrived(store, found)
         fetched = {row[0] for row in found}
 
         async def page(rows: list[Record]) -> None:
             self._steady(revision)
             await self.store.put(device, store, generation, rows)
+            self._arrived(store, rows)
 
         _, missing = await self._fetch(
             store,
