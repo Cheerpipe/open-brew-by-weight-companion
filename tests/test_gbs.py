@@ -332,6 +332,45 @@ def test_push_through_the_simulator() -> None:
     asyncio.run(scenario())
 
 
+def test_push_never_loops_on_a_refusing_grinder() -> None:
+    """A failed take waits for the next poll, a job the grinder no longer has ends its result,
+    and OngoingJobNotExisting is retried at the result's pace and within its limit."""
+    job, gone = gbs.Job("job-1", 2), gbs.Reply("job_not_existing")
+    good = gbs.Report(True, 28400, 36210)
+    push = gbs.Push()
+    push.reply("brew_jobs", gbs.Reply("ok", job=job), 0.0, 1000.0)
+    assert push.next(0.0) == "brew_accept"
+    push.reply("brew_accept", None, 0.1, 1000.1)
+    assert push.job is not None
+    assert push.next(0.1) is None
+    assert push.next(0.1 + gbs.POLL_S) == "brew_jobs"
+    push.reply("brew_jobs", gbs.Reply("ok", job=job), 2.2, 1002.2)
+    assert push.next(2.2) == "brew_accept"
+    # A retake the grinder refuses ends the result; one poll follows.
+    late = gbs.Push()
+    late.reply("brew_jobs", gbs.Reply("ok", job=job), 0.0, 1000.0)
+    assert late.claim(gbs.Shot(1, 1005.0, 1033.4, good), b"\0" * 16, 40.0)
+    assert late.next(40.0) == "brew_accept"  # The claimed job's retake.
+    late.reply("brew_accept", gone, 40.5, 1040.5)
+    assert late.result is None
+    assert late.next(40.5) == "brew_jobs"
+    # OngoingJobNotExisting after every take: paced, and over after 120 s.
+    stuck = gbs.Push()
+    stuck.reply("brew_jobs", gbs.Reply("ok", job=job), 0.0, 1000.0)
+    stuck.reply("brew_accept", gbs.Reply("ok"), 0.1, 1000.1)
+    assert stuck.claim(gbs.Shot(1, 1005.0, 1033.4, good), b"\0" * 16, 40.0)
+    now, requests = 40.0, 0
+    while stuck.result is not None and requests < 1000:
+        request = stuck.next(now)
+        if request in {"brew_done", "brew_accept"}:
+            requests += 1
+            stuck.reply(request, gone if request == "brew_done" else gbs.Reply("ok"), now, now)
+        now += 0.5
+    assert stuck.result is None
+    assert now - 40.0 <= gbs.RESULT_RETRY_S + gbs.RETRY_S + 0.5
+    assert requests <= 2 * (gbs.RESULT_RETRY_S / gbs.RETRY_S + 1)
+
+
 def test_attribution_without_a_clock() -> None:
     """A controller without a clock: the sync hold that began after the grind is the shot."""
     clock, frames = Clock(), cast("list[dict[str, object]]", [])
