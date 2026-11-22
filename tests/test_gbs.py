@@ -394,6 +394,20 @@ def test_attribution_without_a_clock() -> None:
     assert grinder.pull.state == "armed"
 
 
+def test_a_flush_leaves_the_grind_for_the_next_shot() -> None:
+    """A group flush after grinding (stored as a short cycle) settles nothing; the shot does."""
+    clock, frames = Clock(), cast("list[dict[str, object]]", [])
+    grinder = make(clock, frames)
+    grinder.configure({"m": "e64ws"})
+    assert grinder.pull.execute(clock.mono, clock.unix, 0)
+    clock.advance(10)
+    grinder.on_shots([row(8, clock.unix - 5, 5.0, 40.0, badReason="short")])
+    assert grinder.pull.state == "armed"
+    clock.advance(40)
+    grinder.on_shots([row(9, clock.unix - 30)])
+    assert grinder.pull.state == "finishing"
+
+
 def test_older_peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An older controller sends no cfg.gbs: the companion does nothing for a grinder and says
     nothing. A newer one's cfg.gbs reaches the service, its frame goes as a sync request."""

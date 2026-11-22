@@ -589,7 +589,8 @@ class Gbs:
 
     def shot_of(self, row: Mapping[str, object]) -> Shot | None:
         record = _number(row, "id")
-        if record is None:
+        # A cycle too short to be a shot (a group flush after grinding) settles no grind.
+        if record is None or row.get("badReason") == "short":
             return None
         unix, duration = _number(row, "endedAtUnixSec"), _number(row, "durationS") or 0
         if row.get("hasWallTime") is True and unix:
