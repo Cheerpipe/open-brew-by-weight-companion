@@ -28,6 +28,7 @@ from cryptography.exceptions import InvalidTag
 from . import VERSION, beanconqueror, crypto, dashboard, log, logger, stats
 from .archive import FETCH_MAX, Archive, UnavailableError
 from .assets import Assets
+from .gbs import Gbs
 from .lamarzocco import LaMarzocco
 from .link import ErasedError, LinkClosedError, open_link
 from .logstore import EXPORT_VERSION, FIRST_PAGE, FORMAT, LogStore
@@ -68,6 +69,7 @@ PROVE_RETRY_S = (0, 3, 10, 30)  # Waits before each try to prove a new address.
 OPEN_ACCESS = hashlib.sha256(b"").hexdigest()
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
+GBS_TICK_S = 0.5  # The Mahlkönig service's step; the grinder itself is asked every 2 s.
 STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
 # A sleep that comes back this late means the loop stood still; 20 s is where
 # the controller's 30 s ping contract starts to break.
@@ -202,6 +204,7 @@ class Companion:
         self.retention = (RETENTION_DAYS_DEFAULT, RETENTION_MB_DEFAULT)
         self.archive = Archive(self)  # The shot and activation archive, in the same store.
         self.push = Push(self.store, self.key, http, self.spawn, self.post_sync)
+        self.gbs = Gbs(lambda frame: self.post_sync(frame, "gbs"), self.ping_now.set, http)
         # Sync requests waiting for the end of a sync hold, and the hold the controller's `hold`
         # frames name: True during a shot (nothing crosses the link), None until the session's
         # first one.
@@ -463,6 +466,7 @@ class Companion:
         # this one.
         self.log_subscribed = self.log_identified = self.configured = False
         self.sync_due, self.sync_hold = {}, None
+        self.gbs.session()
         self.unknown_frames = 0
         self.unknown_kinds.clear()
         self.heard_at = 0.0
@@ -489,6 +493,7 @@ class Companion:
             self.archive.stop()
             self.screens.mux.unpark()
             self.ws = self.outbox = None
+            self.gbs.link_down()
             self._set_route("direct")
             self.hold, self.held = False, []
             await ws.close()
@@ -533,6 +538,7 @@ class Companion:
         if frame.get("t") != "hold":
             return
         was, self.sync_hold = self.sync_hold, frame.get("sync") is True
+        self.gbs.on_hold(self.sync_hold)
         if not self.sync_hold:
             due, self.sync_due = self.sync_due, {}
             for request in due.values():
@@ -571,7 +577,7 @@ class Companion:
         loop = asyncio.get_running_loop()
         while True:
             await self._hold_lifted()
-            up, route = self.lm.up, self.route
+            up, route = self.lm.up, self.ping_route
             self.post({"t": "ping", "up": up})
             deadline = loop.time() + PING_S[route]
             while True:
@@ -583,11 +589,22 @@ class Companion:
                     break
                 if self.sync_hold:
                     break
-                if self.lm.up != up or self.route != route == "direct":
+                if self.lm.up != up or self.ping_route != route == "direct":
                     self._stalled(loop.time() - deadline)
                     break
-                if self.route != route:  # Back to direct: the slow interval, counted from now.
-                    route, deadline = self.route, loop.time() + PING_S[self.route]
+                if self.ping_route != route:  # Back to direct: the slow interval, from now.
+                    route, deadline = self.ping_route, loop.time() + PING_S[self.ping_route]
+
+    @property
+    def ping_route(self) -> Route:
+        """The ping cadence: 15 s while the companion carries La Marzocco or the grinder."""
+        return "companion" if self.route == "companion" or self.gbs.own else "direct"
+
+    async def run_gbs(self) -> None:
+        """The Mahlkönig service's steps; nothing happens until cfg.gbs names a grinder."""
+        while True:
+            await self.gbs.step()
+            await asyncio.sleep(GBS_TICK_S)
 
     @staticmethod
     def _stalled(late: float) -> None:
@@ -638,6 +655,7 @@ class Companion:
                     await self.logs.set_meta("beanconqueror", self.beanconqueror)
                 except sqlite3.Error as error:
                     log(f"the log store could not keep the Beanconqueror format ({error})")
+            self.gbs.configure(frame.get("gbs"))
             await self._log_subscribe()
             self._report(force=True)
             if self.push.saved["subscriptions"]:  # No `ps` in a session means none wanted.
@@ -717,6 +735,7 @@ class Companion:
         restarts."""
         if not isinstance(value, str) or not value.isprintable() or not 0 < len(value) <= 24:
             return
+        self.gbs.device_id = value
         if value != self.device_id:
             self.device_id = value
             if self._log_usable():
@@ -1183,6 +1202,7 @@ class Companion:
             "relay": self.relay.mode,
             "relayFeatures": self.relay.features,
             "beanconqueror": self.beanconqueror,
+            "gbs": self.gbs.facts(),
             "ip": self.address[1],
             "httpPort": self.address[2],
             "assets": self.assets.facts() if pairing else None,
@@ -1348,6 +1368,11 @@ def web_app(companion: Companion) -> web.Application:
 
     async def status(_request: web.Request) -> web.Response:
         return web.json_response(await companion.status(), headers=no_store)
+
+    async def gbs_route(request: web.Request) -> web.Response:
+        """An E64 WS polling this companion (the firmware's docs/MAHLKONIG_GBS.md): answered
+        here, so the controller hears nothing per poll."""
+        return await companion.gbs.route(request, companion.address[0].removesuffix(".local"))
 
     async def pair(request: web.Request) -> web.Response:
         if (
@@ -1927,6 +1952,8 @@ def web_app(companion: Companion) -> web.Application:
     app.router.add_get("/__companion/pair", show)
     app.router.add_get("/__companion/status", status)
     app.router.add_get("/beanconqueror/{tail:.*}", beanconqueror_route)
+    app.router.add_route("GET", "/api/v2/{tail:.*}", gbs_route)
+    app.router.add_route("POST", "/api/v2/{tail:.*}", gbs_route)
     app.router.add_get("/__companion/log", log_page)
     app.router.add_get("/__companion/log/boots", log_boots)
     app.router.add_get("/__companion/log/export", log_export)
@@ -2036,6 +2063,7 @@ async def _serve(
         log(f"'{cfg['name']}' version {VERSION} is running")
         link = companion.spawn(companion.run_link())
         _ = companion.spawn(_loop_watchdog())
+        _ = companion.spawn(companion.run_gbs())
         _ = companion.spawn(_retention(companion))
         stopping = companion.spawn(stopping_event.wait())
         try:

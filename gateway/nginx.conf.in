@@ -77,6 +77,16 @@ http {
       proxy_set_header Host $host;
     }
 
+    # A Mahlkönig E64 WS polls the machine here in clear (port 80 only), as it polls a coffee
+    # machine; the companion answers from its own state and checks the Host and the peer.
+    location ^~ /api/v2/ {
+      proxy_pass http://unix:@RUN@/companion.sock;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      client_max_body_size 1k;
+    }
+
     # The stored log is read with the browser's Web UI session: never in clear.
     location ^~ /__companion/log {
       default_type application/json;

@@ -159,6 +159,7 @@ FIRMWARE_FIXTURES = {
         "docs/schemas/companion-records-v1.vectors.json"
     ),
     "tests/fixtures/stats-header-v1.vectors.json": "docs/schemas/stats-header-v1.vectors.json",
+    "tests/fixtures/mahlkonig-gbs-v1.vectors.json": "docs/schemas/mahlkonig-gbs-v1.vectors.json",
     "tests/fixtures/companion_replay_v1.json": "src/tests/fixtures/companion_replay_v1.json",
 }
 FIRMWARE_REPOSITORY = "Open-Brew-by-Weight"

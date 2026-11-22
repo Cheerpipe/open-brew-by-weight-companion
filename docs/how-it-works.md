@@ -846,6 +846,40 @@ shot`, or `GaggiMate`), as the controller logs its own. The
 status JSON gives `beanconqueror`, `ip` and `httpPort` for the address the
 Settings section shows.
 
+### Mahlkönig Grind-by-Sync
+
+The firmware's [Mahlkönig Grind-by-Sync](https://github.com/Cheerpipe/Open-Brew-by-Weight/blob/main/docs/MAHLKONIG_GBS.md)
+can ride the companion (`companion/gbs.py`), so the controller does nothing
+per grinder poll. The controller's `cfg` carries `gbs` only while its
+integration, the shot archive and **Mahlkönig through the companion** are on:
+`{"m":"e64ws"}`, or for a paired E65/E80 its model, address, `brewDeviceId`,
+pairing id and the certificate's SHA-256 (`fp`). Pairing always happens on the
+controller. The companion answers with `{"t":"gbs","own","st","ok"}` on change
+(a sync request, so never during a shot) and pings every 15 s while it owns the
+grinder; without the link it stops asking an E65/E80, so the controller takes
+over.
+
+- **E64 WS**: nginx passes `/api/v2/` on the HTTP port only (port 80 for the
+  grinder) with the `Host` (checked like Beanconqueror's) and `X-Real-IP`
+  (local peers only; browser headers refused). The answers and the state
+  machine are the firmware's.
+- **E65/E80**: every 2 s a new HTTPS connection to port 30001, pinned with
+  `aiohttp.Fingerprint`; a job is taken at once, and after a shot the result
+  goes first, then one poll. Back-off 60 and 120 s when the grinder does not
+  answer; 403 for 60 s means its pairing was removed; another certificate
+  stops everything until the controller re-trusts it.
+- **Shots** come from the archive right after each shot. A grind is matched to
+  the first new shot that started after it, by the controller's clock (with a
+  3 s allowance between the two clocks) or, without one, by the `hold` frame
+  that began after it; the result is the shared rule, pinned with the bodies
+  by `tests/fixtures/mahlkonig-gbs-v1.vectors.json` (byte-identical to the
+  firmware's).
+
+The status JSON's `gbs` (`model`, `pull`, `own`, `st`, `polls`, `delivered`)
+tells the controller's Settings whether the companion answers an E64 WS (the
+address it shows). `tests/grinder_simulator.py` plays both grinders for the
+tests, and on its own for a device test on the LAN.
+
 ### Notifications
 
 `companion/push.py` delivers Web Push and decides nothing else: the controller

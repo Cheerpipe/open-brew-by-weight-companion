@@ -31,6 +31,12 @@ controller does everything on its own, and the companion takes work off it.
   shots at `http://openbrewbyweight-secure.local/beanconqueror`, without asking the
   controller. Like the controller's, that address has no password; the Settings
   section shows it with the steps.
+- **A Mahlkönig grinder that learns from every shot.** With **Mahlkönig through the
+  companion** on, the companion talks to a Grind-by-Sync grinder for the controller:
+  it asks an E65W, E65T, E80W or E80T every 2 seconds, as Mahlkönig intended (the
+  controller alone asks every 15 to 25 seconds, so a shot pulled soon after grinding
+  may not sync without the companion), and an E64 WS can check in with the companion
+  instead of the controller. Not yet tested with a real grinder.
 
 The companion does the fiddly parts for you:
 
