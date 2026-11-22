@@ -871,7 +871,8 @@ over.
 - **Shots** come from the archive right after each shot. A grind is matched to
   the first new shot that started after it, by the controller's clock (with a
   3 s allowance between the two clocks) or, without one, by the `hold` frame
-  that began after it; the result is the shared rule, pinned with the bodies
+  that began after it. A `short` row (12 s or less, a group flush) is skipped,
+  as in the firmware; the result is the shared rule, pinned with the bodies
   by `tests/fixtures/mahlkonig-gbs-v1.vectors.json` (byte-identical to the
   firmware's).
 

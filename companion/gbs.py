@@ -423,7 +423,8 @@ class Push:
             return None
         if self.result is not None and now >= self.result.retry_at:
             return "brew_accept" if self.result.retake else "brew_done"
-        if self.job is not None and not self.job_taken:
+        # After a failure the job waits for the next poll (its back-off) to show it again.
+        if self.job is not None and not self.job_taken and self.failures == 0:
             return "brew_accept"
         return "brew_jobs" if self.poll_now or now >= self.due_at else None
 
@@ -494,13 +495,17 @@ class Push:
         elif request == "brew_accept":
             if self.result is not None and self.result.retake:
                 self.result.retake = False
+                if answer.status != "ok":  # The grinder no longer has the job.
+                    self.result, self.poll_now = None, True
             else:
                 self.job_taken = answer.status == "ok"
                 if answer.status != "ok":
                     self.job = None
         elif request == "brew_done":
-            if answer.status == "job_not_existing" and self.result is not None:
-                self.result.retake = True
+            result = self.result
+            limit = RESULT_RETRY_S if result and result.report.success else CANCEL_RETRY_S
+            if answer.status == "job_not_existing" and result and now - result.since < limit:
+                result.retake, result.retry_at = True, now + RETRY_S  # Paced like a retry.
             else:
                 self.result, self.poll_now = None, True
 
@@ -584,7 +589,8 @@ class Gbs:
 
     def shot_of(self, row: Mapping[str, object]) -> Shot | None:
         record = _number(row, "id")
-        if record is None:
+        # A cycle too short to be a shot (a group flush after grinding) settles no grind.
+        if record is None or row.get("badReason") == "short":
             return None
         unix, duration = _number(row, "endedAtUnixSec"), _number(row, "durationS") or 0
         if row.get("hasWallTime") is True and unix:
