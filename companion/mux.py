@@ -18,7 +18,7 @@ import sqlite3
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal, NoReturn, NotRequired, TypedDict, TypeIs, overload
 
-from . import log, pages
+from . import log, pages, stats
 from .archive import UnavailableError
 from .upstream import Upstream, dumps
 
@@ -52,7 +52,7 @@ FINAL = frozenset({"APPLIED", "PERSISTED", "FAILED", "CANCELED"})
 type Frame = Mapping[str, object]
 # A History or a Stats group: its parameters in View.key's order.
 type HistoryKey = tuple[int, int, str, tuple[str, ...]]
-type StatsKey = tuple[int, int, str, str, str, int, int]
+type StatsKey = tuple[int, int, str, str, str, stats.Scope, int]
 type Group = HistoryKey | StatsKey
 
 
@@ -72,7 +72,7 @@ class Params(TypedDict, total=False):
     types: tuple[str, ...]
     sort: str
     filter: str  # Canonical JSON (_filter).
-    window: int
+    window: stats.Scope  # The newest shots, or (since, until) local days for `days`.
     preset: int  # The preset the Stats charts follow: 0 All, -1 the active one (none named).
 
 
@@ -174,6 +174,21 @@ def _flag(message: Frame, name: str, required: bool = False) -> bool | None:
     if not isinstance(value, bool):
         raise InvalidOpError
     return value
+
+
+def _days(message: Frame) -> tuple[int, int] | None:
+    """`days`, [since, until] local days as the controller takes them; None when absent."""
+    if "days" not in message:
+        return None
+    days = [_integer(day, 1, 2**16 - 1) for day in _list(message["days"], 2)]
+    if not stats.days_ok(days):
+        raise InvalidOpError
+    return days[0], days[1]
+
+
+def _scope(window: stats.Scope) -> dict[str, object]:
+    """A Stats scope as the controller takes it: `window`, or `days` for a range of days."""
+    return {"days": list(window)} if isinstance(window, tuple) else {"window": window}
 
 
 def _choice(message: Frame, name: str, choices: tuple[str, ...]) -> str | None:
@@ -445,7 +460,7 @@ class View:
             if criteria != "{}" or fetch:
                 op["filter"] = json.loads(criteria)
             if window != 10 or fetch:  # A fetch names its window: its header follows it [D3].
-                op["window"] = window
+                op.update(_scope(window))
             # And its chosen preset, as the subscription does. A fetch without one takes the
             # standing subscription's, so one that follows the active preset names it while the
             # standing one chose another (never towards a controller that predates `preset`).
@@ -531,13 +546,17 @@ class View:
                     "request",
                     "filter",
                     "window",
+                    "days",
                     "tag",
                     "preset",
                 },
             )
             window = _number(message, "window", 0, U32)
             preset = _number(message, "preset", 0, 255)
-            if window is not None and window not in STATS_WINDOWS:
+            days = _days(message)
+            if (window is not None and window not in STATS_WINDOWS) or (
+                window is not None and days is not None
+            ):
                 raise InvalidOpError
             sort, criteria = _choice(message, "sort", ("date", "rating")), _filter(message)
             if sort is not None:
@@ -548,6 +567,8 @@ class View:
                 given["filter"] = criteria
             if window is not None:
                 given["window"] = window
+            if days is not None:  # A range of days stands where the window does.
+                given["window"] = days
             if preset is not None:
                 given["preset"] = preset
             replaced = {"filter": "{}", "window": 10, "preset": -1}
@@ -720,7 +741,7 @@ class View:
                 {
                     "op": "stats",
                     "on": True,
-                    "window": params["window"],
+                    **_scope(params["window"]),
                     **({"preset": params["preset"]} if params["preset"] >= 0 else {}),
                 }
             )

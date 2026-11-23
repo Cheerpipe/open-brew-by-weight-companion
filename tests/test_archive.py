@@ -1263,6 +1263,14 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
                 assert (await get(f"/stats?window={window}&active=2&epoch={synced}"))[
                     "stats"
                 ] == stats.header(merged, window, 2)
+            # A range of days instead of a window: up to its newest 1000 shots with a date.
+            last = max(int(row.get("endedAtLocalSec") or 0) for row in merged) // 86400
+            counts = []
+            for since, until in ((last, last), (last - 2, last), (last - 400, last)):
+                ranged = await get(f"/stats?days={since},{until}&active=2&epoch={synced}")
+                assert ranged["stats"] == stats.header(merged, 1000, 2, (since, until))
+                counts.append(ranged["stats"]["shotCount"])
+            assert 0 < counts[0] < counts[2], "one day holds fewer shots than the whole range"
             fast = await get(f"/stats?window=10&active=2&epoch={synced}&result=fast&preset=1,2")
             assert fast["good"] == stats.good(merged, (1,), (1, 2), ()), (
                 "filters choose the windows; the header covers every shot, as the controller's"
@@ -1275,6 +1283,12 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
                 "window=10",
                 "window=10&epoch=1&result=early",
                 "window=10&epoch=x",
+                "days=5,4&epoch=1",
+                "days=0,4&epoch=1",
+                "days=4&epoch=1",
+                "days=4,5,6&epoch=1",
+                "days=4,x&epoch=1",
+                "window=10&days=4,5&epoch=1",
             ):
                 await refused(f"/stats?{wrong}", 400)
             fake.add_shot()  # A new shot the copy has not seen: the header waits for it.

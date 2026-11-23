@@ -18,6 +18,10 @@ and is held to the shared golden vectors (`stats-header-v1.vectors.json`):
   is integer tenths (truncated) and its count may reach past the window.
 - Sums are exact here: the firmware's 32-bit sums never see more than 100
   shots, while the companion also answers 500 and 1000.
+- A range of local days (`shotLogStatsInScope`) keeps only the rows with a
+  wall time whose day falls in it before the window counts; the facets still
+  read every row. The controller caps a range at 100 shots, the companion at
+  `RANGE_SHOTS`.
 """
 
 import math
@@ -29,6 +33,10 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Sequence
 
 FILTER_MAX = 8  # SHOT_LIST_FILTER_MAX: facets list at most eight presets and eight scales.
+RANGE_SHOTS = 1000  # A range of days covers its newest 1000 good shots, the largest window.
+# A Stats scope: a window of the newest shots, or (since, until) local days since 1970-01-01, both
+# included.
+type Scope = int | tuple[int, int]
 MISSING = None
 # Looked up with a row's verdict, which may be missing (None).
 VERDICTS: dict[str | None, int] = {"on_recipe": 0, "fast": 1, "slow": 2}
@@ -226,6 +234,20 @@ class Record:
         return abs(known(self.actual) - planned) * 1000 // (planned if planned > 0 else 1)
 
 
+def days_ok(days: object) -> bool:
+    """A range of local days the controller accepts: [since, until], 1-65535, since <= until."""
+    return (
+        isinstance(days, (list, tuple))
+        and len(days) == 2
+        and all(type(day) is int for day in days)
+        and 1 <= days[0] <= days[1] < 2**16
+    )
+
+
+def window_and_days(scope: Scope) -> tuple[int, tuple[int, int] | None]:
+    return (RANGE_SHOTS, scope) if isinstance(scope, tuple) else (scope, None)
+
+
 def matches(
     record: Record, results: Collection[int], presets: Collection[int], scales: Collection[int]
 ) -> bool:
@@ -323,13 +345,21 @@ def density(shots: Sequence[Record]) -> Density:
     }
 
 
-def header(rows: Iterable[Row], window: int, active: int) -> Header:
-    """formatStatsHeader over `rows` (Stats rows, newest first) for `window` and the chosen
-    preset (0 All): its density chart and cut series."""
+def header(
+    rows: Iterable[Row], window: int, active: int, days: tuple[int, int] | None = None
+) -> Header:
+    """formatStatsHeader over `rows` (Stats rows, newest first) for `window`, within `days` when
+    given, and the chosen preset (0 All): its density chart and cut series."""
     records = [Record(row) for row in rows]
-    built = aggregate(records, window)
+    scoped = [
+        record
+        for record in records
+        if days is None
+        or (record.wall and record.local and days[0] <= record.local // 86400 <= days[1])
+    ]
+    built = aggregate(scoped, window)
     timed, own, found = [], 0, 0
-    for record in records:
+    for record in scoped:
         if found >= window:
             break
         if not record.eligible():
@@ -382,7 +412,7 @@ def header(rows: Iterable[Row], window: int, active: int) -> Header:
     # The chosen preset's newest `window` weight cuts with a settled yield, oldest first.
     cuts = [
         record
-        for record in records
+        for record in scoped
         if active
         and record.preset == active
         and record.eligible()

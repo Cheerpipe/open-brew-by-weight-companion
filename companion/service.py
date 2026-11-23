@@ -1719,11 +1719,13 @@ def web_app(companion: Companion) -> web.Application:
         again."""
         query = request.query
         try:
-            window, active, epoch = (
-                int(query["window"]),
-                int(query.get("active", 0)),
-                int(query["epoch"]),
+            # A window of the newest shots, or `days=since,until` instead.
+            scope: stats.Scope = (
+                cast("tuple[int, int]", tuple(int(day) for day in query["days"].split(",")))
+                if "days" in query
+                else int(query["window"])
             )
+            active, epoch = int(query.get("active", 0)), int(query["epoch"])
             filters = _archive_query(
                 "shots", {key: query[key] for key in ("result", "preset", "scale") if key in query}
             )
@@ -1731,7 +1733,11 @@ def web_app(companion: Companion) -> web.Application:
             return _invalid()
         if (
             filters is None
-            or window not in STATS_WINDOWS
+            or not (
+                stats.days_ok(scope) and "window" not in query
+                if isinstance(scope, tuple)
+                else scope in STATS_WINDOWS
+            )
             or not 0 <= active < 256
             or not 0 <= epoch < 2**32
         ):
@@ -1746,7 +1752,7 @@ def web_app(companion: Companion) -> web.Application:
             tuple(parsed["scale"]),
         )
         try:
-            header, good, synced = await companion.archive.header(window, active, epoch, chosen)
+            header, good, synced = await companion.archive.header(scope, active, epoch, chosen)
         except (UnavailableError, sqlite3.Error) as error:
             companion.archive.note_unavailable(error)
             return web.json_response({"error": "STATS_UNAVAILABLE"}, status=503)

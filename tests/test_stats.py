@@ -12,7 +12,7 @@ import hashlib
 import json
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
 
 from companion import stats
 from companion.archive import ArchiveStore
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = ROOT / "tests/fixtures/stats-header-v1.vectors.json"
-SHA256 = "402823758e72dd876c61ae73f13188a3c1dd8346a480de839096ffb10602a78a"
+SHA256 = "5298fb166bb644d281ffb05454d85def336e2d31ae77de3d4a5e4de3d072aa83"
 
 
 class VectorRow(stats.Row, TypedDict):
@@ -34,6 +34,7 @@ class VectorRow(stats.Row, TypedDict):
 class Case(TypedDict):
     name: str
     window: int
+    days: NotRequired[tuple[int, int]]  # A range of local days the window counts within.
     presetId: int
     rows: list[VectorRow]
     header: stats.Header
@@ -68,20 +69,43 @@ def load() -> Vectors:
     return cast("Vectors", json.loads(VECTORS.read_text()))
 
 
+def days(case: Case) -> tuple[int, int] | None:
+    return (case["days"][0], case["days"][1]) if "days" in case else None
+
+
+def test_days_ok() -> None:
+    assert [
+        stats.days_ok(days)
+        for days in (
+            (1, 1),
+            (20000, 20006),
+            [65535, 65535],
+            (0, 1),
+            (5, 4),
+            (1, 65536),
+            (1,),
+            (1.0, 2),
+        )
+    ] == [True, True, True, False, False, False, False, False]
+    assert stats.window_and_days(50) == (50, None)
+    assert stats.window_and_days((3, 4)) == (stats.RANGE_SHOTS, (3, 4))
+
+
 def test_vectors_are_the_firmwares() -> None:
     assert hashlib.sha256(VECTORS.read_bytes()).hexdigest() == SHA256, (
         "the vectors differ from the firmware's: copy its file again"
     )
     vectors = load()
     assert vectors["version"] == 1
-    assert len(vectors["cases"]) >= 7
+    assert len(vectors["cases"]) >= 13
+    assert any("days" in case for case in vectors["cases"]), "ranges of days are covered"
 
 
 def test_golden_cases() -> None:
     for case in load()["cases"]:
         for row in case["rows"]:
             assert stats.Record(row).bad_reason() == row["badReason"], (case["name"], row["id"])
-        built = stats.header(case["rows"], case["window"], case["presetId"])
+        built = stats.header(case["rows"], case["window"], case["presetId"], days(case))
         assert built == case["header"], (
             case["name"],
             [key for key, value in case["header"].items() if built.get(key) != value],
@@ -102,6 +126,6 @@ def test_window_count() -> None:
 def test_archive_parity() -> None:
     cases = load()["cases"]
     for case, copied in zip(cases, asyncio.run(archived(cases)), strict=True):
-        assert stats.header(copied, case["window"], case["presetId"]) == case["header"], (
-            f"{case['name']}: the archive's copy gives another header than the controller's"
-        )
+        assert (
+            stats.header(copied, case["window"], case["presetId"], days(case)) == case["header"]
+        ), f"{case['name']}: the archive's copy gives another header than the controller's"

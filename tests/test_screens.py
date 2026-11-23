@@ -470,6 +470,21 @@ async def scenario() -> None:
                 "window": 100,
                 "preset": 2,
             }
+            # A range of days stands in for the window, and a window replaces it again.
+            await a.send({"op": "stats", "on": True, "days": [20000, 20006]})
+            assert (await ops_after(session, 6))[-1] == {
+                "op": "stats",
+                "on": True,
+                "days": [20000, 20006],
+                "preset": 2,
+            }
+            await a.send({"op": "stats", "on": True, "window": 100})
+            assert (await ops_after(session, 7))[-1] == {
+                "op": "stats",
+                "on": True,
+                "window": 100,
+                "preset": 2,
+            }
             # Home's rows-only fetch, from a screen with no Stats view: its rows, not a 4003.
             c = await screen(2).open()
             await c.next("home")
@@ -487,7 +502,7 @@ async def scenario() -> None:
                     "filter": {},
                 }
             )
-            ops = await ops_after(session, 6)
+            ops = await ops_after(session, 8)
             # Following the active preset (none in Home's model here) while the standing window
             # chose preset 2, the fetch names it: its header would follow the standing choice.
             assert ops[-1] == {

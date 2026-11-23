@@ -747,7 +747,7 @@ while the controller is off still reports it and answers the reads below.
   session the controller accepts, remembered while it is off). Forget erases
   the archive with the log.
 - **Stats over the whole history.** `GET /__companion/archive/stats?window=
-  10|50|100|500|1000&active=<the preset the charts follow, 0 All>&epoch=<the
+  10|25|50|100|500|1000&active=<the preset the charts follow, 0 All>&epoch=<the
   controller's shot epoch the screen saw>` (and the list's `result`,
   `preset`, `scale`) answers `{"stats","good","epoch"}`: `stats` is the
   header the firmware's `formatStatsHeader` builds, over every stored shot
@@ -755,7 +755,9 @@ while the controller is off still reports it and answers the reads below.
   port held to the firmware's golden vectors
   `tests/fixtures/stats-header-v1.vectors.json`, checksum-pinned), and `good`
   the good shots the filters keep, from which the browser offers the window
-  choices. The header's preset chart, its consistency guard flags (`cons.g`)
+  choices. `days=<since>,<until>` instead of `window` covers a range of the
+  controller's local days (since 1970-01-01, both included, as the
+  controller's `days`): the dated shots in it, up to their newest 1,000. The header's preset chart, its consistency guard flags (`cons.g`)
   and its cut accuracy series (`cut`) follow `active`, as the controller's
   follow a page's `preset`. When the copy is behind `epoch`, the companion syncs the shots at
   once and waits up to 8 s; it also syncs as soon as the live Stats frames a
@@ -763,8 +765,8 @@ while the controller is off still reports it and answers the reads below.
   request waits for it), the newest complete header answers at once with its
   own `epoch`. A real failure answers `503 STATS_UNAVAILABLE` (the cause in
   the companion's log, at most every five minutes); the browser then shows
-  the controller's header, labelled as covering only its shots, offers 10, 50
-  and 100 only, and asks again every 15 s while Stats are open. With the
+  the controller's header, labelled as covering only its shots, offers 10, 25,
+  50 and 100 only, and asks again every 15 s while Stats are open. With the
   controller off (the link down) the header comes from the copy as it is. Headers and the status facts are cached by the
   archive's state; the header reads only the fields it needs.
 - **No sync traffic during a shot.** The controller sends `hold` with
@@ -796,8 +798,8 @@ mux serves Shots and History from (`companion/mux.py`, `companion/pages.py`).
   the ones only the companion keeps, filtered, ordered and sliced as the
   controller does, with `total`, `hasMore`, `good` and, for Stats, the
   header over the whole history for the preset the page names (its
-  `preset`, forwarded upstream with its window; without one, the active
-  preset in Home's model). The
+  `preset`, forwarded upstream with its window or its `days`; without one,
+  the active preset in Home's model). The
   frames match the controller's member for member (`tests/test_link_vectors.py`
   replays the firmware's `page_*` golden cases) except `tag`, `seq` and
   `request`, which the companion assigns; a screen that resubscribes with

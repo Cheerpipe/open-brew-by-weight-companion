@@ -1007,8 +1007,8 @@ class Archive:
         self.trace_wait: dict[tuple[int, int, int], float] = {}
         self.busy_until = 0.0
         # Stats headers: by full key, and the last whole one per view.
-        self.headers: dict[tuple[int, object, Filters, int, int], Header] = {}
-        self.complete: dict[tuple[int, object, Filters], Header] = {}
+        self.headers: dict[tuple[stats.Scope, object, Filters, int, int], Header] = {}
+        self.complete: dict[tuple[stats.Scope, object, Filters], Header] = {}
         self.facts_cache: tuple[tuple[str | None, int, int], dict[str, object]] | None = None
         self.unavailable_at: float | None = None
         # The epoch each store's copy is at, as the controller named it last.
@@ -1562,14 +1562,15 @@ class Archive:
         self.wake.set()
 
     # --- Stats over the whole history ------------------------------------------------
-    async def header(self, window: int, active: int, epoch: int, filters: Filters) -> Header:
-        """The Stats header the firmware would build over the merged history, and how many good
-        shots the filters keep, once the mirror is at the controller's `epoch`. While the
-        controller holds sync (or a request waits for it), the newest complete header answers at
-        once, with its own epoch."""
+    async def header(self, scope: stats.Scope, active: int, epoch: int, filters: Filters) -> Header:
+        """The Stats header the firmware would build over the merged history for `scope` (a window
+        or a range of days), and how many good shots the filters keep, once the mirror is at the
+        controller's `epoch`. While the controller holds sync (or a request waits for it), the
+        newest complete header answers at once, with its own epoch."""
         if not self.on or not self.usable():
             raise UnavailableError("the archive is off or its store is closed")
-        device, view = self.companion.device_id, (window, active, filters)
+        device, view = self.companion.device_id, (scope, active, filters)
+        window, days = stats.window_and_days(scope)
         synced = (await self.store.sync_state(device, "shots"))[1]
         if synced != epoch:
             self.refresh("shots", epoch)
@@ -1592,7 +1593,7 @@ class Archive:
         if key not in self.headers:
             rows = await self.store.merged(device)
             built = await asyncio.to_thread(
-                lambda: (stats.header(rows, window, active), stats.good(rows, *filters))
+                lambda: (stats.header(rows, window, active, days), stats.good(rows, *filters))
             )
             if len(self.headers) >= HEADERS:
                 self.headers.pop(next(iter(self.headers)))
