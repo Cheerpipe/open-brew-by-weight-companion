@@ -198,6 +198,8 @@ class Companion:
         self.log_dropped = 0
         # sha256 of a Web UI session -> when the controller last accepted it.
         self.log_grants: dict[str, float] = {}
+        # Home Assistant's integration tokens the controller accepted, by SHA-256, and when.
+        self.integration_grants: dict[str, float] = {}
         # ...and when it last refused one, so a refused page does not keep asking.
         self.log_denials: dict[str, float] = {}
         self.log_unreachable = 0.0  # When the controller last could not answer that question.
@@ -902,6 +904,33 @@ class Companion:
                 await self.logs.grant(OPEN_ACCESS, False)
             except sqlite3.Error as error:
                 log(f"the log store could not keep a Web UI session's access ({error})")
+
+    async def integration_allows(self, headers: Mapping[str, str]) -> bool:
+        """Whether Home Assistant may read the Stats header with the login on: exactly while the
+        controller accepts its integration token (a Bearer), asked at most every
+        LOG_ACCESS_RECHECK_S per token. Without a pairing, or with the controller off, nobody
+        new may."""
+        authorization = headers.get("Authorization", "")
+        if not authorization.startswith("Bearer ") or self.pairing_required():
+            return False
+        key, now = hashlib.sha256(authorization.encode()).hexdigest(), time.time()
+        if now - self.integration_grants.get(key, -LOG_ACCESS_RECHECK_S) < LOG_ACCESS_RECHECK_S:
+            return True
+        if self.controller is None:
+            return False
+        try:
+            reply = await self.relay.integration(authorization)
+            try:
+                accepted = reply.status == 200
+            finally:
+                reply.release()
+        except aiohttp.ClientError, TimeoutError, OSError:
+            return False
+        if accepted:
+            self.integration_grants[key] = now
+        else:
+            self.integration_grants.pop(key, None)
+        return accepted
 
     async def _web_ui_allows(self, headers: Mapping[str, str]) -> tuple[bool, bool, bool] | None:
         """The controller's answer for this browser: (signed in, Admin unlocked for this screen,
@@ -1743,7 +1772,10 @@ def web_app(companion: Companion) -> web.Application:
         ):
             return _invalid()
         refusal = await _log_refusal(request)
-        if refusal is not None:
+        # Home Assistant reads the header with its integration token while the login is on.
+        if refusal is not None and not (
+            refusal.status == 401 and await companion.integration_allows(request.headers)
+        ):
             return refusal
         parsed = filters[0]
         chosen = (

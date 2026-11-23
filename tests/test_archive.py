@@ -1259,6 +1259,40 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             assert answer["stats"] == stats.header(merged, 10, 2)
             assert answer["stats"]["shotCount"] == 10
             assert answer["good"] == stats.good(merged, (), (), ()) > 10
+            # Home Assistant reads it with its integration token while the login is on: the
+            # controller vouches for the token once per period; a refused one reads nothing.
+            verdict["value"] = False
+            grants, denials = dict(companion.log_grants), dict(companion.log_denials)
+            companion.log_grants.clear()
+            statuses = iter((200, 401))
+            asked: list[str] = []
+
+            class Vouched:
+                def __init__(self) -> None:
+                    self.status = next(statuses)
+
+                def release(self) -> None:
+                    pass
+
+            async def integration(authorization: str) -> Vouched:
+                asked.append(authorization)
+                return Vouched()
+
+            monkeypatch.setattr(companion.relay, "integration", integration)
+            monkeypatch.setattr(companion, "controller", ("Kitchen", ("127.0.0.1", 9)))
+            path = base + f"/stats?window=10&active=2&epoch={synced}"
+            bearer = {"Authorization": "Bearer " + "a" * 32}
+            for headers, status in (({}, 401), (bearer, 200), (bearer, 200)):
+                async with http.get(path, headers=headers) as reply:
+                    assert reply.status == status, headers
+            assert asked == [bearer["Authorization"]], "one question per token while it holds"
+            companion.integration_grants.clear()
+            async with http.get(path, headers=bearer) as reply:
+                assert reply.status == 401, "a token the controller refuses reads nothing"
+            async with http.get(base + "/history?limit=5", headers=bearer) as reply:
+                assert reply.status == 401, "the token reads the Stats header only"
+            verdict["value"] = True
+            companion.log_grants, companion.log_denials = grants, denials
             for window in (25, 50, 100, 500, 1000):
                 assert (await get(f"/stats?window={window}&active=2&epoch={synced}"))[
                     "stats"

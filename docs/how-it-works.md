@@ -770,6 +770,16 @@ while the controller is off still reports it and answers the reads below.
   50 and 100 only, and asks again every 15 s while Stats are open. With the
   controller off (the link down) the header comes from the copy as it is. Headers and the status facts are cached by the
   archive's state; the header reads only the fields it needs.
+- **Home Assistant's Stats cards.** The controller's integration snapshot
+  names this companion's address while the shot archive switch is on, so the
+  Open Brew by Weight integration reads the same header here, over HTTPS
+  after trusting the CA it downloads once from the setup page, with the
+  controller's `shotEpoch` as `epoch`. With the controller's login on it
+  sends its integration token as `Authorization: Bearer`; the companion asks
+  the controller `GET /api/v1/integration/request` with that header, in clear
+  like Home Assistant itself, and lets the token read this route alone while
+  the controller answers `200`, asking again at most every five minutes per
+  token. The token reads no other archive route.
 - **No sync traffic during a shot.** The controller sends `hold` with
   `sync` true when a sync hold starts and `sync` false when it ends, on every
   build. In between the companion sends nothing (but the liveness exception

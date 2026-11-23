@@ -525,6 +525,13 @@ class Relay:
             ) from error
         reply.release()
 
+    async def integration(self, authorization: str) -> Reply:
+        """Ask the controller whether it accepts Home Assistant's integration token, in clear
+        like Home Assistant itself does: its cheapest route that the login guards."""
+        return await self._send(
+            "GET", "/api/v1/integration/request", {"Authorization": authorization}, b""
+        )
+
     async def passthrough(
         self, method: str, uri: str, incoming: Mapping[str, str], body: bytes
     ) -> Reply:
