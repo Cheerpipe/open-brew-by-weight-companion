@@ -70,7 +70,7 @@ OPEN_ACCESS = hashlib.sha256(b"").hexdigest()
 LOG_UNREACHABLE_S = 30  # ...and how long a controller that could not answer is left alone.
 PING_S = {"companion": 15, "direct": 120}
 GBS_TICK_S = 0.5  # The Mahlkönig service's step; the grinder itself is asked every 2 s.
-STATS_WINDOWS = frozenset({10, 50, 100, 500, 1000})
+STATS_WINDOWS = frozenset({10, 25, 50, 100, 500, 1000})
 # A sleep that comes back this late means the loop stood still; 20 s is where
 # the controller's 30 s ping contract starts to break.
 STALL_WARN_S = 5

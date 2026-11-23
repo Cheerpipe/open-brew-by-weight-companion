@@ -1259,7 +1259,7 @@ async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
             assert answer["stats"] == stats.header(merged, 10, 2)
             assert answer["stats"]["shotCount"] == 10
             assert answer["good"] == stats.good(merged, (), (), ()) > 10
-            for window in (50, 100, 500, 1000):
+            for window in (25, 50, 100, 500, 1000):
                 assert (await get(f"/stats?window={window}&active=2&epoch={synced}"))[
                     "stats"
                 ] == stats.header(merged, window, 2)

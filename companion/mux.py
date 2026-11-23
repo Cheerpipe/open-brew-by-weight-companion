@@ -41,7 +41,7 @@ ATTRIBUTION_S = 1
 HISTORY_TYPES = ("shot", "rinse", "other", "power_on", "no_scale_guard_aborted", "backflush")
 STATS_RESULTS = ("on_recipe", "fast", "slow")
 HISTORY_CAPACITY, HISTORY_PAGE_MAX, SHOT_LOG_CAPACITY = 1000, 120, 1000
-STATS_WINDOWS, FILTER_MAX = (10, 50, 100), 8
+STATS_WINDOWS, FILTER_MAX = (10, 25, 50, 100), 8
 # Home fields the controller computes per stream session and every page runs locally: a replay
 # moves them on (the firmware's src/tests/fixtures/companion_replay_v1.json lists them).
 CLOCKS = ("timeUtcSec",)
