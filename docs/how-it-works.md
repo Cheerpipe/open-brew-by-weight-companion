@@ -759,7 +759,8 @@ while the controller is off still reports it and answers the reads below.
   controller's local days (since 1970-01-01, both included, as the
   controller's `days`): the dated shots in it, up to their newest 1,000. The header's preset chart, its consistency guard flags (`cons.g`)
   and its cut accuracy series (`cut`) follow `active`, as the controller's
-  follow a page's `preset`. When the copy is behind `epoch`, the companion syncs the shots at
+  follow a page's `preset`; with `active` 0 (All) `cut` covers every preset's
+  weight cuts, each against its own target. When the copy is behind `epoch`, the companion syncs the shots at
   once and waits up to 8 s; it also syncs as soon as the live Stats frames a
   screen receives show a new shot. While the controller holds sync (or a
   request waits for it), the newest complete header answers at once with its

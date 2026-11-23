@@ -118,6 +118,7 @@ class Consistency(TypedDict):
 
 class Cut(TypedDict):
     t: int | list[int]
+    p: int | list[int]
     e: list[int]
     g: NotRequired[list[int]]
 
@@ -135,7 +136,7 @@ class Header(Aggregate):
 
 
 class CutHeader(Header):
-    """A header whose chosen preset has weight cuts: their series."""
+    """A header whose chosen preset (or, with All, any) has weight cuts."""
 
     cut: Cut
 
@@ -419,12 +420,12 @@ def header(
         "facets": {"presets": presets, "scales": scales},
         "preset": active,
     }
-    # The chosen preset's newest `window` weight cuts with a settled yield, oldest first.
+    # The newest `window` weight cuts of the chosen preset, or of every preset
+    # with All, with a settled yield, oldest first, each against its own target.
     cuts = [
         record
         for record in scoped
-        if active
-        and record.preset == active
+        if (not active or record.preset == active)
         and record.eligible()
         and record.auto
         and record.goal > 0
@@ -435,6 +436,9 @@ def header(
             "t": cuts[0].goal
             if all(record.goal == cuts[0].goal for record in cuts)
             else [record.goal for record in cuts],
+            "p": cuts[0].preset
+            if all(record.preset == cuts[0].preset for record in cuts)
+            else [record.preset for record in cuts],
             "e": [known(record.actual) - 10 * record.goal for record in cuts],
         }
         if any(record.guard for record in cuts):

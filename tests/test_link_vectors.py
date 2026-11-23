@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = ROOT / "tests/fixtures/companion-records-v1.vectors.json"
-SHA256 = "beb8376cf03d6424334c2f42beac07532106e48a9c7d12c6ffb22178fb66f2f2"
+SHA256 = "4758c011031f9e4dbff229239dd88d50e95ea525f861dc8f3b2ea313262c2f7d"
 DEVICE = "AA:BB:CC:DD:EE:FF"
 
 
