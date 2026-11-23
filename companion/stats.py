@@ -259,8 +259,12 @@ def matches(
     )
 
 
-def aggregate(records: Iterable[Record], window: int) -> Aggregate:
-    """shotLogStatsView and buildIntegrationStats without the window, total and durations."""
+def aggregate(
+    records: Iterable[Record], window: int, days: tuple[int, int] | None = None
+) -> Aggregate:
+    """shotLogStatsView and buildIntegrationStats without the window, total and durations. A
+    range of days averages over all its days, back to the oldest covered shot's day when it
+    holds more shots than the window."""
     count = flows = bbw = timed = duration = actual = errors = flow = 0
     newest = oldest = -1
     for record in records:
@@ -284,7 +288,13 @@ def aggregate(records: Iterable[Record], window: int) -> Aggregate:
             day = record.local // 86400
             newest = max(newest, day)
             oldest = day if oldest < 0 or oldest > day else oldest
-    span = newest - oldest if newest >= 0 and oldest >= 0 else 0
+    span = (
+        days[1] - (days[0] if count < window or oldest < 0 else oldest)
+        if days
+        else newest - oldest
+        if newest >= 0 and oldest >= 0
+        else 0
+    )
 
     def printed(value: float, places: int) -> float:
         return float(f"{value:.{places}f}")
@@ -357,7 +367,7 @@ def header(
         if days is None
         or (record.wall and record.local and days[0] <= record.local // 86400 <= days[1])
     ]
-    built = aggregate(scoped, window)
+    built = aggregate(scoped, window, days)
     timed, own, found = [], 0, 0
     for record in scoped:
         if found >= window:
