@@ -44,7 +44,8 @@ COLUMNS = (
     "extractionGuardEnabled,extractionExtended,slowExtractionGuardEnabled,slowExtractionExtended,"
     "stopDetail,cutLineG,arrivalS,verdict,channeling,scaleLossSource,estimatedG,blind,fastBeforeS,"
     "slowAfterS,fastMarginG,slowMarginG,delayS,wallS,fastRampS,slowRampS,fastCurve,slowCurve,"
-    "fastCurveHardness,slowCurveHardness,dripDelayS,actualWeightSource,rating,badReason,number"
+    "fastCurveHardness,slowCurveHardness,dripDelayS,actualWeightSource,rating,badReason,number,"
+    "dripNote"
 )
 NAMES = COLUMNS.split(",")
 FRAME_BYTES = 8192  # kStatsStreamFrameBytes
