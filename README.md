@@ -202,6 +202,19 @@ controller's history fills up:
   archive again. Forgetting the companion in Admin deletes the archive with
   the log; export it first if you want to keep it.
 
+### In Home Assistant
+
+The Stats cards of the
+[Open Brew by Weight integration](https://github.com/Cheerpipe/ha-open-brew-by-weight)
+read the same archive, so your Home Assistant dashboard charts your whole
+history too, with your last 500 or 1,000 shots to choose from. There's nothing to
+set up: Home Assistant finds the companion through the controller.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Cheerpipe/ha-open-brew-by-weight/main/docs/images/dashboard/stats-dark.png">
+  <img src="https://raw.githubusercontent.com/Cheerpipe/ha-open-brew-by-weight/main/docs/images/dashboard/stats-light.png" alt="A Home Assistant dashboard with the shot time, shot consistency and cut accuracy cards next to the last shot's weight and flow">
+</picture>
+
 ## La Marzocco
 
 On a Linea Micra, turn on **La Marzocco** in **Admin → Companion** after
